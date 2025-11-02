@@ -1,3 +1,4 @@
+// src/app/categories/pokemon/sets/[id]/page.tsx
 import "server-only";
 import Link from "next/link";
 import Image from "next/image";
@@ -14,8 +15,8 @@ type SetRow = {
   series: string | null;
   ptcgo_code: string | null;
   release_date: string | null;
-  logo_url: string | null;    // COALESCE("images.logo", logo_url)
-  symbol_url: string | null;  // COALESCE("images.symbol", symbol_url)
+  logo_url: string | null;
+  symbol_url: string | null;
 };
 
 type CardRow = {
@@ -24,27 +25,25 @@ type CardRow = {
   rarity: string | null;
   small_image: string | null;
   large_image: string | null;
-  cf_image_small_id: string | null;
-  cf_image_large_id: string | null;
 };
 
 /* ---------- Helpers ---------- */
 const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
 
-function parsePerPage(v?: string) {
-  const n = Number(v ?? 30);
+function parsePerPage(v?: string | string[]) {
+  const s = Array.isArray(v) ? v[0] : v;
+  const n = Number(s ?? 30);
   return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 30;
 }
-function parsePage(v?: string) {
-  const n = Number(v ?? 1);
+function parsePage(v?: string | string[]) {
+  const s = Array.isArray(v) ? v[0] : v;
+  const n = Number(s ?? 1);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
-function parseBool(v?: string) {
-  if (!v) return false;
-  const s = v.toLowerCase();
+function parseBool(v?: string | string[]) {
+  const s = (Array.isArray(v) ? v[0] : v)?.toLowerCase();
   return s === "1" || s === "true" || s === "on" || s === "yes";
 }
-
 function buildHref(
   base: string,
   qs: { q?: string | null; page?: number; perPage?: number; rares?: boolean; holo?: boolean }
@@ -58,8 +57,6 @@ function buildHref(
   const s = p.toString();
   return s ? `${base}?${s}` : base;
 }
-
-/** prefer CF > large > small (kept simple; unoptimized external images) */
 function bestCardImg(c: CardRow): string | null {
   if (c.large_image) return c.large_image;
   if (c.small_image) return c.small_image;
@@ -72,90 +69,129 @@ export default async function SetDetailPage({
   searchParams,
 }: {
   params: { id: string };
-  searchParams?: { q?: string; page?: string; perPage?: string; rares?: string; holo?: string };
+  searchParams?: Record<string, string | string[] | undefined>;
 }) {
-  const setId = decodeURIComponent(params.id ?? "");
-  const baseHref = `/categories/pokemon/sets/${encodeURIComponent(setId)}`;
+  // URL segment can be: set id (e.g., "sv9") OR a name slug ("White-Flare")
+  const rawParam = params.id ?? "";
+  const setParam = decodeURIComponent(rawParam).trim();
+  const nameGuess = setParam.replace(/-/g, " ").trim();
+  const likeGuess = `%${nameGuess}%`;
+  const baseHref = `/categories/pokemon/sets/${encodeURIComponent(setParam)}`;
 
-  const q = (searchParams?.q ?? "").trim() || null;
+  const q = (Array.isArray(searchParams?.q) ? searchParams?.q[0] : searchParams?.q)?.trim() || null;
   const perPage = parsePerPage(searchParams?.perPage);
   const reqPage = parsePage(searchParams?.page);
   const raresOnly = parseBool(searchParams?.rares);
   const holoOnly = parseBool(searchParams?.holo);
 
-  /* 1) Set row (prefer dotted image columns if present) */
-  const setSql = sql`
-  SELECT
-    id,
-    name,
-    series,
-    ptcgo_code,
-    release_date,
-    COALESCE(unlimited, logo_url)  AS logo_url,
-    COALESCE(expanded,  symbol_url) AS symbol_url
-  FROM tcg_sets
-  WHERE id = ${setId}
-  LIMIT 1
-`;
-  const setRow = (await db.execute<SetRow>(setSql)).rows?.[0];
+  /* 1) Resolve the set (try the view first; then fallback to base table). */
+  let setRow: SetRow | undefined;
+
+  try {
+    const res = await db.execute<SetRow>(sql`
+      SELECT id, name, series, ptcgo_code, release_date, logo_url, symbol_url
+      FROM v_tcg_sets_images
+      WHERE id = ${setParam}
+         OR lower(ptcgo_code) = lower(${setParam})
+         OR lower(name) = lower(${nameGuess})
+         OR name ILIKE ${likeGuess}
+      ORDER BY
+        CASE WHEN id = ${setParam} THEN 0
+             WHEN lower(ptcgo_code) = lower(${setParam}) THEN 1
+             WHEN lower(name) = lower(${nameGuess}) THEN 2
+             ELSE 3
+        END,
+        release_date DESC NULLS LAST
+      LIMIT 1
+    `);
+    setRow = res.rows?.[0];
+  } catch {
+    // view may not exist; fall through
+  }
+
+  if (!setRow) {
+    const res = await db.execute<SetRow>(sql`
+      SELECT
+        id,
+        name,
+        series,
+        ptcgo_code,
+        release_date,
+        COALESCE(unlimited, logo_url)   AS logo_url,
+        COALESCE(expanded,  symbol_url) AS symbol_url
+      FROM tcg_sets
+      WHERE id = ${setParam}
+         OR lower(ptcgo_code) = lower(${setParam})
+         OR lower(name) = lower(${nameGuess})
+         OR name ILIKE ${likeGuess}
+      ORDER BY
+        CASE WHEN id = ${setParam} THEN 0
+             WHEN lower(ptcgo_code) = lower(${setParam}) THEN 1
+             WHEN lower(name) = lower(${nameGuess}) THEN 2
+             ELSE 3
+        END,
+        release_date DESC NULLS LAST
+      LIMIT 1
+    `);
+    setRow = res.rows?.[0];
+  }
+
   if (!setRow) {
     return (
       <section className="space-y-4">
         <h1 className="text-2xl font-bold text-white">Set not found</h1>
-        <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">
-          ← Back to all sets
-        </Link>
+        <p className="text-white/70 text-sm break-all">Looked up: <code>{setParam}</code></p>
+        <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">← Back to all sets</Link>
       </section>
     );
   }
 
-  /* --- Build WHERE conditions --- */
-  const conditions = [sql`set_id = ${setId}`];
+  // Use the canonical set ID we resolved to load cards
+  const canonicalSetId = setRow.id;
 
+  /* --- Card filters --- */
+  const conditions = [sql`set_id = ${canonicalSetId}`];
   if (q) {
     conditions.push(
       sql`(name ILIKE ${"%" + q + "%"} OR rarity ILIKE ${"%" + q + "%"} OR id ILIKE ${"%" + q + "%"})`
     );
   }
   if (raresOnly && holoOnly) {
-    // Rare AND Holo/Foil
-    conditions.push(
-      sql`(rarity ILIKE '%Rare%' AND (rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%'))`
-    );
+    conditions.push(sql`(rarity ILIKE '%Rare%' AND (rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%'))`);
   } else if (raresOnly) {
-    // Anything that contains "Rare" (covers Rare, Ultra Rare, Secret Rare, etc.)
     conditions.push(sql`(rarity ILIKE '%Rare%')`);
   } else if (holoOnly) {
-    // Holo or Foil variants
     conditions.push(sql`(rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%')`);
   }
-
   const whereSql = sql.join(conditions, sql` AND `);
 
-  /* 2) Count */
-  const countSql = sql`SELECT COUNT(*)::int AS count FROM tcg_cards WHERE ${whereSql}`;
-  const total = (await db.execute<{ count: number }>(countSql)).rows?.[0]?.count ?? 0;
+  /* Count + page slice */
+  const total =
+    (
+      await db.execute<{ count: number }>(
+        sql`SELECT COUNT(*)::int AS count FROM tcg_cards WHERE ${whereSql}`
+      )
+    ).rows?.[0]?.count ?? 0;
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
   const page = Math.min(totalPages, reqPage);
   const offset = (page - 1) * perPage;
 
-  /* 3) Page of cards (sort by name then id since there’s no number column) */
-  const cardsSql = sql`
-    SELECT
-      id,
-      name,
-      rarity,
-      small_image,
-      large_image,
-      cf_image_small_id,
-      cf_image_large_id
-    FROM tcg_cards
-    WHERE ${whereSql}
-    ORDER BY name ASC NULLS LAST, id ASC
-    LIMIT ${perPage} OFFSET ${offset}
-  `;
-  const cards = (await db.execute<CardRow>(cardsSql)).rows ?? [];
+  const cards =
+    (
+      await db.execute<CardRow>(sql`
+        SELECT
+          id,
+          name,
+          rarity,
+          small_image,
+          large_image
+        FROM tcg_cards
+        WHERE ${whereSql}
+        ORDER BY name ASC NULLS LAST, id ASC
+        LIMIT ${perPage} OFFSET ${offset}
+      `)
+    ).rows ?? [];
 
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + perPage, total);
@@ -178,7 +214,7 @@ export default async function SetDetailPage({
             {banner ? (
               <Image
                 src={banner}
-                alt={setRow.name ?? setRow.id}
+                alt={setRow.name ?? setParam}
                 fill
                 unoptimized
                 className="object-contain"
@@ -190,14 +226,12 @@ export default async function SetDetailPage({
             )}
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-white">{setRow.name ?? setRow.id}</h1>
+            <h1 className="text-2xl font-bold text-white">{setRow.name ?? setParam}</h1>
             {subtitle && <div className="text-sm text-white/80">{subtitle}</div>}
           </div>
         </div>
 
-        <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">
-          ← All sets
-        </Link>
+        <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">← All sets</Link>
       </div>
 
       {/* Toolbar */}
@@ -215,15 +249,9 @@ export default async function SetDetailPage({
             {holoOnly ? <input type="hidden" name="holo" value="1" /> : null}
             <input type="hidden" name="page" value="1" />
             <label htmlFor="pp" className="sr-only">Per page</label>
-            <select
-              id="pp"
-              name="perPage"
-              defaultValue={String(perPage)}
-              className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white"
-            >
-              {PER_PAGE_OPTIONS.map((n) => (
-                <option key={n} value={n}>{n}</option>
-              ))}
+            <select id="pp" name="perPage" defaultValue={String(perPage)}
+              className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white">
+              {PER_PAGE_OPTIONS.map((n) => (<option key={n} value={n}>{n}</option>))}
             </select>
             <button type="submit" className="rounded-md border border-white/20 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20">
               Apply
@@ -285,10 +313,7 @@ export default async function SetDetailPage({
           {cards.map((c) => {
             const img = bestCardImg(c);
             return (
-              <li
-                key={c.id}
-                className="rounded-xl border border-white/10 bg-white/5 overflow-hidden backdrop-blur-sm hover:bg-white/10 hover:border-white/20 transition"
-              >
+              <li key={c.id} className="rounded-xl border border-white/10 bg-white/5 overflow-hidden backdrop-blur-sm hover:bg-white/10 hover:border-white/20 transition">
                 <Link href={`/categories/pokemon/cards/${encodeURIComponent(c.id)}`} className="block">
                   <div className="relative w-full" style={{ aspectRatio: "3 / 4" }}>
                     {img ? (
@@ -321,25 +346,15 @@ export default async function SetDetailPage({
           <Link
             href={buildHref(baseHref, { q, perPage, rares: raresOnly, holo: holoOnly, page: Math.max(1, page - 1) })}
             aria-disabled={page === 1}
-            className={`rounded-md border px-3 py-1 ${
-              page === 1
-                ? "pointer-events-none border-white/10 text-white/40"
-                : "border-white/20 text-white hover:bg-white/10"
-            }`}
+            className={`rounded-md border px-3 py-1 ${page === 1 ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"}`}
           >
             ← Prev
           </Link>
-          <span className="px-2 text-white/80">
-            Page {page} of {Math.max(1, Math.ceil(total / perPage))}
-          </span>
+          <span className="px-2 text-white/80">Page {page} of {Math.max(1, Math.ceil(total / perPage))}</span>
           <Link
             href={buildHref(baseHref, { q, perPage, rares: raresOnly, holo: holoOnly, page: page + 1 })}
             aria-disabled={offset + perPage >= total}
-            className={`rounded-md border px-3 py-1 ${
-              offset + perPage >= total
-                ? "pointer-events-none border-white/10 text-white/40"
-                : "border-white/20 text-white hover:bg-white/10"
-            }`}
+            className={`rounded-md border px-3 py-1 ${offset + perPage >= total ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"}`}
           >
             Next →
           </Link>
