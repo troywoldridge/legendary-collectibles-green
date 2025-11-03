@@ -10,19 +10,19 @@ export const dynamic = "force-dynamic";
 
 /* ---------- Types ---------- */
 type SetRow = {
-  id: string;              // canonical set_code
+  id: string;              // canonical set_name
   name: string | null;     // set_name
-  series: string | null;   // (YGO: null)
-  ptcgo_code?: string | null; // (YGO: null)
-  release_date: string | null; // (YGO: null)
-  logo_url: string | null; // sample small image
-  symbol_url: string | null; // sample large image
+  series: string | null;
+  ptcgo_code?: string | null;
+  release_date: string | null;
+  logo_url: string | null;
+  symbol_url: string | null;
 };
 
 type ItemRow = {
   id: string;              // ygo_cards.card_id
   name: string | null;
-  rarity: string | null;   // ygo_card_sets.set_rarity
+  rarity: string | null;
   small_image: string | null;
   large_image: string | null;
 };
@@ -74,7 +74,8 @@ function bestImg(i: ItemRow): string | null {
   return null;
 }
 
-/* ---------- Real data ---------- */
+/* ---------- Data ---------- */
+/** Resolve a route param (which might be a set_name or an old set_code) to the canonical set_name. */
 async function getSet(param: string): Promise<SetRow | null> {
   const nameGuess = param.replace(/-/g, " ").trim();
   const likeGuess = `%${nameGuess}%`;
@@ -84,8 +85,8 @@ async function getSet(param: string): Promise<SetRow | null> {
       await db.execute<SetRow>(sql`
         WITH base AS (
           SELECT
-            s.set_code AS id,
-            MIN(s.set_name) AS name,
+            s.set_name AS id,
+            s.set_name AS name,
             NULL::text AS series,
             NULL::text AS ptcgo_code,
             NULL::text AS release_date,
@@ -93,19 +94,20 @@ async function getSet(param: string): Promise<SetRow | null> {
             MIN(img.image_url)       AS symbol_url
           FROM ygo_card_sets s
           LEFT JOIN ygo_card_images img ON img.card_id = s.card_id
-          WHERE s.set_code = ${param}
-             OR lower(s.set_name) = lower(${nameGuess})
-             OR s.set_name ILIKE ${likeGuess}
-          GROUP BY s.set_code
+          WHERE
+               lower(s.set_name) = lower(${nameGuess})     -- exact name
+            OR s.set_name ILIKE ${likeGuess}               -- fuzzy name
+            OR s.set_code = ${param}                       -- backward compat (old URLs by code)
+          GROUP BY s.set_name
         )
         SELECT *
         FROM base
         ORDER BY
-          CASE WHEN id = ${param} THEN 0
-               WHEN lower(name) = lower(${nameGuess}) THEN 1
-               ELSE 2
+          CASE
+            WHEN lower(id) = lower(${nameGuess}) THEN 0
+            ELSE 1
           END,
-          name ASC NULLS LAST
+          id ASC
         LIMIT 1
       `)
     ).rows?.[0] ?? null;
@@ -114,18 +116,20 @@ async function getSet(param: string): Promise<SetRow | null> {
 }
 
 async function getItems(_opts: {
-  setId: string;           // canonical set_code
+  setName: string;        // canonical set_name
   q: string | null;
   offset: number;
   limit: number;
   raresOnly: boolean;
   holoOnly: boolean;
 }): Promise<{ rows: ItemRow[]; total: number }> {
-  const conds = [sql`s.set_code = ${_opts.setId}`];
+  const conds = [sql`s.set_name = ${_opts.setName}`];
+
   if (_opts.q) {
     const like = `%${_opts.q}%`;
     conds.push(sql`(c.name ILIKE ${like} OR c.card_id ILIKE ${like})`);
   }
+
   if (_opts.raresOnly && _opts.holoOnly) {
     conds.push(sql`(s.set_rarity ILIKE '%Rare%' AND (s.set_rarity ILIKE '%Holo%' OR s.set_rarity ILIKE '%Foil%'))`);
   } else if (_opts.raresOnly) {
@@ -178,13 +182,11 @@ export default async function YugiohSetDetailPage({
   const { id: rawId } = await params;
   const sp = await searchParams;
 
-  const setParam = decodeURIComponent(rawId ?? "").trim();
+  const inputParam = decodeURIComponent(rawId ?? "").trim();
+  const setRow = await getSet(inputParam);
+  const canonicalSetName = setRow?.name ?? inputParam; // fall back to input if needed
 
-  // Resolve the set (so we can use canonical set_code for queries)
-  const setRow = await getSet(setParam);
-  const canonicalSetId = setRow?.id ?? setParam;
-
-  const baseHref = `${CATEGORY.baseListHref}/${encodeURIComponent(canonicalSetId)}`;
+  const baseHref = `${CATEGORY.baseListHref}/${encodeURIComponent(canonicalSetName)}`;
 
   const q = (Array.isArray(sp?.q) ? sp.q[0] : sp?.q)?.trim() || null;
   const perPage = parsePerPage(sp?.perPage);
@@ -193,7 +195,7 @@ export default async function YugiohSetDetailPage({
   const holoOnly = parseBool(sp?.holo);
 
   const { rows, total } = await getItems({
-    setId: canonicalSetId,
+    setName: canonicalSetName,
     q,
     offset: (reqPage - 1) * perPage,
     limit: perPage,
@@ -218,7 +220,7 @@ export default async function YugiohSetDetailPage({
           <div className="relative h-20 w-36 shrink-0 rounded-lg bg-white/5 ring-1 ring-white/10 overflow-hidden">
             <Image
               src={banner}
-              alt={setRow?.name ?? canonicalSetId}
+              alt={canonicalSetName}
               fill
               unoptimized
               className="object-contain"
@@ -228,7 +230,7 @@ export default async function YugiohSetDetailPage({
           </div>
           <div>
             <h1 className="text-2xl font-bold text-white">
-              {CATEGORY.label}: {setRow?.name ?? canonicalSetId}
+              {CATEGORY.label}: {canonicalSetName}
             </h1>
             <div className="text-sm text-white/80">
               Set browser & card index

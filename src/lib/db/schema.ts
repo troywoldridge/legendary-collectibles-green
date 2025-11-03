@@ -11,8 +11,14 @@ import {
   timestamp,
   numeric,
   uuid,
-  bigserial
+  jsonb,
+  primaryKey,
+  bigserial,
+  bigint
 } from "drizzle-orm/pg-core";
+
+import { sql } from "drizzle-orm";
+import { relations } from "drizzle-orm";
 
 /**
  * E-commerce tables
@@ -328,14 +334,240 @@ export const tcgCardPricesCardmarketHistory = pgTable("tcg_card_prices_cardmarke
   reverseHoloAvg30: numeric("reverse_holo_avg30", { precision: 12, scale: 2 }),
 });
 
-export const ygoCardPricesHistory = pgTable("ygo_card_prices_history", {
+// -----------------------------
+// ygo_cards
+// -----------------------------
+export const ygoCards = pgTable(
+  "ygo_cards",
+  {
+    cardId: text("card_id").notNull(), // PK
+    name: text("name").notNull(),
+    type: text("type"),
+    desc: text("desc"),
+    atk: integer("atk"),
+    def: integer("def"),
+    level: integer("level"),
+    race: text("race"),
+    attribute: text("attribute"),
+    archetype: text("archetype"),
+    ygoprodeckUrl: text("ygoprodeck_url"),
+    linkval: integer("linkval"),
+    scale: integer("scale"),
+    linkmarkers: text("linkmarkers").array(),
+    hasEffect: boolean("has_effect"),
+    staple: boolean("staple"),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.cardId], name: "ygo_cards_pkey" }),
+  })
+);
+export const ygoCardsRelations = relations(ygoCards, ({ one, many }) => ({
+  prices: one(ygoCardPrices, {
+    fields: [ygoCards.cardId],
+    references: [ygoCardPrices.cardId],
+  }),
+  banlist: one(ygoCardBanlist, {
+    fields: [ygoCards.cardId],
+    references: [ygoCardBanlist.cardId],
+  }),
+  images: many(ygoCardImages),
+  priceHistory: many(ygoCardPricesHistory),
+  sets: many(ygoCardSets),
+}));
+
+// -----------------------------
+// ygo_card_prices
+// -----------------------------
+export const ygoCardPrices = pgTable(
+  "ygo_card_prices",
+  {
+    cardId: text("card_id")
+      .notNull()
+      .references(() => ygoCards.cardId, { onDelete: "cascade" }),
+    amazonPrice: text("amazon_price"),
+    cardmarketPrice: text("cardmarket_price"),
+    tcgplayerPrice: text("tcgplayer_price"),
+    ebayPrice: text("ebay_price"),
+    coolstuffincPrice: text("coolstuffinc_price"),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.cardId], name: "ygo_card_prices_pkey" }),
+  })
+);
+
+// -----------------------------
+// ygo_card_prices_history
+// -----------------------------
+export const ygoCardPricesHistory = pgTable(
+  "ygo_card_prices_history",
+  {
+    // DB already has a sequence default; we don't need to re-declare it in Drizzle
+    id: bigint("id", { mode: "number" }).notNull().primaryKey(),
+    cardId: text("card_id")
+      .notNull()
+      .references(() => ygoCards.cardId, { onDelete: "cascade" }),
+    capturedAt: timestamp("captured_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    sourceUpdatedAt: timestamp("source_updated_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    tcgplayerPrice: numeric("tcgplayer_price", { precision: 12, scale: 2 }),
+    cardmarketPrice: numeric("cardmarket_price", { precision: 12, scale: 2 }),
+    ebayPrice: numeric("ebay_price", { precision: 12, scale: 2 }),
+    amazonPrice: numeric("amazon_price", { precision: 12, scale: 2 }),
+    coolstuffincPrice: numeric("coolstuffinc_price", { precision: 12, scale: 2 }),
+  }
+);
+
+export const ygoCardPricesHistoryRelations = relations(
+  ygoCardPricesHistory,
+  ({ one }) => ({
+    card: one(ygoCards, {
+      fields: [ygoCardPricesHistory.cardId],
+      references: [ygoCards.cardId],
+    }),
+  })
+);
+
+// -----------------------------
+// ygo_card_images
+// -----------------------------
+export const ygoCardImages = pgTable(
+  "ygo_card_images",
+  {
+    cardId: text("card_id")
+      .notNull()
+      .references(() => ygoCards.cardId, { onDelete: "cascade" }),
+    imageUrl: text("image_url").notNull(),
+    imageUrlSmall: text("image_url_small"),
+    imageId: text("image_id"),
+  },
+  (t) => ({
+    pk: primaryKey({
+      columns: [t.cardId, t.imageUrl],
+      name: "ygo_card_images_pkey",
+    }),
+  })
+);
+
+export const ygoCardImagesRelations = relations(ygoCardImages, ({ one }) => ({
+  card: one(ygoCards, {
+    fields: [ygoCardImages.cardId],
+    references: [ygoCards.cardId],
+  }),
+}));
+
+// -----------------------------
+// ygo_card_banlist
+// -----------------------------
+export const ygoCardBanlist = pgTable(
+  "ygo_card_banlist",
+  {
+    cardId: text("card_id")
+      .notNull()
+      .references(() => ygoCards.cardId, { onDelete: "cascade" }),
+    banTcg: text("ban_tcg"),
+    banOcg: text("ban_ocg"),
+    banGoat: text("ban_goat"),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.cardId], name: "ygo_card_banlist_pkey" }),
+  })
+);
+
+// -----------------------------
+// ygo_card_sets  (minimal columns used in your queries)
+// If your actual DDL differs, tweak below to match Neon exactly.
+// -----------------------------
+export const ygoCardSets = pgTable(
+  "ygo_card_sets",
+  {
+    cardId: text("card_id")
+      .notNull()
+      .references(() => ygoCards.cardId, { onDelete: "cascade" }),
+    setName: text("set_name"),
+    setCode: text("set_code"),
+    setRarity: text("set_rarity"),
+  },
+  (t) => ({
+    // matches common PK shape for YGO exports
+    pk: primaryKey({ columns: [t.cardId, t.setCode] }),
+  })
+);
+
+export const ygoCardSetsRelations = relations(ygoCardSets, ({ one }) => ({
+  card: one(ygoCards, {
+    fields: [ygoCardSets.cardId],
+    references: [ygoCards.cardId],
+  }),
+}));
+
+// -----------------------------
+// ygo_raw_dump
+// -----------------------------
+export const ygoRawDump = pgTable(
+  "ygo_raw_dump",
+  {
+    id: text("id").notNull().default("cardinfo_v7"),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+    payload: jsonb("payload").notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.id], name: "ygo_raw_dump_pkey" }),
+  })
+);
+
+// -----------------------------
+// Convenient TS types
+// -----------------------------
+export type YgoCard = typeof ygoCards.$inferSelect;
+export type NewYgoCard = typeof ygoCards.$inferInsert;
+
+export type YgoCardPrice = typeof ygoCardPrices.$inferSelect;
+export type NewYgoCardPrice = typeof ygoCardPrices.$inferInsert;
+
+export type YgoCardPriceHistory = typeof ygoCardPricesHistory.$inferSelect;
+export type NewYgoCardPriceHistory = typeof ygoCardPricesHistory.$inferInsert;
+
+export type YgoCardImage = typeof ygoCardImages.$inferSelect;
+export type NewYgoCardImage = typeof ygoCardImages.$inferInsert;
+
+export type YgoCardBanlist = typeof ygoCardBanlist.$inferSelect;
+export type NewYgoCardBanlist = typeof ygoCardBanlist.$inferInsert;
+
+export type YgoCardSet = typeof ygoCardSets.$inferSelect;
+export type NewYgoCardSet = typeof ygoCardSets.$inferInsert;
+
+export type YgoRawDump = typeof ygoRawDump.$inferSelect;
+export type NewYgoRawDump = typeof ygoRawDump.$inferInsert;
+
+export const funkoPops = pgTable("funko_pops", {
   id: bigserial("id", { mode: "number" }).primaryKey(),
-  cardId: text("card_id").notNull(),
-  capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
-  sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }),
-  tcgplayerPrice: numeric("tcgplayer_price", { precision: 12, scale: 2 }),
-  cardmarketPrice: numeric("cardmarket_price", { precision: 12, scale: 2 }),
-  ebayPrice: numeric("ebay_price", { precision: 12, scale: 2 }),
-  amazonPrice: numeric("amazon_price", { precision: 12, scale: 2 }),
-  coolstuffincPrice: numeric("coolstuffinc_price", { precision: 12, scale: 2 }),
+  handle: text("handle").notNull().unique(),            // from dataset
+  title: text("title").notNull(),
+  imageUrl: text("image_url"),
+  series: text("series").array(),                       // dataset has an array of series strings
+  raw: jsonb("raw").notNull(),                          // full original object for future fields
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
+
+// Optional helpful indexes (run once via a migration)
+export const funkoPopsTitleIndex = sql`
+  CREATE INDEX IF NOT EXISTS funko_pops_title_trgm
+  ON funko_pops USING gin (title gin_trgm_ops);
+`;
+
+export const funkoPopsSeriesIndex = sql`
+  CREATE INDEX IF NOT EXISTS funko_pops_series_idx
+  ON funko_pops USING gin (series);
+`;
+
+

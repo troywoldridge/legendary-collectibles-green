@@ -1,425 +1,261 @@
 import "server-only";
-import Link from "next/link";
 import Image from "next/image";
+import Link from "next/link";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import YgoCardSearch from "@/components/ygo/YgoCardSearch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ---------- Types ---------- */
-type SearchParams = Record<string, string | string[] | undefined>;
-type Currency = "USD" | "EUR";
-
-type CardCore = {
-  id: string;               // ygo_cards.card_id
-  name: string | null;
+/* ---------------- Types ---------------- */
+type ListRow = {
+  id: string;        // ygo_cards.card_id
+  name: string;
   type: string | null;
-  desc: string | null;
-  atk: number | null;
-  def: number | null;
-  level: number | null;
-  race: string | null;
   attribute: string | null;
-  archetype: string | null;
-  ygoprodeck_url: string | null;
-  linkval: number | null;
-  scale: number | null;
-  linkmarkers: string[] | null;
-  has_effect: boolean | null;
-  staple: boolean | null;
+  race: string | null;
+  thumb: string | null;
 };
 
-type Img = { image_url: string; image_url_small: string | null };
-type SetRow = { set_code: string; set_name: string | null; set_rarity: string | null; set_price: string | null };
-type Prices = {
-  tcgplayer_price: string | null;
-  cardmarket_price: string | null;
-  ebay_price: string | null;
-  amazon_price: string | null;
-  coolstuffinc_price: string | null;
-};
-type Ban = { ban_tcg: string | null; ban_ocg: string | null; ban_goat: string | null };
-type Misc = { konami_id: string | null; misc: any | null };
+type CountRow = { count: string };
 
-/* ---------- Helpers ---------- */
-function readCurrency(sp: SearchParams): Currency {
-  const raw = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency)?.toUpperCase();
-  return raw === "EUR" ? "EUR" : "USD";
-}
-function withParam(baseHref: string, key: string, val: string) {
-  const u = new URL(baseHref, "https://x/");
-  u.searchParams.set(key, val);
-  return u.pathname + (u.search ? u.search : "");
-}
-function safeNum(x: unknown): number | null {
-  const n = typeof x === "number" ? x : Number(x);
-  return Number.isFinite(n) ? n : null;
+/* ---------------- Helpers ---------------- */
+function toInt(v: unknown, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
-/* ---------- Data ---------- */
-async function resolveCardId(param: string): Promise<string | null> {
-  const nameGuess = param.replace(/-/g, " ").trim();
-  const likeGuess = `%${nameGuess}%`;
-
-  const row =
-    (
-      await db.execute<{ card_id: string }>(sql`
-        SELECT card_id
-        FROM ygo_cards
-        WHERE card_id = ${param}
-           OR lower(name) = lower(${nameGuess})
-           OR name ILIKE ${likeGuess}
-        ORDER BY
-          CASE WHEN card_id = ${param} THEN 0
-               WHEN lower(name) = lower(${nameGuess}) THEN 1
-               ELSE 2
-          END,
-          name ASC NULLS LAST,
-          card_id ASC
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null;
-
-  return row?.card_id ?? null;
+function getStr(v: unknown): string | null {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v) && typeof v[0] === "string") return v[0] ?? null;
+  return null;
 }
 
-async function loadCore(cardId: string): Promise<CardCore | null> {
-  const row =
-    (
-      await db.execute<CardCore>(sql`
-        SELECT
-          card_id AS id,
-          name, type, "desc",
-          atk, def, level, race, attribute, archetype,
-          ygoprodeck_url, linkval, scale, linkmarkers, has_effect, staple
-        FROM ygo_cards
-        WHERE card_id = ${cardId}
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null;
-
-  return row;
-}
-
-async function loadImages(cardId: string): Promise<Img[]> {
-  const rows =
-    (
-      await db.execute<Img>(sql`
-        SELECT image_url, image_url_small
-        FROM ygo_card_images
-        WHERE card_id = ${cardId}
-        ORDER BY image_url_small NULLS LAST, image_url ASC
-      `)
-    ).rows ?? [];
-  // de-dup by image_url just in case
-  const seen = new Set<string>();
-  const out: Img[] = [];
-  for (const r of rows) {
-    if (r.image_url && !seen.has(r.image_url)) {
-      seen.add(r.image_url);
-      out.push(r);
-    }
+function qs(next: Record<string, string | number | undefined>) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(next)) {
+    if (v === undefined || v === null || v === "") continue;
+    params.set(k, String(v));
   }
-  return out;
+  const s = params.toString();
+  return s ? `?${s}` : "";
 }
 
-async function loadSets(cardId: string): Promise<SetRow[]> {
-  return (
-    (
-      await db.execute<SetRow>(sql`
-        SELECT set_code, set_name, set_rarity, set_price
-        FROM ygo_card_sets
-        WHERE card_id = ${cardId}
-        ORDER BY set_name ASC NULLS LAST, set_code ASC
-      `)
-    ).rows ?? []
-  );
-}
+/* ---------------- Data ---------------- */
+async function fetchCards(opts: { q: string | null; page: number; per: number }) {
+  const { q, page, per } = opts;
+  const offset = (page - 1) * per;
 
-async function loadPrices(cardId: string): Promise<Prices | null> {
-  return (
-    (
-      await db.execute<Prices>(sql`
-        SELECT tcgplayer_price, cardmarket_price, ebay_price, amazon_price, coolstuffinc_price
-        FROM ygo_card_prices
-        WHERE card_id = ${cardId}
+  if (q) {
+    const countRes = await db.execute<CountRow>(sql`
+      SELECT COUNT(*)::bigint::text AS count
+      FROM ygo_cards c
+      WHERE c.card_id = ${q} OR c.name ILIKE '%' || ${q} || '%'
+    `);
+    const total = Number(countRes.rows?.[0]?.count ?? "0");
+
+    const listRes = await db.execute<ListRow>(sql`
+      SELECT
+        c.card_id AS id,
+        c.name,
+        c.type,
+        c.attribute,
+        c.race,
+        img.thumb
+      FROM ygo_cards c
+      LEFT JOIN LATERAL (
+        SELECT i.image_url_small AS thumb
+        FROM ygo_card_images i
+        WHERE i.card_id = c.card_id
+        ORDER BY (CASE WHEN i.image_url_small IS NOT NULL THEN 0 ELSE 1 END)
         LIMIT 1
-      `)
-    ).rows?.[0] ?? null
-  );
+      ) img ON TRUE
+      WHERE c.card_id = ${q} OR c.name ILIKE '%' || ${q} || '%'
+      ORDER BY
+        CASE WHEN LOWER(c.name) = LOWER(${q}) THEN 0
+             WHEN LOWER(c.name) LIKE LOWER(${q}) || '%' THEN 1
+             ELSE 2
+        END,
+        c.name ASC
+      LIMIT ${per} OFFSET ${offset}
+    `);
+
+    return { rows: (listRes.rows ?? []) as ListRow[], total };
+  }
+
+  const countRes = await db.execute<CountRow>(sql`
+    SELECT COUNT(*)::bigint::text AS count
+    FROM ygo_cards c
+  `);
+  const total = Number(countRes.rows?.[0]?.count ?? "0");
+
+  const listRes = await db.execute<ListRow>(sql`
+    SELECT
+      c.card_id AS id,
+      c.name,
+      c.type,
+      c.attribute,
+      c.race,
+      img.thumb
+    FROM ygo_cards c
+    LEFT JOIN LATERAL (
+      SELECT i.image_url_small AS thumb
+      FROM ygo_card_images i
+      WHERE i.card_id = c.card_id
+      ORDER BY (CASE WHEN i.image_url_small IS NOT NULL THEN 0 ELSE 1 END)
+      LIMIT 1
+    ) img ON TRUE
+    ORDER BY c.name ASC
+    LIMIT ${per} OFFSET ${offset}
+  `);
+
+  return { rows: (listRes.rows ?? []) as ListRow[], total };
 }
 
-async function loadBan(cardId: string): Promise<Ban | null> {
-  return (
-    (
-      await db.execute<Ban>(sql`
-        SELECT ban_tcg, ban_ocg, ban_goat
-        FROM ygo_card_banlist
-        WHERE card_id = ${cardId}
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null
-  );
-}
-
-async function loadMisc(cardId: string): Promise<Misc | null> {
-  const row =
-    (
-      await db.execute<{ konami_id: string | null; misc: any }>(sql`
-        SELECT konami_id, misc
-        FROM ygo_card_misc
-        WHERE card_id = ${cardId}
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null;
-  return row ? { konami_id: row.konami_id, misc: row.misc ?? null } : null;
-}
-
-/* ---------- Page ---------- */
-export default async function YugiohCardDetailPage({
-  params,
+/* ---------------- Page ---------------- */
+export default async function YugiohCardsIndexPage({
   searchParams,
 }: {
-  params: Promise<{ id: string }>;
-  searchParams: Promise<SearchParams>;
+  // matches your Promise-usage style across the app
+  searchParams: Promise<Record<string, unknown>>;
 }) {
-  const { id: rawId } = await params;
   const sp = await searchParams;
-  const currency: Currency = readCurrency(sp);
+  const qRaw = getStr(sp.q);
+  const q = qRaw ? qRaw.trim() : null;
 
-  const cardParam = decodeURIComponent(rawId ?? "").trim();
-  const cardId = (await resolveCardId(cardParam)) ?? cardParam;
+  const per = Math.min(96, toInt(sp.per, 36));
+  const page = Math.max(1, toInt(sp.page, 1));
 
-  const [core, images, sets, prices, ban, misc] = await Promise.all([
-    loadCore(cardId),
-    loadImages(cardId),
-    loadSets(cardId),
-    loadPrices(cardId),
-    loadBan(cardId),
-    loadMisc(cardId),
-  ]);
-
-  if (!core) {
-    return (
-      <section className="space-y-4">
-        <h1 className="text-2xl font-bold text-white">Card not found</h1>
-        <p className="text-white/70 text-sm break-all">Looked up: <code>{cardParam}</code></p>
-        <div className="flex gap-4">
-          <Link href="/categories/yugioh/sets" className="text-sky-300 hover:underline">← Back to YGO sets</Link>
-          <Link href="/categories" className="text-sky-300 hover:underline">← All categories</Link>
-        </div>
-      </section>
-    );
-  }
-
-  const title = core.name ?? core.id;
-  const hero = images[0]?.image_url || images[0]?.image_url_small || null;
-
-  // Prefer shared formatter if available
-  const pricing: any = await import("@/lib/pricing").catch(() => null);
-  const fmt = (v: string | number | null | undefined, cur: Currency) => {
-    if (pricing?.fmtMoney) return pricing.fmtMoney(v, cur);
-    const n = typeof v === "number" ? v : Number(v);
-    if (!Number.isFinite(n)) return v ?? "—";
-    const sym = cur === "EUR" ? "€" : "$";
-    return `${sym}${n.toFixed(2)}`;
-  };
-
-  // Map markets to desired display currency (TCGplayer is USD, Cardmarket is EUR; others assume USD)
-  const cmVal = prices?.cardmarket_price ?? null;
-  const tcgVal = prices?.tcgplayer_price ?? null;
-  const ebayVal = prices?.ebay_price ?? null;
-  const amzVal = prices?.amazon_price ?? null;
-  const csiVal = prices?.coolstuffinc_price ?? null;
-
-  const baseHref = `/categories/yugioh/cards/${encodeURIComponent(core.id)}`;
+  const { rows, total } = await fetchCards({ q, page, per });
+  const pages = Math.max(1, Math.ceil(total / per));
+  const showingFrom = total ? (page - 1) * per + 1 : 0;
+  const showingTo = Math.min(total, page * per);
 
   return (
     <section className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div className="flex items-start gap-4">
-          <div className="relative h-48 w-36 shrink-0 rounded-lg bg-white/5 ring-1 ring-white/10 overflow-hidden">
-            {hero ? (
-              <Image
-                src={hero}
-                alt={title}
-                fill
-                unoptimized
-                className="object-contain"
-                sizes="144px"
-                priority
-              />
-            ) : (
-              <div className="absolute inset-0 grid place-items-center text-white/60 text-xs">No image</div>
-            )}
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold text-white">{title}</h1>
-            <div className="mt-1 flex flex-wrap gap-2 text-xs">
-              {core.type && <span className="rounded bg-white/10 px-2 py-0.5 text-white/90">{core.type}</span>}
-              {core.attribute && <span className="rounded bg-white/10 px-2 py-0.5 text-white/90">Attribute: {core.attribute}</span>}
-              {core.race && <span className="rounded bg-white/10 px-2 py-0.5 text-white/90">Race: {core.race}</span>}
-              {core.archetype && <span className="rounded bg-white/10 px-2 py-0.5 text-white/90">Archetype: {core.archetype}</span>}
-              {core.has_effect != null && <span className="rounded bg-white/10 px-2 py-0.5 text-white/90">{core.has_effect ? "Effect" : "No Effect"}</span>}
-              {core.staple && <span className="rounded bg-white/10 px-2 py-0.5 text-white/90">Staple</span>}
-            </div>
-            {core.ygoprodeck_url && (
-              <div className="mt-2 text-xs">
-                <a href={core.ygoprodeck_url} target="_blank" rel="noopener noreferrer" className="text-sky-300 hover:underline">
-                  View on YGOPRODeck ↗
-                </a>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Currency toggle */}
-        <div className="flex items-center gap-3">
-          <div className="rounded-md border border-white/20 bg-white/10 p-1 text-sm text-white">
-            <span className="px-2">Currency:</span>
-            <Link href={withParam(baseHref, "currency", "USD")} className={`rounded px-2 py-1 ${currency === "USD" ? "bg-white/20" : "hover:bg-white/10"}`}>USD</Link>
-            <Link href={withParam(baseHref, "currency", "EUR")} className={`ml-1 rounded px-2 py-1 ${currency === "EUR" ? "bg-white/20" : "hover:bg-white/10"}`}>EUR</Link>
-          </div>
-          <Link href="/categories/yugioh/sets" className="text-sky-300 hover:underline">
-            ← Back to sets
-          </Link>
+      {/* Search */}
+      <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+        <div className="mb-2 text-sm font-semibold text-white">Search Yu-Gi-Oh! cards</div>
+        <YgoCardSearch initialQuery={q ?? ""} />
+        <div className="mt-2 text-xs text-white/60">
+          Tip: type a name or an exact Card ID to jump to the detail page.
         </div>
       </div>
 
-      {/* Quick stats */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <div className="rounded-lg border border-white/15 bg-white/5 p-4 text-white/90">
-          <div className="text-sm text-white/70">ATK / DEF</div>
-          <div className="mt-1 text-lg font-semibold">
-            {safeNum(core.atk) ?? "—"} / {safeNum(core.def) ?? "—"}
-          </div>
-        </div>
-        <div className="rounded-lg border border-white/15 bg-white/5 p-4 text-white/90">
-          <div className="text-sm text-white/70">Level / Scale / Link</div>
-          <div className="mt-1 text-lg font-semibold">
-            {safeNum(core.level) ?? "—"} / {safeNum(core.scale) ?? "—"} / {safeNum(core.linkval) ?? "—"}
-          </div>
-          {core.linkmarkers?.length ? (
-            <div className="mt-1 text-xs text-white/80">Markers: {core.linkmarkers.join(", ")}</div>
-          ) : null}
-        </div>
-        <div className="rounded-lg border border-white/15 bg-white/5 p-4 text-white/90">
-          <div className="text-sm text-white/70">Card ID</div>
-          <div className="mt-1 text-lg font-semibold">{core.id}</div>
-          {misc?.konami_id && <div className="mt-1 text-xs text-white/80">Konami ID: {misc.konami_id}</div>}
-        </div>
-      </div>
-
-      {/* Prices */}
-      <div className="grid gap-3 md:grid-cols-2">
-        <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-white/90">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">Market Prices</h2>
-            <div className="text-xs text-white/70">Shown in {currency}</div>
-          </div>
-          {!prices ? (
-            <div className="rounded-md border border-white/10 bg-white/5 p-3 text-sm text-white/80">
-              No price row found for this card.
-            </div>
+      {/* Header + meta */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h1 className="text-2xl font-bold text-white">Yu-Gi-Oh! Cards</h1>
+        <div className="text-sm text-white/70">
+          {q ? (
+            <>
+              Showing <span className="text-white">{showingFrom}</span>–
+              <span className="text-white">{showingTo}</span> of{" "}
+              <span className="text-white">{total.toLocaleString()}</span> results for{" "}
+              <span className="text-white">&ldquo;{q}&rdquo;</span>
+            </>
           ) : (
-            <ul className="divide-y divide-white/10">
-              <li className="flex items-center justify-between py-2">
-                <span className="text-white/90">TCGplayer</span>
-                <span className="font-medium">{tcgVal ? fmt(tcgVal, currency) : "—"}</span>
-              </li>
-              <li className="flex items-center justify-between py-2">
-                <span className="text-white/90">Cardmarket</span>
-                <span className="font-medium">{cmVal ? fmt(cmVal, currency) : "—"}</span>
-              </li>
-              <li className="flex items-center justify-between py-2">
-                <span className="text-white/90">eBay</span>
-                <span className="font-medium">{ebayVal ? fmt(ebayVal, currency) : "—"}</span>
-              </li>
-              <li className="flex items-center justify-between py-2">
-                <span className="text-white/90">Amazon</span>
-                <span className="font-medium">{amzVal ? fmt(amzVal, currency) : "—"}</span>
-              </li>
-              <li className="flex items-center justify-between py-2">
-                <span className="text-white/90">CoolStuffInc</span>
-                <span className="font-medium">{csiVal ? fmt(csiVal, currency) : "—"}</span>
-              </li>
-            </ul>
-          )}
-        </div>
-
-        <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-white/90">
-          <h2 className="mb-2 text-lg font-semibold text-white">Banlist</h2>
-          {!ban || (!ban.ban_tcg && !ban.ban_ocg && !ban.ban_goat) ? (
-            <div className="rounded-md border border-white/10 bg-white/5 p-3 text-sm text-white/80">
-              No current ban statuses recorded.
-            </div>
-          ) : (
-            <ul className="space-y-2 text-sm">
-              {ban.ban_tcg && <li className="flex items-center justify-between"><span>TCG</span><span className="font-medium">{ban.ban_tcg}</span></li>}
-              {ban.ban_ocg && <li className="flex items-center justify-between"><span>OCG</span><span className="font-medium">{ban.ban_ocg}</span></li>}
-              {ban.ban_goat && <li className="flex items-center justify-between"><span>Goat</span><span className="font-medium">{ban.ban_goat}</span></li>}
-            </ul>
+            <>
+              Showing <span className="text-white">{showingFrom}</span>–
+              <span className="text-white">{showingTo}</span> of{" "}
+              <span className="text-white">{total.toLocaleString()}</span> cards
+            </>
           )}
         </div>
       </div>
 
-      {/* Sets this card appears in */}
-      <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-white/90">
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">Sets</h2>
-          <Link href="/categories/yugioh/sets" className="text-sky-300 hover:underline text-sm">Browse sets →</Link>
+      {/* Empty state */}
+      {rows.length === 0 ? (
+        <div className="rounded-2xl border border-white/15 bg-white/5 p-6 text-white/80">
+          No cards found{q ? <> for “{q}”</> : null}.
         </div>
-        {sets.length === 0 ? (
-          <div className="rounded-md border border-white/10 bg-white/5 p-3 text-sm text-white/80">
-            No sets recorded for this card.
-          </div>
-        ) : (
-          <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {sets.map((s) => (
-              <li key={s.set_code} className="rounded-md border border-white/10 bg-white/5 px-3 py-2">
-                <div className="text-sm font-medium text-white">
-                  <Link href={`/categories/yugioh/sets/${encodeURIComponent(s.set_code)}`} className="hover:underline">
-                    {s.set_name ?? s.set_code}
+      ) : (
+        <>
+          {/* Grid */}
+          <ul className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3">
+            {rows.map((r: ListRow) => {
+              const hasThumb = typeof r.thumb === "string" && r.thumb.length > 0;
+              return (
+                <li
+                  key={r.id}
+                  className="group rounded-xl border border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/10 transition"
+                >
+                  <Link
+                    href={`/categories/yugioh/cards/${encodeURIComponent(r.id)}`}
+                    className="block p-3"
+                  >
+                    <div className="relative mx-auto mb-2 aspect-[3/4] w-full">
+                      {hasThumb ? (
+                        <Image
+                          src={r.thumb as string}
+                          alt={r.name}
+                          fill
+                          sizes="(max-width: 768px) 50vw, (max-width: 1280px) 25vw, 16vw"
+                          className="object-contain"
+                          unoptimized
+                        />
+                      ) : (
+                        <div className="absolute inset-0 grid place-items-center text-white/60">
+                          No image
+                        </div>
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-white">{r.name}</div>
+                      <div className="truncate text-xs text-white/60">
+                        {r.id}
+                        {r.type ? ` • ${r.type}` : ""}
+                        {r.attribute ? ` • ${r.attribute}` : ""}
+                        {r.race ? ` • ${r.race}` : ""}
+                      </div>
+                    </div>
                   </Link>
-                </div>
-                <div className="mt-1 text-xs text-white/80">
-                  {s.set_rarity ?? "—"}{s.set_price ? ` • ${s.set_price}` : ""}
-                </div>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
-        )}
-      </div>
 
-      {/* Description */}
-      {core.desc && (
-        <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-white/90">
-          <h2 className="mb-2 text-lg font-semibold text-white">Card Text</h2>
-          <p className="whitespace-pre-line text-sm leading-relaxed">{core.desc}</p>
-        </div>
-      )}
+          {/* Pagination */}
+          <nav className="mt-4 flex items-center justify-between gap-2">
+            {/* Prev */}
+            <div>
+              {page > 1 ? (
+                <Link
+                  href={qs({ q: q ?? undefined, page: page - 1, per })}
+                  className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-sky-300 hover:border-white/25 hover:bg-white/10"
+                >
+                  ← Prev
+                </Link>
+              ) : (
+                <span className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white/40">
+                  ← Prev
+                </span>
+              )}
+            </div>
 
-      {/* Gallery (if multiple images) */}
-      {images.length > 1 && (
-        <div className="rounded-xl border border-white/15 bg-white/5 p-4 text-white/90">
-          <h2 className="mb-2 text-lg font-semibold text-white">Gallery</h2>
-          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-            {images.slice(1).map((im) => (
-              <li key={im.image_url} className="relative w-full" style={{ aspectRatio: "3 / 4" }}>
-                <Image
-                  src={im.image_url}
-                  alt={title}
-                  fill
-                  unoptimized
-                  className="object-contain rounded-md border border-white/10 bg-white/5"
-                  sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
-                />
-              </li>
-            ))}
-          </ul>
-        </div>
+            {/* Page status */}
+            <div className="text-sm text-white/70">
+              Page <span className="text-white">{page}</span> of{" "}
+              <span className="text-white">{pages}</span>
+            </div>
+
+            {/* Next */}
+            <div>
+              {page < pages ? (
+                <Link
+                  href={qs({ q: q ?? undefined, page: page + 1, per })}
+                  className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-sky-300 hover:border-white/25 hover:bg-white/10"
+                >
+                  Next →
+                </Link>
+              ) : (
+                <span className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white/40">
+                  Next →
+                </span>
+              )}
+            </div>
+          </nav>
+        </>
       )}
     </section>
   );
