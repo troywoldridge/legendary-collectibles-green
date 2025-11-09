@@ -3,9 +3,13 @@ import Link from "next/link";
 import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { unstable_noStore as noStore } from "next/cache";
 
 export const runtime = "nodejs";
+// fully disable all caching layers for this route
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -23,7 +27,6 @@ type CardThumb = {
 
 const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
 
-// UI filter options
 const COLOR_OPTS = ["White", "Blue", "Black", "Red", "Green", "Colorless"] as const;
 const TYPE_OPTS = [
   "Artifact",
@@ -37,7 +40,6 @@ const TYPE_OPTS = [
 ] as const;
 const RARITY_UI = ["Common", "Uncommon", "Rare", "Mythic Rare", "Special", "Basic Land"] as const;
 
-// mappings to Scryfall values
 const RARITY_MAP: Record<(typeof RARITY_UI)[number], string> = {
   Common: "common",
   Uncommon: "uncommon",
@@ -67,6 +69,8 @@ function parseMulti(sp: SearchParams, key: string): string[] {
   const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
   return [...new Set(list.map((x) => String(x).trim()).filter(Boolean))];
 }
+
+// safer href builder that always writes page/perPage and preserves arrays
 function buildHref(
   base: string,
   qs: {
@@ -80,16 +84,18 @@ function buildHref(
   }
 ) {
   const p = new URLSearchParams();
-  if (qs.q) p.set("q", qs.q);
-  if (qs.set) p.set("set", qs.set);
-  if (qs.page) p.set("page", String(qs.page));
-  if (qs.perPage) p.set("perPage", String(qs.perPage));
-  (qs.color || []).forEach((c) => p.append("color", c));
-  (qs.type || []).forEach((t) => p.append("type", t));
-  (qs.rarity || []).forEach((r) => p.append("rarity", r));
+  if (qs.q != null && qs.q !== "") p.set("q", String(qs.q));
+  if (qs.set != null && qs.set !== "") p.set("set", String(qs.set));
+  // always write page+perPage so Next treats it as a new URL
+  p.set("page", String(qs.page ?? 1));
+  p.set("perPage", String(qs.perPage ?? 60));
+  (qs.color ?? []).forEach((c) => p.append("color", c));
+  (qs.type ?? []).forEach((t) => p.append("type", t));
+  (qs.rarity ?? []).forEach((r) => p.append("rarity", r));
   const s = p.toString();
   return s ? `${base}?${s}` : base;
 }
+
 function orJoin(parts: any[]) {
   if (!parts.length) return sql`TRUE`;
   let expr = parts[0];
@@ -99,8 +105,6 @@ function orJoin(parts: any[]) {
 const fmt = (s?: string | null) => (s == null ? null : Number(s).toFixed(2));
 
 /* ---------------- data ---------------- */
-// ...imports and helpers unchanged...
-
 async function getCards(opts: {
   q: string | null;
   set: string | null;
@@ -110,6 +114,9 @@ async function getCards(opts: {
   offset: number;
   limit: number;
 }): Promise<{ rows: CardThumb[]; total: number }> {
+  // ensure nothing about this call is cached
+  noStore();
+
   const like = opts.q ? `%${opts.q}%` : null;
 
   let where = sql`TRUE`;
@@ -156,7 +163,6 @@ async function getCards(opts: {
         (c.card_faces_raw->0->'image_uris'->>'large'),
         (c.card_faces_raw->0->'image_uris'->>'small')
       ) AS image_url,
-      /* prices with fallback */
       COALESCE(e.effective_usd, s.usd)::text AS price_usd,
       COALESCE(
         TO_CHAR(e.effective_updated_at,'YYYY-MM-DD'),
@@ -173,13 +179,11 @@ async function getCards(opts: {
   return { rows: rowsRes.rows ?? [], total };
 }
 
-
 /* ---------------- page ---------------- */
-export default async function MtgCardsIndex({
-  searchParams,
-}: {
-  searchParams: SearchParams;
-}) {
+export default async function MtgCardsIndex({ searchParams }: { searchParams: SearchParams }) {
+  // belt + suspenders to stop any route caching
+  noStore();
+
   const sp = searchParams;
   const baseHref = "/categories/mtg/cards";
 
@@ -209,16 +213,24 @@ export default async function MtgCardsIndex({
   });
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
-  const page = Math.min(totalPages, reqPage);
+  const page = Math.max(1, Math.min(totalPages, reqPage));
   const offset = (page - 1) * perPage;
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + perPage, total);
+  const isFirst = page <= 1;
+  const isLast = page >= totalPages;
 
   const filterCount = selColors.length + selTypes.length + selRarities.length;
   const filtersOpen = filterCount > 0;
 
   return (
-    <section className="space-y-6">
+    <section
+      key={[
+        q ?? "", set ?? "", perPage, reqPage,
+        selColors.join(","), selTypes.join(","), selRarities.join(","),
+      ].join("|")}
+      className="space-y-6"
+    >
       {/* Header */}
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
@@ -227,7 +239,7 @@ export default async function MtgCardsIndex({
             Search all MTG cards across sets. Filter by color, type, and rarity.
           </div>
         </div>
-        <Link href="/categories/mtg/sets" className="text-sky-300 hover:underline">
+        <Link href="/categories/mtg/sets" className="text-sky-300 hover:underline" prefetch={false}>
           ← Browse sets
         </Link>
       </div>
@@ -265,6 +277,24 @@ export default async function MtgCardsIndex({
           >
             Apply
           </button>
+
+          {/* Quick picks that always work (no JS, no client router) */}
+          <div className="hidden sm:flex items-center gap-2 pl-2">
+            {[30, 60, 120, 240].map((n) => (
+              <a
+                key={`pp-${n}`}
+                href={buildHref(baseHref, {
+                  q, set, color: selColors, type: selTypes, rarity: selRarities,
+                  page: 1, perPage: n,
+                })}
+                className={`rounded-md border px-2.5 py-1 text-sm ${
+                  perPage === n ? "border-white/40 text-white" : "border-white/20 text-white/80 hover:bg-white/10"
+                }`}
+              >
+                {n}
+              </a>
+            ))}
+          </div>
         </form>
       </div>
 
@@ -274,7 +304,6 @@ export default async function MtgCardsIndex({
         <input type="hidden" name="perPage" value={String(perPage)} />
         <input type="hidden" name="page" value="1" />
 
-        {/* Row: search inputs + Filters dropdown + Clear */}
         <div className="flex flex-wrap items-center gap-2">
           <input
             name="q"
@@ -296,12 +325,12 @@ export default async function MtgCardsIndex({
           </button>
 
           {(q || set || filterCount) ? (
-            <Link
+            <a
               href={buildHref(baseHref, { perPage, page: 1 })}
               className="ml-auto rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
             >
               Clear
-            </Link>
+            </a>
           ) : null}
 
           {/* Filters dropdown */}
@@ -313,7 +342,6 @@ export default async function MtgCardsIndex({
               )}
             </summary>
 
-            {/* panel */}
             <div className="z-10 mt-2 w-[min(92vw,900px)] rounded-xl border border-white/10 bg-black/60 p-4 backdrop-blur-md shadow-2xl">
               <div className="grid gap-4">
                 {/* Colors */}
@@ -366,8 +394,6 @@ export default async function MtgCardsIndex({
                     </label>
                   ))}
                 </fieldset>
-
-                {/* (No card variables like `c` should be referenced here) */}
               </div>
             </div>
           </details>
@@ -390,7 +416,7 @@ export default async function MtgCardsIndex({
                 key={c.id}
                 className="rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:bg-white/10 hover:border-white/20 transition"
               >
-                <Link href={href} className="block">
+                <Link href={href} className="block" prefetch={false}>
                   <div className="relative w-full" style={{ aspectRatio: "3 / 4" }}>
                     <Image
                       src={img}
@@ -408,13 +434,10 @@ export default async function MtgCardsIndex({
                         .filter(Boolean)
                         .join(" • ")}
                     </div>
-
-                    {/* ★ Price + Updated (correct scope: inside rows.map) */}
                     <div className="mt-1 text-xs text-white/60">
                       {price ? `$${price}` : "—"}
                       {c.price_updated ? ` • ${c.price_updated}` : ""}
                     </div>
-
                     <div className="mt-0.5 text-[11px] text-white/60 line-clamp-1">{c.type_line ?? ""}</div>
                   </div>
                 </Link>
@@ -427,47 +450,63 @@ export default async function MtgCardsIndex({
       {/* Pager */}
       {total > perPage && (
         <nav className="mt-4 flex items-center justify-center gap-2 text-sm">
-          <Link
+          <a
             href={buildHref(baseHref, {
-              q,
-              set,
-              perPage,
-              page: Math.max(1, page - 1),
-              color: selColors,
-              type: selTypes,
-              rarity: selRarities,
+              q, set, perPage,
+              page: 1,
+              color: selColors, type: selTypes, rarity: selRarities,
             })}
-            aria-disabled={page === 1}
+            aria-disabled={isFirst}
             className={`rounded-md border px-3 py-1 ${
-              page === 1
-                ? "pointer-events-none border-white/10 text-white/40"
-                : "border-white/20 text-white hover:bg-white/10"
+              isFirst ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"
+            }`}
+          >
+            « First
+          </a>
+          <a
+            href={buildHref(baseHref, {
+              q, set, perPage,
+              page: Math.max(1, page - 1),
+              color: selColors, type: selTypes, rarity: selRarities,
+            })}
+            aria-disabled={isFirst}
+            className={`rounded-md border px-3 py-1 ${
+              isFirst ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"
             }`}
           >
             ← Prev
-          </Link>
+          </a>
+
           <span className="px-2 text-white/80">
-            Page {page} of {Math.ceil(total / perPage)}
+            Page {page} of {totalPages}
           </span>
-          <Link
+
+          <a
             href={buildHref(baseHref, {
-              q,
-              set,
-              perPage,
-              page: page + 1,
-              color: selColors,
-              type: selTypes,
-              rarity: selRarities,
+              q, set, perPage,
+              page: Math.min(totalPages, page + 1),
+              color: selColors, type: selTypes, rarity: selRarities,
             })}
-            aria-disabled={offset + perPage >= total}
+            aria-disabled={isLast}
             className={`rounded-md border px-3 py-1 ${
-              offset + perPage >= total
-                ? "pointer-events-none border-white/10 text-white/40"
-                : "border-white/20 text-white hover:bg-white/10"
+              isLast ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"
             }`}
           >
             Next →
-          </Link>
+          </a>
+          <a
+            href={buildHref(baseHref, {
+              q, set, perPage,
+              page: totalPages,
+              color: selColors, type: selTypes, rarity: selRarities,
+            })}
+            aria-disabled={isLast}
+            className={`rounded-md border px-3 py-1 ${
+              isLast ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"
+            }`}
+          >
+            Last »
+          </a>
         </nav>
       )}
     </section>
