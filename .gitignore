@@ -53,3 +53,13 @@ drizzle/
 # misc
 .DS_Store
 *.log
+
+# local data dumps (keep out of git)
+data/scryfall/
+data/mtg/
+*.jsonl
+*.json
+
+# logs & scratch
+logs/
+*.log

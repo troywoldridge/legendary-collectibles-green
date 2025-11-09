@@ -1,4 +1,3 @@
-// src/components/ygo/YgoCardSearch.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -21,6 +20,7 @@ export default function YgoCardSearch({ initialQuery = "" }: { initialQuery?: st
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<Result[]>([]);
   const [idx, setIdx] = useState(-1);
+  const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
 
@@ -40,10 +40,12 @@ export default function YgoCardSearch({ initialQuery = "" }: { initialQuery?: st
       setResults([]);
       setOpen(false);
       setIdx(-1);
+      setError(null);
       return;
     }
 
     setLoading(true);
+    setError(null);
     if (abortRef.current) abortRef.current.abort();
     const ctl = new AbortController();
     abortRef.current = ctl;
@@ -52,21 +54,27 @@ export default function YgoCardSearch({ initialQuery = "" }: { initialQuery?: st
       try {
         const res = await fetch(`/api/ygo/search?q=${encodeURIComponent(q.trim())}`, {
           signal: ctl.signal,
+          cache: "no-store",
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as { results: Result[] };
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          throw new Error(`HTTP ${res.status}${txt ? ` – ${txt}` : ""}`);
+        }
+        const data = (await res.json()) as { results: Result[]; error?: string };
+        if (data.error) throw new Error(data.error);
         setResults(data.results ?? []);
+        setIdx((data.results?.length ?? 0) > 0 ? 0 : -1);
         setOpen(true);
-        setIdx(data.results?.length ? 0 : -1);
-      } catch (_e) {
-        // Silent fail; keep UX smooth
+      } catch (e: unknown) {
+        console.error("YgoCardSearch fetch error:", e);
         setResults([]);
-        setOpen(false);
         setIdx(-1);
+        setOpen(true); // keep panel open to show the error
+        setError("Search failed");
       } finally {
         setLoading(false);
       }
-    }, 200); // debounce
+    }, 200);
 
     return () => {
       clearTimeout(t);
@@ -102,7 +110,7 @@ export default function YgoCardSearch({ initialQuery = "" }: { initialQuery?: st
   };
 
   const placeholder = useMemo(
-    () => "Search Yu-Gi-Oh! cards (name or exact card ID)…",
+    () => "Search Yu-Gi-Oh! cards (name or exact Card ID)…",
     []
   );
 
@@ -116,7 +124,7 @@ export default function YgoCardSearch({ initialQuery = "" }: { initialQuery?: st
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={onKeyDown}
-          onFocus={() => results.length && setOpen(true)}
+          onFocus={() => (results.length || error) && setOpen(true)}
           placeholder={placeholder}
           className="w-full bg-transparent outline-none placeholder-white/50 text-white"
           aria-label="Search Yu-Gi-Oh! cards"
@@ -125,53 +133,61 @@ export default function YgoCardSearch({ initialQuery = "" }: { initialQuery?: st
           <span className="text-xs text-white/60">Searching…</span>
         ) : results.length ? (
           <span className="text-xs text-white/60">{results.length} results</span>
+        ) : error ? (
+          <span className="text-xs text-rose-300">Error</span>
         ) : null}
       </div>
 
-      {open && results.length > 0 && (
+      {open && (
         <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-white/15 bg-black/70 backdrop-blur-md">
-          <ul className="max-h-80 overflow-auto divide-y divide-white/10">
-            {results.map((r, i) => {
-              const active = i === idx;
-              return (
-                <li
-                  key={r.id}
-                  onMouseEnter={() => setIdx(i)}
-                  onMouseDown={(e) => {
-                    e.preventDefault(); // keep focus behavior consistent
-                    go(r);
-                  }}
-                  className={`flex cursor-pointer items-center gap-3 px-3 py-2 transition ${
-                    active ? "bg-white/10" : "hover:bg-white/5"
-                  }`}
-                >
-                  <div className="relative h-10 w-7 shrink-0 rounded">
-                    {r.thumb ? (
-                      <Image
-                        src={r.thumb}
-                        alt={r.name}
-                        fill
-                        sizes="28px"
-                        className="object-contain"
-                        unoptimized
-                      />
-                    ) : (
-                      <div className="h-10 w-7 rounded bg-white/10" />
-                    )}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="truncate text-sm text-white">{r.name}</div>
-                    <div className="truncate text-xs text-white/60">
-                      {r.id}
-                      {r.type ? ` • ${r.type}` : ""}
-                      {r.attribute ? ` • ${r.attribute}` : ""}
-                      {r.race ? ` • ${r.race}` : ""}
+          {error ? (
+            <div className="p-3 text-sm text-rose-300">Search failed. Check console for details.</div>
+          ) : results.length === 0 ? (
+            <div className="p-3 text-sm text-white/70">No matches.</div>
+          ) : (
+            <ul className="max-h-80 overflow-auto divide-y divide-white/10">
+              {results.map((r, i) => {
+                const active = i === idx;
+                return (
+                  <li
+                    key={r.id}
+                    onMouseEnter={() => setIdx(i)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      go(r);
+                    }}
+                    className={`flex cursor-pointer items-center gap-3 px-3 py-2 transition ${
+                      active ? "bg-white/10" : "hover:bg-white/5"
+                    }`}
+                  >
+                    <div className="relative h-10 w-7 shrink-0 rounded">
+                      {r.thumb ? (
+                        <Image
+                          src={r.thumb}
+                          alt={r.name}
+                          fill
+                          sizes="28px"
+                          className="object-contain"
+                          unoptimized
+                        />
+                      ) : (
+                        <div className="h-10 w-7 rounded bg-white/10" />
+                      )}
                     </div>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm text-white">{r.name}</div>
+                      <div className="truncate text-xs text-white/60">
+                        {r.id}
+                        {r.type ? ` • ${r.type}` : ""}
+                        {r.attribute ? ` • ${r.attribute}` : ""}
+                        {r.race ? ` • ${r.race}` : ""}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
       )}
     </div>

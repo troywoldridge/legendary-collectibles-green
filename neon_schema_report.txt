@@ -1,0 +1,741 @@
+=== TABLES (public) ===
+cart_lines
+carts
+categories
+email_events
+funko_pop_images
+funko_pops
+funko_products_raw
+funko_scrape_queue
+images
+mtg_card_faces
+mtg_card_foreign_names
+mtg_card_prices
+mtg_card_rulings
+mtg_cards
+mtg_catalog_items
+mtg_formats
+mtg_sets
+mtg_subtypes
+mtg_supertypes
+mtg_symbols
+mtg_types
+orders
+products
+subcategories
+support_messages
+tcg_card_abilities
+tcg_card_attacks
+tcg_card_images
+tcg_card_legalities
+tcg_card_prices_amazon
+tcg_card_prices_cardmarket
+tcg_card_prices_cardmarket_history
+tcg_card_prices_ebay
+tcg_card_prices_tcgplayer
+tcg_card_prices_tcgplayer_history
+tcg_card_resistances
+tcg_card_weaknesses
+tcg_cards
+tcg_rarities
+tcg_sets
+tcg_sets_legalities
+tcg_subtypes
+tcg_supertypes
+tcg_types
+tcg_vendor_maps
+tcg_vendor_prices
+ygo_card_banlist
+ygo_card_images
+ygo_card_misc
+ygo_card_prices
+ygo_card_prices_history
+ygo_card_sets
+ygo_cards
+ygo_raw_dump
+
+=== COLUMNS ===
+cart_lines                                        1 id                       integer                     NO          nextval('cart_lines_id_seq'::regclass)
+cart_lines                                        2 cart_id                  uuid                        NO          
+cart_lines                                        3 product_id               integer                     NO          
+cart_lines                                        4 qty                      integer                     NO          1
+cart_lines                                        5 created_at               timestamp without time zone NO          now()
+cart_lines                                        6 updated_at               timestamp without time zone NO          now()
+carts                                             1 id                       uuid                        NO          gen_random_uuid()
+carts                                             2 status                   character varying           NO          'open'::character varying
+carts                                             3 created_at               timestamp without time zone NO          now()
+carts                                             4 updated_at               timestamp without time zone NO          now()
+categories                                        1 id                       integer                     NO          nextval('categories_id_seq'::regclass)
+categories                                        2 slug                     character varying           NO          
+categories                                        3 name                     character varying           NO          
+categories                                        4 description              text                        YES         
+categories                                        5 cf_image_id              character varying           YES         
+categories                                        6 cf_alt                   character varying           YES         
+categories                                        7 sort_order               integer                     YES         0
+categories                                        8 created_at               timestamp without time zone NO          now()
+categories                                        9 updated_at               timestamp without time zone NO          now()
+email_events                                      1 id                       bigint                      NO          nextval('email_events_id_seq'::regclass)
+email_events                                      2 event_id                 text                        NO          
+email_events                                      3 event_type               text                        NO          
+email_events                                      4 occurred_at              timestamp with time zone    NO          now()
+email_events                                      5 email_id                 text                        YES         
+email_events                                      6 subject                  text                        YES         
+email_events                                      7 from_address             text                        YES         
+email_events                                      8 to_csv                   text                        YES         
+email_events                                      9 message_id               text                        YES         
+email_events                                     10 email_created_at         timestamp with time zone    YES         
+email_events                                     11 click_ip                 text                        YES         
+email_events                                     12 click_link               text                        YES         
+email_events                                     13 click_timestamp          timestamp with time zone    YES         
+email_events                                     14 click_user_agent         text                        YES         
+email_events                                     15 error_code               text                        YES         
+email_events                                     16 error_message            text                        YES         
+email_events                                     17 provider                 text                        NO          'resend'::text
+email_events                                     18 idempotency_key          text                        YES         
+email_events                                     19 raw                      jsonb                       NO          
+email_events                                     20 created_at               timestamp with time zone    NO          now()
+funko_pop_images                                  1 id                       bigint                      NO          nextval('funko_pop_images_id_seq'::regclass)
+funko_pop_images                                  2 handle                   text                        YES         
+funko_pop_images                                  3 url                      text                        YES         
+funko_pop_images                                  4 cf_image_id              text                        YES         
+funko_pop_images                                  5 pos                      integer                     YES         
+funko_pop_images                                  6 width                    integer                     YES         
+funko_pop_images                                  7 height                   integer                     YES         
+funko_pops                                        1 id                       bigint                      NO          nextval('funko_pops_id_seq'::regclass)
+funko_pops                                        2 handle                   text                        NO          
+funko_pops                                        3 title                    text                        NO          
+funko_pops                                        4 image_url                text                        YES         
+funko_pops                                        5 series                   ARRAY                       YES         
+funko_pops                                        6 raw                      jsonb                       NO          '{}'::jsonb
+funko_pops                                        7 created_at               timestamp with time zone    NO          now()
+funko_pops                                        8 updated_at               timestamp with time zone    NO          now()
+funko_pops                                        9 image                    text                        YES         
+funko_pops                                       10 brand                    text                        YES         
+funko_pops                                       11 number                   text                        YES         
+funko_pops                                       12 franchise                text                        YES         
+funko_pops                                       13 category                 text                        YES         
+funko_pops                                       14 variants                 jsonb                       YES         
+funko_pops                                       15 image_thumb_url          text                        YES         
+funko_pops                                       16 image_source             text                        YES         
+funko_pops                                       17 cf_image_id              text                        YES         
+funko_pops                                       18 image_status             text                        YES         
+funko_pops                                       19 image_checked_at         timestamp with time zone    YES         
+funko_pops                                       20 image_imported_at        timestamp with time zone    YES         
+funko_pops                                       21 image_meta               jsonb                       YES         
+funko_pops                                       22 external_url             text                        YES         
+funko_pops                                       23 img_provider             text                        YES         
+funko_pops                                       24 img_found_at             timestamp with time zone    YES         
+funko_pops                                       25 image_cf_id              text                        YES         
+funko_products_raw                                1 id                       bigint                      NO          nextval('funko_products_raw_id_seq'::regclass)
+funko_products_raw                                2 url                      text                        NO          
+funko_products_raw                                3 title                    text                        YES         
+funko_products_raw                                4 brand                    text                        YES         
+funko_products_raw                                5 category                 text                        YES         
+funko_products_raw                                6 sku                      text                        YES         
+funko_products_raw                                7 upc                      text                        YES         
+funko_products_raw                                8 number                   text                        YES         
+funko_products_raw                                9 images                   ARRAY                       YES         
+funko_products_raw                               10 image_primary            text                        YES         
+funko_products_raw                               11 jsonld                   jsonb                       YES         
+funko_products_raw                               12 scraped_at               timestamp with time zone    YES         now()
+funko_products_raw                               13 lastmod                  timestamp with time zone    YES         
+funko_scrape_queue                                1 url                      text                        NO          
+funko_scrape_queue                                2 status                   text                        YES         
+funko_scrape_queue                                3 tries                    integer                     NO          0
+funko_scrape_queue                                4 last_error               text                        YES         
+funko_scrape_queue                                5 updated_at               timestamp with time zone    NO          now()
+images                                            1 id                       integer                     NO          nextval('images_id_seq'::regclass)
+images                                            2 owner_type               USER-DEFINED                NO          
+images                                            3 owner_id                 integer                     NO          
+images                                            4 variant                  USER-DEFINED                NO          'card'::image_variant
+images                                            5 cf_image_id              character varying           YES         
+images                                            6 url                      text                        YES         
+images                                            7 alt                      character varying           YES         
+images                                            8 sort_order               integer                     YES         0
+images                                            9 created_at               timestamp without time zone NO          now()
+images                                           10 updated_at               timestamp without time zone NO          now()
+mtg_card_faces                                    1 id                       bigint                      NO          nextval('mtg_card_faces_id_seq'::regclass)
+mtg_card_faces                                    2 card_id                  uuid                        NO          
+mtg_card_faces                                    3 face_index               integer                     NO          
+mtg_card_faces                                    4 name                     text                        YES         
+mtg_card_faces                                    5 printed_name             text                        YES         
+mtg_card_faces                                    6 mana_cost                text                        YES         
+mtg_card_faces                                    7 type_line                text                        YES         
+mtg_card_faces                                    8 oracle_text              text                        YES         
+mtg_card_faces                                    9 colors                   jsonb                       YES         
+mtg_card_faces                                   10 power                    text                        YES         
+mtg_card_faces                                   11 toughness                text                        YES         
+mtg_card_faces                                   12 loyalty                  text                        YES         
+mtg_card_faces                                   13 defense                  text                        YES         
+mtg_card_faces                                   14 flavor_text              text                        YES         
+mtg_card_faces                                   15 flavor_name              text                        YES         
+mtg_card_faces                                   16 artist                   text                        YES         
+mtg_card_faces                                   17 illustration_id          uuid                        YES         
+mtg_card_faces                                   18 image_uris               jsonb                       YES         
+mtg_card_foreign_names                            1 id                       bigint                      NO          nextval('mtg_card_foreign_names_id_seq'::regclass)
+mtg_card_foreign_names                            2 card_id                  text                        NO          
+mtg_card_foreign_names                            3 name                     text                        YES         
+mtg_card_foreign_names                            4 language                 text                        YES         
+mtg_card_foreign_names                            5 multiverseid             integer                     YES         
+mtg_card_prices                                   1 scryfall_id              uuid                        NO          
+mtg_card_prices                                   2 set_code                 text                        YES         
+mtg_card_prices                                   3 collector_no             text                        YES         
+mtg_card_prices                                   4 usd                      numeric                     YES         
+mtg_card_prices                                   5 usd_foil                 numeric                     YES         
+mtg_card_prices                                   6 usd_etched               numeric                     YES         
+mtg_card_prices                                   7 eur                      numeric                     YES         
+mtg_card_prices                                   8 eur_foil                 numeric                     YES         
+mtg_card_prices                                   9 tix                      numeric                     YES         
+mtg_card_prices                                  10 updated_at               timestamp with time zone    NO          now()
+mtg_card_rulings                                  1 id                       bigint                      NO          nextval('mtg_card_rulings_id_seq'::regclass)
+mtg_card_rulings                                  2 oracle_id                uuid                        NO          
+mtg_card_rulings                                  3 source                   text                        YES         
+mtg_card_rulings                                  4 published_at             date                        YES         
+mtg_card_rulings                                  5 comment                  text                        YES         
+mtg_cards                                         1 id                       uuid                        NO          
+mtg_cards                                         2 oracle_id                uuid                        YES         
+mtg_cards                                         3 set_id                   uuid                        YES         
+mtg_cards                                         4 set_code                 text                        YES         
+mtg_cards                                         5 set_name                 text                        YES         
+mtg_cards                                         6 collector_number         text                        YES         
+mtg_cards                                         7 lang                     text                        YES         
+mtg_cards                                         8 name                     text                        YES         
+mtg_cards                                         9 printed_name             text                        YES         
+mtg_cards                                        10 layout                   text                        YES         
+mtg_cards                                        11 released_at              date                        YES         
+mtg_cards                                        12 highres_image            boolean                     YES         
+mtg_cards                                        13 image_status             text                        YES         
+mtg_cards                                        14 image_uris               jsonb                       YES         
+mtg_cards                                        15 mana_cost                text                        YES         
+mtg_cards                                        16 cmc                      numeric                     YES         
+mtg_cards                                        17 type_line                text                        YES         
+mtg_cards                                        18 oracle_text              text                        YES         
+mtg_cards                                        19 printed_type_line        text                        YES         
+mtg_cards                                        20 printed_text             text                        YES         
+mtg_cards                                        21 power                    text                        YES         
+mtg_cards                                        22 toughness                text                        YES         
+mtg_cards                                        23 loyalty                  text                        YES         
+mtg_cards                                        24 defense                  text                        YES         
+mtg_cards                                        25 colors                   jsonb                       YES         
+mtg_cards                                        26 color_identity           jsonb                       YES         
+mtg_cards                                        27 produced_mana            jsonb                       YES         
+mtg_cards                                        28 keywords                 jsonb                       YES         
+mtg_cards                                        29 games                    jsonb                       YES         
+mtg_cards                                        30 legalities               jsonb                       YES         
+mtg_cards                                        31 rarity                   text                        YES         
+mtg_cards                                        32 artist                   text                        YES         
+mtg_cards                                        33 artist_ids               jsonb                       YES         
+mtg_cards                                        34 illustration_id          uuid                        YES         
+mtg_cards                                        35 border_color             text                        YES         
+mtg_cards                                        36 frame                    text                        YES         
+mtg_cards                                        37 frame_effects            jsonb                       YES         
+mtg_cards                                        38 security_stamp           text                        YES         
+mtg_cards                                        39 full_art                 boolean                     YES         
+mtg_cards                                        40 textless                 boolean                     YES         
+mtg_cards                                        41 booster                  boolean                     YES         
+mtg_cards                                        42 story_spotlight          boolean                     YES         
+mtg_cards                                        43 edhrec_rank              integer                     YES         
+mtg_cards                                        44 penny_rank               integer                     YES         
+mtg_cards                                        45 prices                   jsonb                       YES         
+mtg_cards                                        46 related_uris             jsonb                       YES         
+mtg_cards                                        47 purchase_uris            jsonb                       YES         
+mtg_cards                                        48 arena_id                 integer                     YES         
+mtg_cards                                        49 mtgo_id                  integer                     YES         
+mtg_cards                                        50 mtgo_foil_id             integer                     YES         
+mtg_cards                                        51 multiverse_ids           jsonb                       YES         
+mtg_cards                                        52 tcgplayer_id             integer                     YES         
+mtg_cards                                        53 cardmarket_id            integer                     YES         
+mtg_cards                                        54 reserved                 boolean                     YES         
+mtg_cards                                        55 reprint                  boolean                     YES         
+mtg_cards                                        56 variation                boolean                     YES         
+mtg_cards                                        57 variation_of             uuid                        YES         
+mtg_cards                                        58 promo                    boolean                     YES         
+mtg_cards                                        59 finishes                 jsonb                       YES         
+mtg_cards                                        60 security_bits            jsonb                       YES         
+mtg_cards                                        61 prints_search_uri        text                        YES         
+mtg_cards                                        62 rulings_uri              text                        YES         
+mtg_cards                                        63 scryfall_uri             text                        YES         
+mtg_cards                                        64 uri                      text                        YES         
+mtg_cards                                        65 card_faces_raw           jsonb                       YES         
+mtg_catalog_items                                 1 catalog                  text                        NO          
+mtg_catalog_items                                 2 item                     text                        NO          
+mtg_formats                                       1 name                     text                        NO          
+mtg_sets                                          1 id                       uuid                        NO          
+mtg_sets                                          2 code                     text                        YES         
+mtg_sets                                          3 tcgplayer_id             integer                     YES         
+mtg_sets                                          4 mtgo_code                text                        YES         
+mtg_sets                                          5 name                     text                        YES         
+mtg_sets                                          6 set_type                 text                        YES         
+mtg_sets                                          7 released_at              date                        YES         
+mtg_sets                                          8 card_count               integer                     YES         
+mtg_sets                                          9 parent_set_code          text                        YES         
+mtg_sets                                         10 digital                  boolean                     YES         
+mtg_sets                                         11 foil_only                boolean                     YES         
+mtg_sets                                         12 nonfoil_only             boolean                     YES         
+mtg_sets                                         13 block_code               text                        YES         
+mtg_sets                                         14 block                    text                        YES         
+mtg_sets                                         15 icon_svg_uri             text                        YES         
+mtg_sets                                         16 scryfall_uri             text                        YES         
+mtg_sets                                         17 search_uri               text                        YES         
+mtg_sets                                         18 uri                      text                        YES         
+mtg_subtypes                                      1 name                     text                        NO          
+mtg_supertypes                                    1 name                     text                        NO          
+mtg_symbols                                       1 symbol                   text                        NO          
+mtg_symbols                                       2 loose_variant            text                        YES         
+mtg_symbols                                       3 english                  text                        YES         
+mtg_symbols                                       4 transposable             boolean                     YES         
+mtg_symbols                                       5 represents_mana          boolean                     YES         
+mtg_symbols                                       6 appears_in_mana_costs    boolean                     YES         
+mtg_symbols                                       7 funny                    boolean                     YES         
+mtg_symbols                                       8 colors                   jsonb                       YES         
+mtg_symbols                                       9 gatherer_alternates      jsonb                       YES         
+mtg_symbols                                      10 svg_uri                  text                        YES         
+mtg_symbols                                      11 mana_value               numeric                     YES         
+mtg_types                                         1 name                     text                        NO          
+orders                                            1 id                       uuid                        NO          gen_random_uuid()
+orders                                            2 cart_id                  uuid                        YES         
+orders                                            3 stripe_payment_intent_id text                        YES         
+orders                                            4 amount_cents             integer                     NO          
+orders                                            5 currency                 character varying           NO          'usd'::character varying
+orders                                            6 status                   character varying           NO          'created'::character varying
+orders                                            7 created_at               timestamp without time zone NO          now()
+orders                                            8 updated_at               timestamp without time zone NO          now()
+products                                          1 id                       integer                     NO          nextval('products_id_seq'::regclass)
+products                                          2 subcategory_id           integer                     NO          
+products                                          3 sku                      character varying           NO          
+products                                          4 name                     character varying           NO          
+products                                          5 description              text                        YES         
+products                                          6 image_url                text                        YES         
+products                                          7 cf_image_id              character varying           YES         
+products                                          8 cf_alt                   character varying           YES         
+products                                          9 price_cents              integer                     NO          999
+products                                         10 msrp_cents               integer                     YES         
+products                                         11 inventory                integer                     NO          10
+products                                         12 in_stock                 boolean                     NO          true
+products                                         13 sort_order               integer                     YES         0
+products                                         14 created_at               timestamp without time zone NO          now()
+products                                         15 updated_at               timestamp without time zone NO          now()
+subcategories                                     1 id                       integer                     NO          nextval('subcategories_id_seq'::regclass)
+subcategories                                     2 category_id              integer                     NO          
+subcategories                                     3 slug                     character varying           NO          
+subcategories                                     4 name                     character varying           NO          
+subcategories                                     5 description              text                        YES         
+subcategories                                     6 cf_image_id              character varying           YES         
+subcategories                                     7 cf_alt                   character varying           YES         
+subcategories                                     8 sort_order               integer                     YES         0
+subcategories                                     9 created_at               timestamp without time zone NO          now()
+subcategories                                    10 updated_at               timestamp without time zone NO          now()
+support_messages                                  1 ticket_id                text                        NO          
+support_messages                                  2 name                     text                        YES         
+support_messages                                  3 email                    text                        NO          
+support_messages                                  4 subject                  text                        NO          
+support_messages                                  5 message                  text                        NO          
+support_messages                                  6 ip                       text                        YES         
+support_messages                                  7 user_agent               text                        YES         
+support_messages                                  8 created_at               timestamp with time zone    NO          now()
+tcg_card_abilities                                1 card_id                  text                        YES         
+tcg_card_abilities                                2 name                     text                        YES         
+tcg_card_abilities                                3 text                     text                        YES         
+tcg_card_abilities                                4 type                     text                        YES         
+tcg_card_abilities                                5 slot                     text                        YES         
+tcg_card_attacks                                  1 card_id                  text                        YES         
+tcg_card_attacks                                  2 slot                     text                        YES         
+tcg_card_attacks                                  3 name                     text                        YES         
+tcg_card_attacks                                  4 text                     text                        YES         
+tcg_card_attacks                                  5 damage                   text                        YES         
+tcg_card_attacks                                  6 converted_energy_cost    text                        YES         
+tcg_card_attacks                                  7 cost                     text                        YES         
+tcg_card_images                                   1 card_id                  text                        YES         
+tcg_card_images                                   2 small                    text                        YES         
+tcg_card_images                                   3 large                    text                        YES         
+tcg_card_images                                   4 source                   text                        YES         
+tcg_card_legalities                               1 card_id                  text                        YES         
+tcg_card_legalities                               2 format                   text                        YES         
+tcg_card_legalities                               3 legality                 text                        YES         
+tcg_card_prices_amazon                            1 game                     text                        NO          
+tcg_card_prices_amazon                            2 card_id                  text                        NO          
+tcg_card_prices_amazon                            3 price                    numeric                     YES         
+tcg_card_prices_amazon                            4 currency                 text                        NO          'USD'::text
+tcg_card_prices_amazon                            5 asin                     text                        YES         
+tcg_card_prices_amazon                            6 product_url              text                        YES         
+tcg_card_prices_amazon                            7 updated_at               timestamp with time zone    NO          now()
+tcg_card_prices_amazon                            8 meta                     jsonb                       YES         
+tcg_card_prices_cardmarket                        1 card_id                  text                        YES         
+tcg_card_prices_cardmarket                        2 url                      text                        YES         
+tcg_card_prices_cardmarket                        3 updated_at               text                        YES         
+tcg_card_prices_cardmarket                        4 average_sell_price       text                        YES         
+tcg_card_prices_cardmarket                        5 low_price                text                        YES         
+tcg_card_prices_cardmarket                        6 trend_price              text                        YES         
+tcg_card_prices_cardmarket                        7 german_pro_low           text                        YES         
+tcg_card_prices_cardmarket                        8 suggested_price          text                        YES         
+tcg_card_prices_cardmarket                        9 reverse_holo_sell        text                        YES         
+tcg_card_prices_cardmarket                       10 reverse_holo_low         text                        YES         
+tcg_card_prices_cardmarket                       11 reverse_holo_trend       text                        YES         
+tcg_card_prices_cardmarket                       12 low_price_ex_plus        text                        YES         
+tcg_card_prices_cardmarket                       13 avg1                     text                        YES         
+tcg_card_prices_cardmarket                       14 avg7                     text                        YES         
+tcg_card_prices_cardmarket                       15 avg30                    text                        YES         
+tcg_card_prices_cardmarket                       16 reverse_holo_avg1        text                        YES         
+tcg_card_prices_cardmarket                       17 reverse_holo_avg7        text                        YES         
+tcg_card_prices_cardmarket                       18 reverse_holo_avg30       text                        YES         
+tcg_card_prices_cardmarket_history                1 id                       bigint                      NO          nextval('tcg_card_prices_cardmarket_history_id_seq'::regclass)
+tcg_card_prices_cardmarket_history                2 card_id                  text                        NO          
+tcg_card_prices_cardmarket_history                3 captured_at              timestamp with time zone    NO          now()
+tcg_card_prices_cardmarket_history                4 source_updated_at        timestamp with time zone    YES         
+tcg_card_prices_cardmarket_history                5 average_sell_price       numeric                     YES         
+tcg_card_prices_cardmarket_history                6 low_price                numeric                     YES         
+tcg_card_prices_cardmarket_history                7 trend_price              numeric                     YES         
+tcg_card_prices_cardmarket_history                8 german_pro_low           numeric                     YES         
+tcg_card_prices_cardmarket_history                9 suggested_price          numeric                     YES         
+tcg_card_prices_cardmarket_history               10 reverse_holo_sell        numeric                     YES         
+tcg_card_prices_cardmarket_history               11 reverse_holo_low         numeric                     YES         
+tcg_card_prices_cardmarket_history               12 reverse_holo_trend       numeric                     YES         
+tcg_card_prices_cardmarket_history               13 low_price_ex_plus        numeric                     YES         
+tcg_card_prices_cardmarket_history               14 avg1                     numeric                     YES         
+tcg_card_prices_cardmarket_history               15 avg7                     numeric                     YES         
+tcg_card_prices_cardmarket_history               16 avg30                    numeric                     YES         
+tcg_card_prices_cardmarket_history               17 reverse_holo_avg1        numeric                     YES         
+tcg_card_prices_cardmarket_history               18 reverse_holo_avg7        numeric                     YES         
+tcg_card_prices_cardmarket_history               19 reverse_holo_avg30       numeric                     YES         
+tcg_card_prices_ebay                              1 game                     text                        NO          
+tcg_card_prices_ebay                              2 card_id                  text                        NO          
+tcg_card_prices_ebay                              3 median                   numeric                     YES         
+tcg_card_prices_ebay                              4 sample_count             integer                     NO          0
+tcg_card_prices_ebay                              5 currency                 text                        NO          'USD'::text
+tcg_card_prices_ebay                              6 sample_url               text                        YES         
+tcg_card_prices_ebay                              7 updated_at               timestamp with time zone    NO          now()
+tcg_card_prices_tcgplayer                         1 card_id                  text                        YES         
+tcg_card_prices_tcgplayer                         2 url                      text                        YES         
+tcg_card_prices_tcgplayer                         3 updated_at               text                        YES         
+tcg_card_prices_tcgplayer                         4 normal                   text                        YES         
+tcg_card_prices_tcgplayer                         5 holofoil                 text                        YES         
+tcg_card_prices_tcgplayer                         6 reverse_holofoil         text                        YES         
+tcg_card_prices_tcgplayer                         7 first_edition_holofoil   text                        YES         
+tcg_card_prices_tcgplayer                         8 first_edition_normal     text                        YES         
+tcg_card_prices_tcgplayer                         9 currency                 text                        YES         
+tcg_card_prices_tcgplayer_history                 1 id                       bigint                      NO          nextval('tcg_card_prices_tcgplayer_history_id_seq'::regclass)
+tcg_card_prices_tcgplayer_history                 2 card_id                  text                        NO          
+tcg_card_prices_tcgplayer_history                 3 captured_at              timestamp with time zone    NO          now()
+tcg_card_prices_tcgplayer_history                 4 source_updated_at        timestamp with time zone    YES         
+tcg_card_prices_tcgplayer_history                 5 currency                 text                        YES         
+tcg_card_prices_tcgplayer_history                 6 normal                   numeric                     YES         
+tcg_card_prices_tcgplayer_history                 7 holofoil                 numeric                     YES         
+tcg_card_prices_tcgplayer_history                 8 reverse_holofoil         numeric                     YES         
+tcg_card_prices_tcgplayer_history                 9 first_edition_holofoil   numeric                     YES         
+tcg_card_prices_tcgplayer_history                10 first_edition_normal     numeric                     YES         
+tcg_card_resistances                              1 card_id                  text                        YES         
+tcg_card_resistances                              2 type                     text                        YES         
+tcg_card_resistances                              3 value                    text                        YES         
+tcg_card_resistances                              4 slot                     text                        YES         
+tcg_card_weaknesses                               1 card_id                  text                        YES         
+tcg_card_weaknesses                               2 type                     text                        YES         
+tcg_card_weaknesses                               3 value                    text                        YES         
+tcg_card_weaknesses                               4 slot                     text                        YES         
+tcg_cards                                         1 id                       text                        YES         
+tcg_cards                                         2 name                     text                        YES         
+tcg_cards                                         3 supertype                text                        YES         
+tcg_cards                                         4 subtypes                 text                        YES         
+tcg_cards                                         5 level                    text                        YES         
+tcg_cards                                         6 hp                       text                        YES         
+tcg_cards                                         7 types                    text                        YES         
+tcg_cards                                         8 evolves_from             text                        YES         
+tcg_cards                                         9 evolves_to               text                        YES         
+tcg_cards                                        10 rules                    text                        YES         
+tcg_cards                                        11 ancient_trait_name       text                        YES         
+tcg_cards                                        12 ancient_trait_text       text                        YES         
+tcg_cards                                        13 converted_retreat_cost   text                        YES         
+tcg_cards                                        14 retreat_cost             text                        YES         
+tcg_cards                                        15 set_id                   text                        YES         
+tcg_cards                                        16 set_name                 text                        YES         
+tcg_cards                                        17 series                   text                        YES         
+tcg_cards                                        18 printed_total            text                        YES         
+tcg_cards                                        19 total                    text                        YES         
+tcg_cards                                        20 ptcgo_code               text                        YES         
+tcg_cards                                        21 release_date             text                        YES         
+tcg_cards                                        22 set_updated_at           text                        YES         
+tcg_cards                                        23 symbol_url               text                        YES         
+tcg_cards                                        24 logo_url                 text                        YES         
+tcg_cards                                        25 regulation_mark          text                        YES         
+tcg_cards                                        26 artist                   text                        YES         
+tcg_cards                                        27 rarity                   text                        YES         
+tcg_cards                                        28 flavor_text              text                        YES         
+tcg_cards                                        29 national_pokedex_numbers text                        YES         
+tcg_cards                                        30 extra                    text                        YES         
+tcg_cards                                        31 small_image              text                        YES         
+tcg_cards                                        32 large_image              text                        YES         
+tcg_cards                                        33 tcgplayer_url            text                        YES         
+tcg_cards                                        34 tcgplayer_updated_at     text                        YES         
+tcg_cards                                        35 cardmarket_url           text                        YES         
+tcg_cards                                        36 cardmarket_updated_at    text                        YES         
+tcg_rarities                                      1 name                     text                        YES         
+tcg_sets                                          1 id                       text                        YES         
+tcg_sets                                          2 name                     text                        YES         
+tcg_sets                                          3 series                   text                        YES         
+tcg_sets                                          4 printed_total            text                        YES         
+tcg_sets                                          5 total                    text                        YES         
+tcg_sets                                          6 ptcgo_code               text                        YES         
+tcg_sets                                          7 release_date             text                        YES         
+tcg_sets                                          8 updated_at               text                        YES         
+tcg_sets                                          9 symbol_url               text                        YES         
+tcg_sets                                         10 logo_url                 text                        YES         
+tcg_sets                                         11 standard                 text                        YES         
+tcg_sets                                         12 expanded                 text                        YES         
+tcg_sets                                         13 unlimited                text                        YES         
+tcg_sets_legalities                               1 set_id                   text                        YES         
+tcg_sets_legalities                               2 format                   text                        YES         
+tcg_sets_legalities                               3 legality                 text                        YES         
+tcg_subtypes                                      1 name                     text                        YES         
+tcg_supertypes                                    1 name                     text                        YES         
+tcg_types                                         1 name                     text                        YES         
+tcg_vendor_maps                                   1 game                     text                        NO          
+tcg_vendor_maps                                   2 card_id                  text                        NO          
+tcg_vendor_maps                                   3 vendor                   text                        NO          
+tcg_vendor_maps                                   4 ident                    text                        YES         
+tcg_vendor_maps                                   5 query                    text                        YES         
+tcg_vendor_maps                                   6 url_hint                 text                        YES         
+tcg_vendor_maps                                   7 currency                 text                        NO          'USD'::text
+tcg_vendor_maps                                   8 category                 text                        YES         
+tcg_vendor_maps                                   9 value                    numeric                     YES         
+tcg_vendor_maps                                  10 url                      text                        YES         
+tcg_vendor_prices                                 1 game                     text                        NO          
+tcg_vendor_prices                                 2 card_id                  text                        NO          
+tcg_vendor_prices                                 3 vendor                   text                        NO          
+tcg_vendor_prices                                 4 metric                   text                        NO          'market'::text
+tcg_vendor_prices                                 5 currency                 text                        NO          
+tcg_vendor_prices                                 6 value                    numeric                     YES         
+tcg_vendor_prices                                 7 url                      text                        YES         
+tcg_vendor_prices                                 8 updated_at               timestamp with time zone    NO          now()
+tcg_vendor_prices                                 9 meta                     jsonb                       YES         
+v_tcg_sets_images                                 1 id                       text                        YES         
+v_tcg_sets_images                                 2 name                     text                        YES         
+v_tcg_sets_images                                 3 series                   text                        YES         
+v_tcg_sets_images                                 4 ptcgo_code               text                        YES         
+v_tcg_sets_images                                 5 release_date             text                        YES         
+v_tcg_sets_images                                 6 logo_url                 text                        YES         
+v_tcg_sets_images                                 7 symbol_url               text                        YES         
+ygo_card_banlist                                  1 card_id                  text                        NO          
+ygo_card_banlist                                  2 ban_tcg                  text                        YES         
+ygo_card_banlist                                  3 ban_ocg                  text                        YES         
+ygo_card_banlist                                  4 ban_goat                 text                        YES         
+ygo_card_images                                   1 card_id                  text                        NO          
+ygo_card_images                                   2 image_url                text                        NO          
+ygo_card_images                                   3 image_url_small          text                        YES         
+ygo_card_images                                   4 image_id                 text                        YES         
+ygo_card_misc                                     1 card_id                  text                        NO          
+ygo_card_misc                                     2 konami_id                text                        YES         
+ygo_card_misc                                     3 misc                     jsonb                       YES         
+ygo_card_prices                                   1 card_id                  text                        NO          
+ygo_card_prices                                   2 amazon_price             text                        YES         
+ygo_card_prices                                   3 cardmarket_price         text                        YES         
+ygo_card_prices                                   4 tcgplayer_price          text                        YES         
+ygo_card_prices                                   5 ebay_price               text                        YES         
+ygo_card_prices                                   6 coolstuffinc_price       text                        YES         
+ygo_card_prices_history                           1 id                       bigint                      NO          nextval('ygo_card_prices_history_id_seq'::regclass)
+ygo_card_prices_history                           2 card_id                  text                        NO          
+ygo_card_prices_history                           3 captured_at              timestamp with time zone    NO          now()
+ygo_card_prices_history                           4 source_updated_at        timestamp with time zone    YES         
+ygo_card_prices_history                           5 tcgplayer_price          numeric                     YES         
+ygo_card_prices_history                           6 cardmarket_price         numeric                     YES         
+ygo_card_prices_history                           7 ebay_price               numeric                     YES         
+ygo_card_prices_history                           8 amazon_price             numeric                     YES         
+ygo_card_prices_history                           9 coolstuffinc_price       numeric                     YES         
+ygo_card_sets                                     1 card_id                  text                        NO          
+ygo_card_sets                                     2 set_name                 text                        YES         
+ygo_card_sets                                     3 set_code                 text                        NO          
+ygo_card_sets                                     4 set_rarity               text                        YES         
+ygo_card_sets                                     5 set_price                text                        YES         
+ygo_cards                                         1 card_id                  text                        NO          
+ygo_cards                                         2 name                     text                        NO          
+ygo_cards                                         3 type                     text                        YES         
+ygo_cards                                         4 desc                     text                        YES         
+ygo_cards                                         5 atk                      integer                     YES         
+ygo_cards                                         6 def                      integer                     YES         
+ygo_cards                                         7 level                    integer                     YES         
+ygo_cards                                         8 race                     text                        YES         
+ygo_cards                                         9 attribute                text                        YES         
+ygo_cards                                        10 archetype                text                        YES         
+ygo_cards                                        11 ygoprodeck_url           text                        YES         
+ygo_cards                                        12 linkval                  integer                     YES         
+ygo_cards                                        13 scale                    integer                     YES         
+ygo_cards                                        14 linkmarkers              ARRAY                       YES         
+ygo_cards                                        15 has_effect               boolean                     YES         
+ygo_cards                                        16 staple                   boolean                     YES         
+ygo_cards                                        17 updated_at               timestamp with time zone    NO          now()
+ygo_raw_dump                                      1 id                       text                        NO          'cardinfo_v7'::text
+ygo_raw_dump                                      2 fetched_at               timestamp with time zone    NO          now()
+ygo_raw_dump                                      3 payload                  jsonb                       NO          
+
+
+=== PRIMARY KEYS ===
+cart_lines                         id                         1
+carts                              id                         1
+categories                         id                         1
+email_events                       id                         1
+funko_pop_images                   id                         1
+funko_pops                         id                         1
+funko_products_raw                 id                         1
+funko_scrape_queue                 url                        1
+images                             id                         1
+mtg_card_faces                     id                         1
+mtg_card_foreign_names             id                         1
+mtg_card_prices                    scryfall_id                1
+mtg_card_rulings                   id                         1
+mtg_cards                          id                         1
+mtg_catalog_items                  catalog                    1
+mtg_catalog_items                  item                       2
+mtg_formats                        name                       1
+mtg_sets                           id                         1
+mtg_subtypes                       name                       1
+mtg_supertypes                     name                       1
+mtg_symbols                        symbol                     1
+mtg_types                          name                       1
+orders                             id                         1
+products                           id                         1
+subcategories                      id                         1
+support_messages                   ticket_id                  1
+tcg_card_prices_amazon             game                       1
+tcg_card_prices_amazon             card_id                    2
+tcg_card_prices_cardmarket_history id                         1
+tcg_card_prices_ebay               game                       1
+tcg_card_prices_ebay               card_id                    2
+tcg_card_prices_tcgplayer_history  id                         1
+tcg_vendor_maps                    game                       1
+tcg_vendor_maps                    card_id                    2
+tcg_vendor_maps                    vendor                     3
+tcg_vendor_prices                  game                       1
+tcg_vendor_prices                  card_id                    2
+tcg_vendor_prices                  vendor                     3
+ygo_card_banlist                   card_id                    1
+ygo_card_images                    card_id                    1
+ygo_card_images                    image_url                  2
+ygo_card_misc                      card_id                    1
+ygo_card_prices                    card_id                    1
+ygo_card_prices_history            id                         1
+ygo_card_sets                      card_id                    1
+ygo_card_sets                      set_code                   2
+ygo_cards                          card_id                    1
+ygo_raw_dump                       id                         1
+
+
+=== UNIQUE CONSTRAINTS ===
+categories         categories_slug_unique          slug
+email_events       email_events_event_id_key       event_id
+funko_pop_images   funko_pop_images_handle_url_key handle, url
+funko_pops         funko_pops_handle_key           handle
+funko_products_raw funko_products_raw_url_key      url
+mtg_sets           mtg_sets_code_key               code
+ygo_card_prices    ygo_card_prices_card_id_key     card_id
+
+
+=== FOREIGN KEYS ===
+cart_lines       cart_id        carts            id                cart_lines_cart_id_carts_id_fk
+cart_lines       product_id     products         id                cart_lines_product_id_products_id_fk
+funko_pop_images handle         funko_pops       handle            funko_pop_images_handle_fkey
+mtg_card_faces   card_id        mtg_cards        id                mtg_card_faces_card_id_fkey
+mtg_cards        set_id         mtg_sets         id                mtg_cards_set_id_fkey
+orders           cart_id        carts            id                orders_cart_id_carts_id_fk
+products         subcategory_id subcategories    id                products_subcategory_id_subcategories_id_fk
+subcategories    category_id    categories       id                subcategories_category_id_categories_id_fk
+ygo_card_banlist card_id        ygo_cards        card_id           ygo_card_banlist_card_id_fkey
+ygo_card_images  card_id        ygo_cards        card_id           ygo_card_images_card_id_fkey
+ygo_card_misc    card_id        ygo_cards        card_id           ygo_card_misc_card_id_fkey
+ygo_card_prices  card_id        ygo_cards        card_id           ygo_card_prices_card_id_fkey
+ygo_card_sets    card_id        ygo_cards        card_id           ygo_card_sets_card_id_fkey
+
+
+=== INDEXES ===
+cart_lines                         cart_lines_pkey                         CREATE UNIQUE INDEX cart_lines_pkey ON public.cart_lines USING btree (id)
+carts                              carts_pkey                              CREATE UNIQUE INDEX carts_pkey ON public.carts USING btree (id)
+categories                         categories_pkey                         CREATE UNIQUE INDEX categories_pkey ON public.categories USING btree (id)
+categories                         categories_slug_unique                  CREATE UNIQUE INDEX categories_slug_unique ON public.categories USING btree (slug)
+email_events                       email_events_email_id_idx               CREATE INDEX email_events_email_id_idx ON public.email_events USING btree (email_id)
+email_events                       email_events_event_id_key               CREATE UNIQUE INDEX email_events_event_id_key ON public.email_events USING btree (event_id)
+email_events                       email_events_occurred_idx               CREATE INDEX email_events_occurred_idx ON public.email_events USING btree (occurred_at)
+email_events                       email_events_pkey                       CREATE UNIQUE INDEX email_events_pkey ON public.email_events USING btree (id)
+email_events                       email_events_type_idx                   CREATE INDEX email_events_type_idx ON public.email_events USING btree (event_type)
+funko_pop_images                   funko_pop_images_handle_url_key         CREATE UNIQUE INDEX funko_pop_images_handle_url_key ON public.funko_pop_images USING btree (handle, url)
+funko_pop_images                   funko_pop_images_pkey                   CREATE UNIQUE INDEX funko_pop_images_pkey ON public.funko_pop_images USING btree (id)
+funko_pops                         funko_pops_handle_idx                   CREATE INDEX funko_pops_handle_idx ON public.funko_pops USING btree (handle)
+funko_pops                         funko_pops_handle_key                   CREATE UNIQUE INDEX funko_pops_handle_key ON public.funko_pops USING btree (handle)
+funko_pops                         funko_pops_image_missing_idx            CREATE INDEX funko_pops_image_missing_idx ON public.funko_pops USING btree (((cf_image_id IS NULL))) WHERE (cf_image_id IS NULL)
+funko_pops                         funko_pops_image_null_idx               CREATE INDEX funko_pops_image_null_idx ON public.funko_pops USING btree ((((image IS NULL) OR (image = ''::text))))
+funko_pops                         funko_pops_pkey                         CREATE UNIQUE INDEX funko_pops_pkey ON public.funko_pops USING btree (id)
+funko_pops                         funko_pops_series_idx                   CREATE INDEX funko_pops_series_idx ON public.funko_pops USING gin (series)
+funko_pops                         funko_pops_title_trgm                   CREATE INDEX funko_pops_title_trgm ON public.funko_pops USING gin (title gin_trgm_ops)
+funko_products_raw                 funko_products_raw_pkey                 CREATE UNIQUE INDEX funko_products_raw_pkey ON public.funko_products_raw USING btree (id)
+funko_products_raw                 funko_products_raw_title_trgm           CREATE INDEX funko_products_raw_title_trgm ON public.funko_products_raw USING gin (title gin_trgm_ops)
+funko_products_raw                 funko_products_raw_url_key              CREATE UNIQUE INDEX funko_products_raw_url_key ON public.funko_products_raw USING btree (url)
+funko_scrape_queue                 funko_queue_status_idx                  CREATE INDEX funko_queue_status_idx ON public.funko_scrape_queue USING btree (status, updated_at)
+funko_scrape_queue                 funko_scrape_queue_pkey                 CREATE UNIQUE INDEX funko_scrape_queue_pkey ON public.funko_scrape_queue USING btree (url)
+images                             images_owner_variant_unique             CREATE UNIQUE INDEX images_owner_variant_unique ON public.images USING btree (owner_type, owner_id, variant)
+images                             images_pkey                             CREATE UNIQUE INDEX images_pkey ON public.images USING btree (id)
+mtg_card_faces                     idx_mtg_faces_card                      CREATE INDEX idx_mtg_faces_card ON public.mtg_card_faces USING btree (card_id)
+mtg_card_faces                     mtg_card_faces_pkey                     CREATE UNIQUE INDEX mtg_card_faces_pkey ON public.mtg_card_faces USING btree (id)
+mtg_card_foreign_names             idx_mtg_foreign_card                    CREATE INDEX idx_mtg_foreign_card ON public.mtg_card_foreign_names USING btree (card_id)
+mtg_card_foreign_names             mtg_card_foreign_names_pkey             CREATE UNIQUE INDEX mtg_card_foreign_names_pkey ON public.mtg_card_foreign_names USING btree (id)
+mtg_card_prices                    mtg_card_prices_pkey                    CREATE UNIQUE INDEX mtg_card_prices_pkey ON public.mtg_card_prices USING btree (scryfall_id)
+mtg_card_prices                    mtg_card_prices_setnum_idx              CREATE INDEX mtg_card_prices_setnum_idx ON public.mtg_card_prices USING btree (set_code, collector_no)
+mtg_card_rulings                   idx_mtg_rulings_oracle                  CREATE INDEX idx_mtg_rulings_oracle ON public.mtg_card_rulings USING btree (oracle_id)
+mtg_card_rulings                   mtg_card_rulings_pkey                   CREATE UNIQUE INDEX mtg_card_rulings_pkey ON public.mtg_card_rulings USING btree (id)
+mtg_cards                          idx_mtg_cards_colors_gin                CREATE INDEX idx_mtg_cards_colors_gin ON public.mtg_cards USING gin (colors)
+mtg_cards                          idx_mtg_cards_lang                      CREATE INDEX idx_mtg_cards_lang ON public.mtg_cards USING btree (lang)
+mtg_cards                          idx_mtg_cards_name                      CREATE INDEX idx_mtg_cards_name ON public.mtg_cards USING btree (name)
+mtg_cards                          idx_mtg_cards_name_trgm                 CREATE INDEX idx_mtg_cards_name_trgm ON public.mtg_cards USING gin (name gin_trgm_ops)
+mtg_cards                          idx_mtg_cards_oracle                    CREATE INDEX idx_mtg_cards_oracle ON public.mtg_cards USING btree (oracle_id)
+mtg_cards                          idx_mtg_cards_rarity_lower              CREATE INDEX idx_mtg_cards_rarity_lower ON public.mtg_cards USING btree (lower(rarity))
+mtg_cards                          idx_mtg_cards_released                  CREATE INDEX idx_mtg_cards_released ON public.mtg_cards USING btree (released_at)
+mtg_cards                          idx_mtg_cards_set_code                  CREATE INDEX idx_mtg_cards_set_code ON public.mtg_cards USING btree (set_code)
+mtg_cards                          idx_mtg_cards_set_num                   CREATE INDEX idx_mtg_cards_set_num ON public.mtg_cards USING btree (set_code, collector_number)
+mtg_cards                          idx_mtg_cards_type_trgm                 CREATE INDEX idx_mtg_cards_type_trgm ON public.mtg_cards USING gin (type_line gin_trgm_ops)
+mtg_cards                          mtg_cards_pkey                          CREATE UNIQUE INDEX mtg_cards_pkey ON public.mtg_cards USING btree (id)
+mtg_catalog_items                  mtg_catalog_items_pkey                  CREATE UNIQUE INDEX mtg_catalog_items_pkey ON public.mtg_catalog_items USING btree (catalog, item)
+mtg_formats                        mtg_formats_pkey                        CREATE UNIQUE INDEX mtg_formats_pkey ON public.mtg_formats USING btree (name)
+mtg_sets                           idx_mtg_sets_block_trgm                 CREATE INDEX idx_mtg_sets_block_trgm ON public.mtg_sets USING gin (block gin_trgm_ops)
+mtg_sets                           idx_mtg_sets_code                       CREATE INDEX idx_mtg_sets_code ON public.mtg_sets USING btree (code)
+mtg_sets                           idx_mtg_sets_name_trgm                  CREATE INDEX idx_mtg_sets_name_trgm ON public.mtg_sets USING gin (name gin_trgm_ops)
+mtg_sets                           idx_mtg_sets_release                    CREATE INDEX idx_mtg_sets_release ON public.mtg_sets USING btree (released_at)
+mtg_sets                           mtg_sets_code_key                       CREATE UNIQUE INDEX mtg_sets_code_key ON public.mtg_sets USING btree (code)
+mtg_sets                           mtg_sets_pkey                           CREATE UNIQUE INDEX mtg_sets_pkey ON public.mtg_sets USING btree (id)
+mtg_subtypes                       mtg_subtypes_pkey                       CREATE UNIQUE INDEX mtg_subtypes_pkey ON public.mtg_subtypes USING btree (name)
+mtg_supertypes                     mtg_supertypes_pkey                     CREATE UNIQUE INDEX mtg_supertypes_pkey ON public.mtg_supertypes USING btree (name)
+mtg_symbols                        mtg_symbols_pkey                        CREATE UNIQUE INDEX mtg_symbols_pkey ON public.mtg_symbols USING btree (symbol)
+mtg_types                          mtg_types_pkey                          CREATE UNIQUE INDEX mtg_types_pkey ON public.mtg_types USING btree (name)
+orders                             orders_pkey                             CREATE UNIQUE INDEX orders_pkey ON public.orders USING btree (id)
+products                           products_pkey                           CREATE UNIQUE INDEX products_pkey ON public.products USING btree (id)
+products                           products_sku_unique                     CREATE UNIQUE INDEX products_sku_unique ON public.products USING btree (sku)
+subcategories                      subcategories_cat_slug_unique           CREATE UNIQUE INDEX subcategories_cat_slug_unique ON public.subcategories USING btree (category_id, slug)
+subcategories                      subcategories_pkey                      CREATE UNIQUE INDEX subcategories_pkey ON public.subcategories USING btree (id)
+support_messages                   support_messages_pkey                   CREATE UNIQUE INDEX support_messages_pkey ON public.support_messages USING btree (ticket_id)
+tcg_card_prices_amazon             tcg_card_prices_amazon_pkey             CREATE UNIQUE INDEX tcg_card_prices_amazon_pkey ON public.tcg_card_prices_amazon USING btree (game, card_id)
+tcg_card_prices_cardmarket_history idx_tcg_cm_hist_card                    CREATE INDEX idx_tcg_cm_hist_card ON public.tcg_card_prices_cardmarket_history USING btree (card_id)
+tcg_card_prices_cardmarket_history idx_tcg_cm_hist_card_time               CREATE INDEX idx_tcg_cm_hist_card_time ON public.tcg_card_prices_cardmarket_history USING btree (card_id, captured_at DESC)
+tcg_card_prices_cardmarket_history tcg_card_prices_cardmarket_history_pkey CREATE UNIQUE INDEX tcg_card_prices_cardmarket_history_pkey ON public.tcg_card_prices_cardmarket_history USING btree (id)
+tcg_card_prices_ebay               tcg_card_prices_ebay_pkey               CREATE UNIQUE INDEX tcg_card_prices_ebay_pkey ON public.tcg_card_prices_ebay USING btree (game, card_id)
+tcg_card_prices_tcgplayer_history  idx_tcg_tcgplayer_hist_card             CREATE INDEX idx_tcg_tcgplayer_hist_card ON public.tcg_card_prices_tcgplayer_history USING btree (card_id)
+tcg_card_prices_tcgplayer_history  idx_tcg_tcgplayer_hist_card_time        CREATE INDEX idx_tcg_tcgplayer_hist_card_time ON public.tcg_card_prices_tcgplayer_history USING btree (card_id, captured_at DESC)
+tcg_card_prices_tcgplayer_history  tcg_card_prices_tcgplayer_history_pkey  CREATE UNIQUE INDEX tcg_card_prices_tcgplayer_history_pkey ON public.tcg_card_prices_tcgplayer_history USING btree (id)
+tcg_vendor_maps                    idx_vendor_maps_cat_card                CREATE INDEX idx_vendor_maps_cat_card ON public.tcg_vendor_maps USING btree (category, card_id)
+tcg_vendor_maps                    idx_vendor_maps_game_card               CREATE INDEX idx_vendor_maps_game_card ON public.tcg_vendor_maps USING btree (game, card_id)
+tcg_vendor_maps                    idx_vendor_maps_vendor                  CREATE INDEX idx_vendor_maps_vendor ON public.tcg_vendor_maps USING btree (vendor)
+tcg_vendor_maps                    tcg_vendor_maps_card_idx                CREATE INDEX tcg_vendor_maps_card_idx ON public.tcg_vendor_maps USING btree (card_id)
+tcg_vendor_maps                    tcg_vendor_maps_pk                      CREATE UNIQUE INDEX tcg_vendor_maps_pk ON public.tcg_vendor_maps USING btree (game, card_id, vendor)
+tcg_vendor_maps                    tcg_vendor_maps_vendor_idx              CREATE INDEX tcg_vendor_maps_vendor_idx ON public.tcg_vendor_maps USING btree (vendor)
+tcg_vendor_prices                  tcg_vendor_prices_pkey                  CREATE UNIQUE INDEX tcg_vendor_prices_pkey ON public.tcg_vendor_prices USING btree (game, card_id, vendor)
+ygo_card_banlist                   ygo_card_banlist_pkey                   CREATE UNIQUE INDEX ygo_card_banlist_pkey ON public.ygo_card_banlist USING btree (card_id)
+ygo_card_images                    ygo_card_images_pkey                    CREATE UNIQUE INDEX ygo_card_images_pkey ON public.ygo_card_images USING btree (card_id, image_url)
+ygo_card_misc                      ygo_card_misc_konami_idx                CREATE INDEX ygo_card_misc_konami_idx ON public.ygo_card_misc USING btree (konami_id)
+ygo_card_misc                      ygo_card_misc_pkey                      CREATE UNIQUE INDEX ygo_card_misc_pkey ON public.ygo_card_misc USING btree (card_id)
+ygo_card_prices                    ygo_card_prices_card_id_key             CREATE UNIQUE INDEX ygo_card_prices_card_id_key ON public.ygo_card_prices USING btree (card_id)
+ygo_card_prices                    ygo_card_prices_pkey                    CREATE UNIQUE INDEX ygo_card_prices_pkey ON public.ygo_card_prices USING btree (card_id)
+ygo_card_prices_history            idx_ygo_hist_card                       CREATE INDEX idx_ygo_hist_card ON public.ygo_card_prices_history USING btree (card_id)
+ygo_card_prices_history            idx_ygo_hist_card_time                  CREATE INDEX idx_ygo_hist_card_time ON public.ygo_card_prices_history USING btree (card_id, captured_at DESC)
+ygo_card_prices_history            ygo_card_prices_history_pkey            CREATE UNIQUE INDEX ygo_card_prices_history_pkey ON public.ygo_card_prices_history USING btree (id)
+ygo_card_sets                      ygo_card_sets_pkey                      CREATE UNIQUE INDEX ygo_card_sets_pkey ON public.ygo_card_sets USING btree (card_id, set_code)
+ygo_card_sets                      ygo_card_sets_set_code_idx              CREATE INDEX ygo_card_sets_set_code_idx ON public.ygo_card_sets USING btree (set_code)
+ygo_card_sets                      ygo_card_sets_set_name_idx              CREATE INDEX ygo_card_sets_set_name_idx ON public.ygo_card_sets USING btree (set_name)
+ygo_cards                          ygo_cards_archetype_idx                 CREATE INDEX ygo_cards_archetype_idx ON public.ygo_cards USING btree (archetype)
+ygo_cards                          ygo_cards_name_idx                      CREATE INDEX ygo_cards_name_idx ON public.ygo_cards USING gin (to_tsvector('simple'::regconfig, COALESCE(name, ''::text)))
+ygo_cards                          ygo_cards_pkey                          CREATE UNIQUE INDEX ygo_cards_pkey ON public.ygo_cards USING btree (card_id)
+ygo_cards                          ygo_cards_rarity_idx                    CREATE INDEX ygo_cards_rarity_idx ON public.ygo_cards USING btree (type, race, attribute)
+ygo_raw_dump                       ygo_raw_dump_pkey                       CREATE UNIQUE INDEX ygo_raw_dump_pkey ON public.ygo_raw_dump USING btree (id)
+

@@ -1,30 +1,30 @@
+// src/app/layout.tsx
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
+
+import { Inter } from "next/font/google";
 import Image from "next/image";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
+import ConsoleBinder from "@/components/ConsoleBinder";
 import { site } from "@/config/site";
 import { cfUrl } from "@/lib/cf";
-import ConsoleBinder from "@/components/ConsoleBinder";
+import { ClerkProvider } from "@clerk/nextjs";
 
+// Fonts
+const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
-// Load Inter with CSS variable support
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-sans",
-});
+// Background (Cloudflare Images)
+const HERO_BG_CF_ID = "a4ced899-6410-44b5-df67-11761a85bc00";
 
-// Construct site title and OpenGraph defaults
+// ----- Metadata -----
 const title = `${site.name} — Buy Pokémon, Yu-Gi-Oh!, MTG & Funko Pop`;
-const template = "%s • " + site.shortName;
+const template = "%s • " + (site.shortName ?? site.name);
 
 let metadataBase: URL | undefined;
 try {
   metadataBase =
-    typeof site?.url === "string" && site.url.length
-      ? new URL(site.url)
-      : undefined;
+    typeof site?.url === "string" && site.url.length ? new URL(site.url) : undefined;
 } catch (err) {
   console.error("RootLayout: invalid site.url:", site?.url, err);
   metadataBase = undefined;
@@ -80,13 +80,11 @@ export const metadata: Metadata = {
   applicationName: site?.name ?? undefined,
 };
 
-const HERO_BG_CF_ID = "a4ced899-6410-44b5-df67-11761a85bc00";
-
+// ----- Layout -----
 export default function RootLayout({
   children,
-}: {
-  children: React.ReactNode;
-}) {
+}: Readonly<{ children: React.ReactNode }>) {
+  // JSON-LD
   const ldOrg = {
     "@context": "https://schema.org",
     "@type": "Organization",
@@ -121,48 +119,54 @@ export default function RootLayout({
   const bgSrc = cfUrl(HERO_BG_CF_ID, "hero") ?? undefined;
 
   return (
-    <html lang="en" className={inter.variable}>
-      <head>
-        {/* Remix Icons CDN */}
-        <link
-          href="https://cdn.jsdelivr.net/npm/remixicon/fonts/remixicon.css"
-          rel="stylesheet"
-        />
-      </head>
+    <ClerkProvider>
+      <html lang="en" className={inter.variable}>
+        <head>
+          {/* Remix Icons CDN */}
+          <link
+            href="https://cdn.jsdelivr.net/npm/remixicon/fonts/remixicon.css"
+            rel="stylesheet"
+          />
+        </head>
 
-      <body className="min-h-screen bg-neutral-50 text-neutral-900 antialiased">
-        {/* --- Global background image --- */}
-        <div className="pointer-events-none fixed inset-0 -z-10">
-          {bgSrc ? (
-            <>
-              <Image
-                src={bgSrc}
-                alt=""
-                fill
-                priority
-                className="object-cover brightness-[.85] saturate-150 contrast-120"
-              />
-              <div className="absolute inset-0 bg-neutral-950/55" />
-              <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_55%,rgba(0,0,0,0.35)_100%)]" />
-            </>
-          ) : null}
-        </div>
-       <ConsoleBinder />
-        <Header />
-        <main className="container mx-auto max-w-7xl px-4 py-8">{children}</main>
-        <Footer />
+        <body className="min-h-screen bg-neutral-50 text-neutral-900 antialiased">
+          {/* Background image + overlays */}
+          <div className="pointer-events-none fixed inset-0 -z-10">
+            {bgSrc ? (
+              <>
+                <Image
+                  src={bgSrc}
+                  alt=""
+                  fill
+                  priority
+                  className="object-cover brightness-[.85] saturate-150 contrast-120"
+                />
+                <div className="absolute inset-0 bg-neutral-950/55" />
+                <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_55%,rgba(0,0,0,0.35)_100%)]" />
+              </>
+            ) : null}
+          </div>
 
-        {/* --- Structured Data (JSON-LD) --- */}
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(ldOrg) }}
-        />
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(ldSite) }}
-        />
-      </body>
-    </html>
+          <ConsoleBinder />
+          <Header />
+
+          <main className="container mx-auto max-w-7xl px-4 py-8">{children}</main>
+
+          <Footer />
+
+          {/* Structured Data */}
+          <script
+            type="application/ld+json"
+            // eslint-disable-next-line react/no-danger
+            dangerouslySetInnerHTML={{ __html: JSON.stringify(ldOrg) }}
+          />
+          <script
+            type="application/ld+json"
+            // eslint-disable-next-line react/no-danger
+            dangerouslySetInnerHTML={{ __html: JSON.stringify(ldSite) }}
+          />
+        </body>
+      </html>
+    </ClerkProvider>
   );
 }
-

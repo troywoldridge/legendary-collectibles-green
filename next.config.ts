@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
    remotePatterns: [
       { protocol: 'https', hostname: 'imagedelivery.net', pathname: '/**' },
       { protocol: "https", hostname: "images.pokemontcg.io" },
+      { protocol: "https", hostname: "c1.scryfall.com" },
+      { protocol: "https", hostname: "cards.scryfall.io" }
     ],
   },
   async redirects() {
@@ -13,6 +15,9 @@ const nextConfig: NextConfig = {
       { source: "/vault", destination: "/search", permanent: true },
       { source: "/sets", destination: "/categories/pokemon/sets", permanent: true },
       { source: "/pokemon%20sets", destination: "/categories/pokemon/sets", permanent: true },
+      { source: '/categories/magic', destination: '/categories/mtg', permanent: true },
+      { source: '/categories/magic/:path*', destination: '/categories/mtg/:path*', permanent: true },
+
     ];
   },
 };

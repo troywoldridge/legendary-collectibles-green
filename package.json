@@ -11,19 +11,57 @@
     "funko:scrape": "node -r dotenv/config scripts/scrapeFunkoSitemaps.mjs",
     "funko:match": "node -r dotenv/config scripts/matchFunkoImages.mjs",
     "funko:seed": "node -r dotenv/config scripts/funkoHarvest.mjs seed",
-    "funko:crawl": "node -r dotenv/config scripts/funkoHarvest.mjs crawl"
+    "funko:crawl": "node -r dotenv/config scripts/funkoHarvest.mjs crawl",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "mtg:cards": "node scripts/scryfall-mtg-import.mjs cards --type=default_cards",
+    "mtg:rulings": "node scripts/scryfall-mtg-import.mjs rulings",
+    "mtg:foreign": "node scripts/scryfall-mtg-import.mjs foreign --type=all_cards",
+    "mtg:all": "pnpm mtg:cards && pnpm mtg:rulings && pnpm mtg:foreign",
+    "crawl:images": "node scripts/sportsCardImagesCrawler.mjs",
+    "promote:images": "node scripts/imagesPromote.mjs --limit=1000000 --min-score=0.78 --min-margin=0.12",
+    "images:full": "pnpm crawl:images && pnpm promote:images",
+    "ebay:subscribe:platform": "node scripts/ebaySubscribePlatform.mjs",
+    "cron:ebay:pokemon": "node scripts/cron/ebayPriceSnapshot.mjs --category=pokemon --limit=2000 --concurrency=3",
+    "cron:ebay:ygo": "node scripts/cron/ebayPriceSnapshot.mjs --category=ygo --limit=2000 --concurrency=3",
+    "prices:mtg": "node scripts/cron/updateMtgPrices.scryfall.mjs",
+    "prices:ygo": "node scripts/cron/updateYgoPrices.mjs",
+    "prices:pokemon": "node scripts/cron/updatePokemonPrices.mjs",
+    "// prices — individual": "",
+    "cron:mtg:scryfall": "node scripts/cron/updateMtgPrices.scryfall.mjs",
+    "cron:ygo": "node scripts/cron/updateYgoPrices.mjs",
+    "cron:pokemon": "node scripts/cron/updatePokemonPrices.mjs",
+
+    "// ebay — MTG": "",
+    "cron:ebay:mtg": "node scripts/cron/fetchMtgEbayPrices.mjs --only-missing-primary --only-missing-ebay --days=7 --limit=0 --batch=800 --concurrency=4",
+    "cron:ebay:mtg:all": "node scripts/cron/fetchMtgEbayPrices.mjs --all --limit=0 --batch=800 --concurrency=4",
+
+    "// orchestrator — runs all four sequentially": "",
+    "prices:all": "node scripts/cron/runAllPrices.mjs"
+
   },
   "dependencies": {
+    "@clerk/nextjs": "^6.34.5",
     "@neondatabase/serverless": "^1.0.2",
     "cheerio": "^1.1.2",
+    "cli-progress": "^3.12.0",
     "fast-xml-parser": "^5.3.0",
     "framer-motion": "^12.23.24",
+    "imghash": "^1.1.0",
+    "jimp": "^1.6.0",
+    "nanoid": "^5.1.6",
     "next": "16.0.1",
     "node-html-parser": "^7.0.1",
     "p-limit": "^7.2.0",
+    "p-retry": "^7.1.0",
     "postgres": "^3.4.7",
     "react": "19.2.0",
     "react-dom": "19.2.0",
+    "resend": "^6.4.1",
+    "sharp": "^0.34.5",
+    "stream-json": "^1.9.1",
+    "stripe": "^19.3.0",
     "undici": "^7.16.0"
   },
   "devDependencies": {
@@ -32,6 +70,7 @@
     "@types/pg": "^8.15.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "^4.0.7",
     "babel-plugin-react-compiler": "1.0.0",
     "dotenv": "^17.2.3",
     "drizzle-kit": "^0.31.6",
@@ -41,6 +80,7 @@
     "pg": "^8.16.3",
     "tailwindcss": "^4",
     "tailwindcss-animate": "^1.0.7",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.0.7"
   }
 }

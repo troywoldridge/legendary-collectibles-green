@@ -6,7 +6,8 @@ export const site = {
   url: "https://legendarycollectibles.com",
   ogImage: "/og-image.jpg",
   twitter: "@LegendaryShop", // ✅ added for layout.tsx
-  email: "support@legendarycollectibles.com",
+  email: "support@legendarycollectibles.com",        // primary
+  adminEmail: "admin@legendary-collectibles.com", 
   phone: "+1-800-555-0123",
 
   address: {

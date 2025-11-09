@@ -1,13 +1,24 @@
+// src/app/categories/mtg/sets/page.tsx
 import "server-only";
 import Link from "next/link";
 import Image from "next/image";
+import { sql } from "drizzle-orm";
+import { db } from "@/lib/db";
 import { CF_ACCOUNT_HASH } from "@/lib/cf";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type SearchParams = Record<string, string | string[] | undefined>;
-type SetItem = { id: string; name: string | null; series: string | null; release_date: string | null; logo_url: string | null; symbol_url: string | null; };
+type SetItem = {
+  id: string;                 // s.code
+  name: string | null;
+  set_type: string | null;
+  released_at: string | null; // YYYY-MM-DD
+  block: string | null;
+  icon_svg_uri: string | null;
+  cover_url: string | null;   // derived preview from set cards
+};
 
 const CATEGORY = {
   label: "Magic: The Gathering",
@@ -16,15 +27,78 @@ const CATEGORY = {
 };
 
 const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
-const cfImageUrl = (id: string, variant = "categoryThumb") => `https://imagedelivery.net/${CF_ACCOUNT_HASH}/${id}/${variant}`;
-function parsePerPage(v?: string | string[]) { const s = Array.isArray(v) ? v[0] : v; const n = Number(s ?? 30); return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 30; }
-function parsePage(v?: string | string[]) { const s = Array.isArray(v) ? v[0] : v; const n = Number(s ?? 1); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1; }
-function buildHref(base: string, qs: { q?: string | null; page?: number; perPage?: number }) { const p = new URLSearchParams(); if (qs.q) p.set("q", qs.q); if (qs.page) p.set("page", String(qs.page)); if (qs.perPage) p.set("perPage", String(qs.perPage)); const s = p.toString(); return s ? `${base}?${s}` : base; }
+const cfImageUrl = (id: string, variant = "categoryThumb") =>
+  `https://imagedelivery.net/${CF_ACCOUNT_HASH}/${id}/${variant}`;
 
-async function getSets(_opts: { q: string | null; offset: number; limit: number }): Promise<{ rows: SetItem[]; total: number; }> {
-  return { rows: [], total: 0 };
+function parsePerPage(v?: string | string[]) {
+  const s = Array.isArray(v) ? v[0] : v;
+  const n = Number(s ?? 30);
+  return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 30;
+}
+function parsePage(v?: string | string[]) {
+  const s = Array.isArray(v) ? v[0] : v;
+  const n = Number(s ?? 1);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+}
+function buildHref(base: string, qs: { q?: string | null; page?: number; perPage?: number }) {
+  const p = new URLSearchParams();
+  if (qs.q) p.set("q", qs.q);
+  if (qs.page) p.set("page", String(qs.page));
+  if (qs.perPage) p.set("perPage", String(qs.perPage));
+  const s = p.toString();
+  return s ? `${base}?${s}` : base;
 }
 
+/* ---- DB ---- */
+async function getSets(opts: { q: string | null; offset: number; limit: number }) {
+  const like = opts.q ? `%${opts.q}%` : null;
+  const where = like
+    ? sql`(s.name ILIKE ${like} OR s.code ILIKE ${like} OR s.block ILIKE ${like})`
+    : sql`TRUE`;
+
+  const totalRes = await db.execute<{ count: string }>(sql`
+    SELECT COUNT(*)::text AS count
+    FROM public.mtg_sets s
+    WHERE ${where}
+  `);
+  const total = Number(totalRes.rows?.[0]?.count ?? "0");
+
+  // Pull a representative cover from the set's cards + the set symbol
+  const rowsRes = await db.execute<SetItem>(sql`
+    SELECT
+      s.code AS id,
+      s.name,
+      s.set_type,
+      COALESCE(TO_CHAR(s.released_at,'YYYY-MM-DD'), NULL) AS released_at,
+      s.block,
+      s.icon_svg_uri,
+      (
+        SELECT COALESCE(
+          c.image_uris->>'normal',
+          c.image_uris->>'large',
+          c.image_uris->>'small',
+          (c.card_faces_raw->0->'image_uris'->>'normal'),
+          (c.card_faces_raw->0->'image_uris'->>'large'),
+          (c.card_faces_raw->0->'image_uris'->>'small')
+        )
+        FROM public.mtg_cards c
+        WHERE c.set_code = s.code
+        ORDER BY
+          (CASE WHEN c.collector_number ~ '^[0-9]+$' THEN 0 ELSE 1 END),
+          c.collector_number::text,
+          c.name ASC
+        LIMIT 1
+      ) AS cover_url
+    FROM public.mtg_sets s
+    WHERE ${where}
+    ORDER BY s.released_at DESC NULLS LAST, s.code ASC
+    LIMIT ${opts.limit} OFFSET ${opts.offset}
+  `);
+
+  return { rows: rowsRes.rows ?? [], total };
+}
+
+/* ---- Page ---- */
 export default async function MtgSetsIndex({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const sp = await searchParams;
   const baseHref = CATEGORY.baseHref;
@@ -72,7 +146,7 @@ export default async function MtgSetsIndex({ searchParams }: { searchParams: Pro
           <form action={baseHref} method="get" className="flex items-center gap-2">
             <input type="hidden" name="perPage" value={String(perPage)} />
             <input type="hidden" name="page" value="1" />
-            <input name="q" defaultValue={q ?? ""} placeholder="Search sets (name/id)…" className="w-[240px] md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50" />
+            <input name="q" defaultValue={q ?? ""} placeholder="Search sets (name/code/block)…" className="w-[240px] md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50" />
             <button type="submit" className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">Search</button>
             {q && (
               <Link href={buildHref(baseHref, { perPage, page: 1 })} className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15">
@@ -84,21 +158,32 @@ export default async function MtgSetsIndex({ searchParams }: { searchParams: Pro
       </div>
 
       {rows.length === 0 ? (
-        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">No sets yet — data coming soon.</div>
+        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">No sets found.</div>
       ) : (
         <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
           {rows.map((s) => {
-            const img = s.logo_url || s.symbol_url || banner;
+            const img =
+              (s.cover_url?.replace(/^http:\/\//, "https://")) ||
+              (s.icon_svg_uri?.replace(/^http:\/\//, "https://")) ||
+              banner;
             const href = `${CATEGORY.baseHref}/${encodeURIComponent(s.id)}`;
             return (
               <li key={s.id} className="rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:bg-white/10 hover:border-white/20 transition">
                 <Link href={href} className="block">
                   <div className="relative w-full" style={{ aspectRatio: "4 / 3" }}>
-                    <Image src={img} alt={s.name ?? s.id} fill unoptimized className="object-contain" sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw" />
+                    <Image
+                      src={img}
+                      alt={s.name ?? s.id}
+                      fill
+                      unoptimized
+                      className="object-contain"
+                      sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
+                    />
                   </div>
                   <div className="p-3">
                     <div className="line-clamp-2 text-sm font-medium text-white">{s.name ?? s.id}</div>
-                    <div className="mt-1 text-xs text-white/80">{s.release_date ?? ""}</div>
+                    <div className="mt-1 text-xs text-white/80">{[s.id, s.released_at ?? undefined, s.set_type ?? undefined].filter(Boolean).join(" • ")}</div>
+                    {s.block && <div className="mt-0.5 text-[11px] text-white/60 line-clamp-1">{s.block}</div>}
                   </div>
                 </Link>
               </li>

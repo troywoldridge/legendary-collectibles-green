@@ -6,6 +6,7 @@ import {
   pgTable,
   serial,
   integer,
+  index,
   text,
   boolean,
   timestamp,
@@ -13,12 +14,14 @@ import {
   uuid,
   jsonb,
   primaryKey,
+  varchar,
   bigserial,
   bigint
 } from "drizzle-orm/pg-core";
 
 import { sql } from "drizzle-orm";
 import { relations } from "drizzle-orm";
+import type { InferSelectModel, InferInsertModel } from "drizzle-orm";
 
 /**
  * E-commerce tables
@@ -548,26 +551,104 @@ export type NewYgoCardSet = typeof ygoCardSets.$inferInsert;
 export type YgoRawDump = typeof ygoRawDump.$inferSelect;
 export type NewYgoRawDump = typeof ygoRawDump.$inferInsert;
 
-export const funkoPops = pgTable("funko_pops", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
-  handle: text("handle").notNull().unique(),            // from dataset
-  title: text("title").notNull(),
-  imageUrl: text("image_url"),
-  series: text("series").array(),                       // dataset has an array of series strings
-  raw: jsonb("raw").notNull(),                          // full original object for future fields
+
+
+export const tcgVendorPrices = pgTable("tcg_vendor_prices", {
+  game: text("game").notNull(),
+  cardId: text("card_id").notNull(),
+  vendor: text("vendor").notNull(),
+  metric: text("metric").notNull().default("market"),
+  currency: text("currency").notNull(),
+  value: numeric("value"),
+  url: text("url"),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  meta: jsonb("meta"),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.game, t.cardId, t.vendor], name: "tcg_vendor_prices_pk" }),
+}));
+
+export const tcgVendorMaps = pgTable("tcg_vendor_maps", {
+  category: varchar("category", { length: 16 }).notNull(),
+  game: text("game").notNull(),
+  cardId: text("card_id").notNull(),
+  vendor: text("vendor").notNull(),
+  ident: text("ident"),
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  value: numeric("value", { precision: 12, scale: 2 }),
+  query: text("query"),
+  urlHint: text("url_hint"),
+  url: text("url"),
+   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+ (t) => ({
+   pk: primaryKey({ columns: [t.category, t.cardId, t.vendor], name: "tcg_vendor_prices_pk" }),
+    cardIdx: index("tcg_vendor_prices_card_idx").on(t.cardId),
+    vendorIdx: index("tcg_vendor_prices_vendor_idx").on(t.vendor),
+}));
+
+
+export type TcgVendorPrice = typeof tcgVendorPrices.$inferSelect;
+export type NewTcgVendorPrice = typeof tcgVendorPrices.$inferInsert;
+
+export const supportMessages = pgTable("support_messages", {
+  ticketId: text("ticket_id").primaryKey(),
+  name: text("name"),
+  email: text("email").notNull(),
+  subject: text("subject").notNull(),
+  message: text("message").notNull(),
+  ip: text("ip"),
+  userAgent: text("user_agent"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-// Optional helpful indexes (run once via a migration)
-export const funkoPopsTitleIndex = sql`
-  CREATE INDEX IF NOT EXISTS funko_pops_title_trgm
-  ON funko_pops USING gin (title gin_trgm_ops);
-`;
+export const emailEvents = pgTable(
+  "email_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
 
-export const funkoPopsSeriesIndex = sql`
-  CREATE INDEX IF NOT EXISTS funko_pops_series_idx
-  ON funko_pops USING gin (series);
-`;
+    provider: text("provider").notNull().default("resend"),
 
+    // Provider/webhook identifiers
+    eventId: text("event_id"),
+    eventType: text("event_type").notNull(), // e.g. "email.delivered"
+    emailId: text("email_id"),               // e.g. "email_123" (Resend mail id)
+    messageId: text("message_id"),           // SMTP Message-ID
 
+    // Subjects/addresses
+    subject: text("subject"),
+    fromAddress: text("from_address"),
+    toCsv: text("to_csv"),                   // "a@b.com, c@d.com"
+
+    // Timestamps
+    occurredAt: timestamp("occurred_at", { withTimezone: true, mode: "date" }),
+    emailCreatedAt: timestamp("email_created_at", { withTimezone: true, mode: "date" }),
+
+    // Click/open metadata (when present)
+    clickIp: text("click_ip"),
+    clickLink: text("click_link"),
+    clickTimestamp: timestamp("click_timestamp", { withTimezone: true, mode: "date" }),
+    clickUserAgent: text("click_user_agent"),
+
+    // Errors
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+
+    // Misc
+    idempotencyKey: text("idempotency_key"),
+    raw: jsonb("raw"),                       // full provider payload
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).defaultNow().notNull(),
+  },
+  (t) => ({
+    byWhen: index("email_events_when_idx").on(t.occurredAt),
+    byType: index("email_events_type_idx").on(t.eventType),
+    byEmailId: index("email_events_email_id_idx").on(t.emailId),
+    byMsgId: index("email_events_message_id_idx").on(t.messageId),
+    byTo: index("email_events_to_idx").on(t.toCsv),
+    bySubject: index("email_events_subject_idx").on(t.subject),
+  })
+);
+
+export type EmailEvent = InferSelectModel<typeof emailEvents>;
+export type NewEmailEvent = InferInsertModel<typeof emailEvents>;
