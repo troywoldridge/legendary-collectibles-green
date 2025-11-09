@@ -1,10 +1,10 @@
 // src/middleware.ts
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
 const CANONICAL_HOST = process.env.CANONICAL_HOST ?? ""; // e.g. "legendary-collectibles.com"
 
-// Public routes (let them through the middleware)
+// Public routes that never require auth
 const isPublicRoute = createRouteMatcher([
   "/",
   "/pricing",
@@ -12,43 +12,48 @@ const isPublicRoute = createRouteMatcher([
   "/sign-in(.*)",
   "/sign-up(.*)",
   "/api/dev/(.*)",
-  "/api/webhooks/stripe",
-  "/api/ebay/(.*)", // <-- your eBay endpoints must be reachable by the cron
+  "/api/webhooks/stripe", // keep webhooks public
 ]);
 
-export default clerkMiddleware(async (auth, req) => {
+export default clerkMiddleware(async (auth, req: NextRequest) => {
   const host = req.headers.get("host") || "";
   const isLocal =
     host.includes("127.0.0.1") ||
     host.startsWith("localhost") ||
-    host.includes(":300");
+    host.includes(":3000") ||
+    host.includes(":3001");
 
-  // Allow requests with a valid cron key to pass (for server-to-server jobs)
-  const cronKey = req.headers.get("x-cron-key") || "";
-  const cronOk = !!process.env.CRON_SECRET && cronKey === process.env.CRON_SECRET;
-
-  // Public or cron-authenticated requests skip auth
-  if (isPublicRoute(req) || cronOk) {
-    // optional canonical redirect for HTML navigations
-    if (!isLocal && CANONICAL_HOST && host !== CANONICAL_HOST) {
-      if (req.method === "GET" && req.headers.get("accept")?.includes("text/html")) {
-        const url = req.nextUrl.clone();
-        url.host = CANONICAL_HOST;
-        return NextResponse.redirect(url, 301);
-      }
-    }
-    return NextResponse.next();
+  // --- Canonical host redirect (preserve full query string) ---
+  if (!isLocal && CANONICAL_HOST && host !== CANONICAL_HOST) {
+    const url = new URL(req.url);
+    url.host = CANONICAL_HOST;      // keeps pathname + search + hash
+    // url.protocol = "https:";      // uncomment if you want to force https
+    return NextResponse.redirect(url, 308);
   }
 
-  // Private route: resolve the session and redirect to sign-in if unauthenticated
-  const session = await auth();
-  if (!session.userId) {
-    return session.redirectToSignIn();
+  // --- Auth gating for non-public routes ---
+  if (isPublicRoute(req)) return NextResponse.next();
+
+  // Use userId instead of .protect() to avoid typing/version quirks
+  const { userId } = await auth();
+  if (!userId) {
+    const signInUrl = new URL("/sign-in", req.url);
+    signInUrl.searchParams.set("redirect_url", req.url);
+    return NextResponse.redirect(signInUrl);
   }
 
   return NextResponse.next();
 });
 
+// Single, merged matcher (remove any other `export const config`)
 export const config = {
-  matcher: ["/((?!_next|.*\\..*).*)", "/"],
+  matcher: [
+    // Run on all paths except:
+    //  - Next internals: _next/*
+    //  - Image optimizer: _next/image
+    //  - Root public files: favicon/robots/sitemap
+    //  - Any path that looks like a static file (has an extension)
+    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|assets/|images/|public/|.*\\..*).*)",
+    "/", // also match the site root
+  ],
 };
