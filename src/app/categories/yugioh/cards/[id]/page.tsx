@@ -229,11 +229,7 @@ export default async function YugiohCardDetailPage({
                 </div>
               </div>
 
-              {card.ygoprodeck_url && (
-                <Link href={card.ygoprodeck_url} target="_blank" className="text-sm text-sky-300 hover:underline">
-                  View on YGOPRODeck →
-                </Link>
-              )}
+              
             </div>
 
             {/* Collection action */}

@@ -2,17 +2,24 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
-const CANONICAL_HOST = process.env.CANONICAL_HOST ?? ""; // e.g. "legendary-collectibles.com"
+const CANONICAL_HOST = process.env.CANONICAL_HOST ?? ""; // e.g. "legendary-collectibles.com";
 
 // Public routes that never require auth
 const isPublicRoute = createRouteMatcher([
-  "/",
-  "/pricing",
-  "/categories(.*)",
+  "/",                    // home
+  "/pricing(.*)",             // pricing page
+  "/categories(.*)",      // all category pages
   "/sign-in(.*)",
   "/sign-up(.*)",
+
+  // API routes that must stay public
   "/api/dev/(.*)",
-  "/api/webhooks/stripe", // keep webhooks public
+  "/api/webhooks/stripe",
+  "/api/stripe/checkout/sessions(.*)",
+  "/api/stripe/checkout/start",
+
+  // Checkout result pages (Stripe redirects here with ?sid=...)
+  "/checkout/(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, req: NextRequest) => {
@@ -23,29 +30,34 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
     host.includes(":3000") ||
     host.includes(":3001");
 
-  // --- Canonical host redirect (preserve full query string) ---
+  // --- Canonical host redirect (preserve full URL: path + query + hash) ---
   if (!isLocal && CANONICAL_HOST && host !== CANONICAL_HOST) {
-    const url = new URL(req.url);
-    url.host = CANONICAL_HOST;      // keeps pathname + search + hash
-    // url.protocol = "https:";      // uncomment if you want to force https
+    const url = req.nextUrl.clone(); // clone keeps pathname + search + hash
+    url.host = CANONICAL_HOST;
+    // url.protocol = "https:"; // uncomment if you explicitly want https
     return NextResponse.redirect(url, 308);
   }
 
-  // --- Auth gating for non-public routes ---
-  if (isPublicRoute(req)) return NextResponse.next();
+  // --- Allow all public routes straight through ---
+  if (isPublicRoute(req)) {
+    return NextResponse.next();
+  }
 
-  // Use userId instead of .protect() to avoid typing/version quirks
+  // --- Auth gating for everything else ---
   const { userId } = await auth();
+
   if (!userId) {
-    const signInUrl = new URL("/sign-in", req.url);
-    signInUrl.searchParams.set("redirect_url", req.url);
+    // send them to sign-in, then back where they were
+    const signInUrl = req.nextUrl.clone();
+    signInUrl.pathname = "/sign-in";
+    signInUrl.searchParams.set("redirect_url", req.nextUrl.toString());
     return NextResponse.redirect(signInUrl);
   }
 
   return NextResponse.next();
 });
 
-// Single, merged matcher (remove any other `export const config`)
+// Apply middleware to most routes, but skip static assets and Next internals
 export const config = {
   matcher: [
     // Run on all paths except:

@@ -44,6 +44,7 @@
   "dependencies": {
     "@clerk/nextjs": "^6.34.5",
     "@neondatabase/serverless": "^1.0.2",
+    "@react-pdf/renderer": "^4.3.1",
     "aws4": "^1.13.2",
     "cheerio": "^1.1.2",
     "cli-progress": "^3.12.0",
@@ -55,6 +56,7 @@
     "nanoid": "^5.1.6",
     "next": "16.0.1",
     "node-html-parser": "^7.0.1",
+    "nodemailer": "^7.0.10",
     "p-limit": "^7.2.0",
     "p-retry": "^7.1.0",
     "postgres": "^3.4.7",
@@ -67,8 +69,10 @@
     "undici": "^7.16.0"
   },
   "devDependencies": {
+    "@clerk/backend": "^2.21.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/nodemailer": "^7.0.3",
     "@types/pg": "^8.15.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",

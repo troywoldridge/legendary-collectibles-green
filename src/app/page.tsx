@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 // app/(site)/page.tsx (or your current path)
 import "server-only";
 import Link from "next/link";
@@ -325,7 +326,7 @@ export default async function HomePage() {
                       key={`${item.href}-${idx}`}
                       className="snap-start w-[280px] shrink-0 overflow-hidden rounded-xl border border-white/20 bg-white/5 shadow-[0_8px_20px_rgba(0,0,0,.25)] backdrop-blur-sm transition hover:bg-white/10 hover:border-white/30"
                     >
-                      <div className="relative aspect-[4/3] w-full bg-white/5">
+                      <div className="relative aspect-4/3 w-full bg-white/5">
                         <Image
                           src={src}
                           alt={item.alt ?? item.title}
