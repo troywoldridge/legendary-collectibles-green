@@ -45,6 +45,7 @@ export default function Header() {
     { href: "/categories/yugioh/cards", label: "Yu-Gi-Oh! Cards" },
     { href: "/categories/magic/sets", label: "MTG Sets" },
     { href: "/categories/magic/cards", label: "MTG Cards" },
+    { href: "/collection", label: "My Collection" },
     // { href: "/categories/sports/cards", label: "Sports Cards" },
   ];
   if (FEATURES.funko) nav.push({ href: "/categories/funko/sets", label: "Funko Pop" });

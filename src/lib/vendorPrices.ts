@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 // src/lib/vendorPrices.ts
 import "server-only";
 import { db } from "@/lib/db";

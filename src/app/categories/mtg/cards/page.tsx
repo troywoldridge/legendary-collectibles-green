@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
 import Link from "next/link";
 import Image from "next/image";
@@ -343,21 +344,31 @@ export default async function MtgCardsIndex({
         </div>
       </form>
 
-      {/* Grid */}
+           {/* Grid */}
       {rows.length === 0 ? (
-        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">No cards found. Try different filters.</div>
+        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">
+          No cards found. Try different filters.
+        </div>
       ) : (
         <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
           {rows.map((c) => {
-            const img = (c.image_url ?? "").replace(/^http:\/\//, "https://") || "/placeholder.svg";
+            const img =
+              (c.image_url ?? "").replace(/^http:\/\//, "https://") ||
+              "/placeholder.svg";
             const href = `/categories/mtg/cards/${encodeURIComponent(c.id)}`;
             const price = fmt(c.price_usd);
 
             return (
-              <li key={c.id} className="rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:bg-white/10 hover:border-white/20 transition">
+              <li
+                key={c.id}
+                className="rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:bg-white/10 hover:border-white/20 transition"
+              >
                 {/* Card (image + text) */}
                 <Link href={href} className="block" prefetch={false}>
-                  <div className="relative w-full" style={{ aspectRatio: "3 / 4" }}>
+                  <div
+                    className="relative w-full"
+                    style={{ aspectRatio: "3 / 4" }}
+                  >
                     <Image
                       src={img}
                       alt={c.name ?? c.id}
@@ -368,14 +379,25 @@ export default async function MtgCardsIndex({
                     />
                   </div>
                   <div className="p-3">
-                    <div className="line-clamp-2 text-sm font-medium text-white">{c.name ?? c.id}</div>
+                    <div className="line-clamp-2 text-sm font-medium text-white">
+                      {c.name ?? c.id}
+                    </div>
                     <div className="mt-1 text-xs text-white/70">
-                      {[c.set_code || undefined, c.number || undefined, c.rarity || undefined].filter(Boolean).join(" • ")}
+                      {[
+                        c.set_code || undefined,
+                        c.number || undefined,
+                        c.rarity || undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(" • ")}
                     </div>
                     <div className="mt-1 text-xs text-white/60">
-                      {price ? `$${price}` : "—"}{c.price_updated ? ` • ${c.price_updated}` : ""}
+                      {price ? `$${price}` : "—"}
+                      {c.price_updated ? ` • ${c.price_updated}` : ""}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-white/60 line-clamp-1">{c.type_line ?? ""}</div>
+                    <div className="mt-0.5 text-[11px] text-white/60 line-clamp-1">
+                      {c.type_line ?? ""}
+                    </div>
                   </div>
                 </Link>
 

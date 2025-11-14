@@ -4,6 +4,8 @@
 
 export * from "./billing";      // <-- exposes plans, userPlans, billingCustomers
 export * from "./mtg";          // (example) your MTG tables
-// src/db/schema/index.ts
+
 export * from "@/lib/db/schema/pro";
+export * from "@/lib/db/schema/collectionAnalytics";
+
 

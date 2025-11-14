@@ -1,0 +1,502 @@
+// src/app/collection/page.tsx
+import "server-only";
+
+import Link from "next/link";
+import Image from "next/image";
+import { auth } from "@clerk/nextjs/server";
+import { sql } from "drizzle-orm";
+import { db } from "@/lib/db";
+import CollectionDashboardClient from "@/components/collection/CollectionDashboardClient";
+
+import CollectionTableBody, {
+  type CollectionItem,
+} from "@/app/collection/CollectionTableBody";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+type SearchParams = Record<string, string | string[] | undefined>;
+
+function first(v: string | string[] | undefined): string | undefined {
+  if (Array.isArray(v)) return v[0];
+  return v;
+}
+
+function formatMoneyFromCents(cents: number | null | undefined): string {
+  if (cents == null) return "—";
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+function formatGameLabel(game: string | null | undefined): string {
+  switch (game) {
+    case "pokemon":
+      return "Pokémon";
+    case "mtg":
+    case "magic":
+      return "Magic: The Gathering";
+    case "yugioh":
+    case "ygo":
+      return "Yu-Gi-Oh!";
+    default:
+      return "Other / Unknown";
+  }
+}
+
+export default async function CollectionPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
+  const sp = await searchParams;
+  const { userId } = await auth();
+
+  if (!userId) {
+    return (
+      <section className="p-8 text-white">
+        <h1 className="text-2xl font-bold">You must sign in</h1>
+        <p className="mt-2">
+          <Link href="/sign-in" className="underline">
+            Sign in
+          </Link>{" "}
+          to view your collection.
+        </p>
+      </section>
+    );
+  }
+
+  // ---- Filters from query string ----
+  const sort = first(sp.sort) ?? "date";
+  const game = first(sp.game) ?? "all";
+  const setName = first(sp.set) ?? "all";
+  const folder = first(sp.folder) ?? "all";
+  const query = first(sp.q) ?? "";
+
+  // ---- Main rows for current view ----
+  const rowsRes = await db.execute<CollectionItem>(sql`
+    SELECT
+      id,
+      game,
+      card_id,
+      card_name,
+      set_name,
+      image_url,
+      grading_company,
+      grade_label,
+      cert_number,
+      quantity,
+      folder,
+      cost_cents,
+      last_value_cents,
+      created_at
+    FROM user_collection_items
+    WHERE user_id = ${userId}
+      AND (${game} = 'all' OR game = ${game})
+      AND (${setName} = 'all' OR set_name = ${setName})
+      AND (${folder} = 'all' OR folder = ${folder})
+      AND (
+        ${query} = ''
+        OR card_name ILIKE '%' || ${query} || '%'
+        OR set_name ILIKE '%' || ${query} || '%'
+      )
+    ORDER BY
+      CASE WHEN ${sort} = 'date' THEN created_at END DESC,
+      CASE WHEN ${sort} = 'name' THEN card_name END ASC
+  `);
+
+  const items = rowsRes.rows ?? [];
+
+  // ---- Distinct set / folder options (for dropdowns) ----
+  const setOptions = Array.from(
+    new Set(
+      items
+        .map((r) => r.set_name)
+        .filter((v): v is string => Boolean(v && v.trim())),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+
+  const folderOptions = Array.from(
+    new Set(
+      items
+        .map((r) => r.folder)
+        .filter((v): v is string => Boolean(v && v.trim())),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+
+  // ---- Analytics summary for this view ----
+  const distinctItems = items.length;
+  const totalCopies = items.reduce(
+    (sum, r) => sum + (r.quantity ?? 0),
+    0,
+  );
+
+  const totalCostCents = items.reduce((sum, r) => {
+    const qty = r.quantity ?? 0;
+    const cost = r.cost_cents ?? 0;
+    return sum + qty * cost;
+  }, 0);
+
+  const estValueCents = items.reduce((sum, r) => {
+    const qty = r.quantity ?? 0;
+    const value = r.last_value_cents ?? 0;
+    return sum + qty * value;
+  }, 0);
+
+  const byGameMap = new Map<
+    string,
+    { copies: number; valueCents: number }
+  >();
+
+  for (const r of items) {
+    const g = r.game ?? "other";
+    const entry = byGameMap.get(g) ?? { copies: 0, valueCents: 0 };
+    entry.copies += r.quantity ?? 0;
+    entry.valueCents += (r.last_value_cents ?? 0) * (r.quantity ?? 0);
+    byGameMap.set(g, entry);
+  }
+
+  const byGame = Array.from(byGameMap.entries()).map(
+    ([gameKey, data]) => ({
+      game: gameKey,
+      copies: data.copies,
+      valueCents: data.valueCents,
+    }),
+  );
+
+  const hasValueData = items.some(
+    (r) => r.last_value_cents != null && r.last_value_cents > 0,
+  );
+
+  const portfolioGainCents = estValueCents - totalCostCents;
+  const portfolioGainPct =
+    totalCostCents > 0
+      ? (portfolioGainCents / totalCostCents) * 100
+      : null;
+
+  // ---- Recently added (ignores filters, just last 5 overall) ----
+  const recentRes = await db.execute<CollectionItem>(sql`
+    SELECT
+      id,
+      game,
+      card_id,
+      card_name,
+      set_name,
+      image_url,
+      grading_company,
+      grade_label,
+      cert_number,
+      quantity,
+      folder,
+      cost_cents,
+      last_value_cents,
+      created_at
+    FROM user_collection_items
+    WHERE user_id = ${userId}
+    ORDER BY created_at DESC
+    LIMIT 5
+  `);
+  const recent = recentRes.rows ?? [];
+
+  return (
+    <section className="mx-auto max-w-7xl space-y-6 p-4 text-white">
+      {/* Header */}
+      <header>
+        <h1 className="text-3xl font-bold">My Collection</h1>
+        <p className="mt-1 text-sm text-white/80">
+          Manage your personal collection across Pokémon, Magic, and
+          Yu-Gi-Oh!. Filters, summary, and analytics update live.
+        </p>
+        <p className="mt-1 text-sm text-white/70">
+          Track your portfolio on the{" "}
+          <Link
+            href="/collection/analytics"
+            className="text-sky-300 hover:underline"
+          >
+            analytics page
+          </Link>
+          .
+        </p>
+      </header>
+
+      <CollectionDashboardClient />
+
+      {/* Analytics row */}
+      <div className="grid gap-3 md:grid-cols-4">
+        {/* Distinct items */}
+        <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
+          <div className="text-xs uppercase tracking-wide text-white/60">
+            Distinct items
+          </div>
+          <div className="mt-1 text-2xl font-semibold">
+            {distinctItems}
+          </div>
+          <div className="mt-1 text-[11px] text-white/60">
+            Filtered by your current view.
+          </div>
+        </div>
+
+        {/* Total copies */}
+        <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
+          <div className="text-xs uppercase tracking-wide text-white/60">
+            Total copies
+          </div>
+          <div className="mt-1 text-2xl font-semibold">
+            {totalCopies}
+          </div>
+          <div className="mt-1 text-[11px] text-white/60">
+            Sum of all quantities in this view.
+          </div>
+        </div>
+
+        {/* Portfolio value */}
+        <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
+          <div className="text-xs uppercase tracking-wide text-white/60">
+            Est. collection value
+          </div>
+          <div className="mt-1 text-2xl font-semibold">
+            {hasValueData
+              ? formatMoneyFromCents(estValueCents)
+              : "—"}
+          </div>
+          <div className="mt-1 text-[11px] text-white/60">
+            Based on latest price × quantity.
+          </div>
+          {hasValueData && (
+            <div className="mt-2 text-xs text-white/70">
+              Cost basis:{" "}
+              <span>{formatMoneyFromCents(totalCostCents)}</span>
+              {portfolioGainPct != null && (
+                <span
+                  className={
+                    portfolioGainCents >= 0
+                      ? "ml-2 text-emerald-300"
+                      : "ml-2 text-red-300"
+                  }
+                >
+                  {portfolioGainCents >= 0 ? "▲" : "▼"}{" "}
+                  {Math.abs(portfolioGainPct).toFixed(1)}%
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* By game */}
+        <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
+          <div className="flex items-center justify-between text-xs">
+            <span className="uppercase tracking-wide text-white/60">
+              By game (this view)
+            </span>
+          </div>
+          <div className="mt-2 space-y-1.5">
+            {byGame.length === 0 ? (
+              <div className="text-xs text-white/60">
+                No items yet. Add cards to see a breakdown.
+              </div>
+            ) : (
+              byGame.map((g) => {
+                const label = formatGameLabel(g.game);
+                const totalForGame = byGame.reduce(
+                  (sum, x) => sum + x.valueCents,
+                  0,
+                );
+                const sharePct =
+                  totalForGame > 0
+                    ? (g.valueCents / totalForGame) * 100
+                    : 0;
+
+                return (
+                  <div
+                    key={g.game}
+                    className="space-y-0.5 text-xs"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span>{label}</span>
+                      <span className="text-white/70">
+                        {g.copies}x
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+                        <div
+                          className="h-full rounded-full bg-white/70"
+                          style={{
+                            width: `${Math.max(
+                              8,
+                              Math.min(100, sharePct || 0),
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="text-[11px] text-white/70">
+                        {formatMoneyFromCents(g.valueCents)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Recently added */}
+      <div className="rounded-2xl border border-white/20 bg-black/40 p-4 backdrop-blur-sm">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold">Recently added</h2>
+          <span className="text-xs text-white/60">
+            {recent.length > 0
+              ? "Most recent 5 items in your collection."
+              : "Nothing added yet."}
+          </span>
+        </div>
+
+        {recent.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-white/20 bg-black/40 p-4 text-sm text-white/70">
+            When you add cards to your collection, they’ll show up here
+            for quick access.
+          </div>
+        ) : (
+          <ul className="divide-y divide-white/10">
+            {recent.map((r) => {
+              const dt =
+                r.created_at != null
+                  ? new Date(r.created_at)
+                  : null;
+              const when = dt
+                ? dt.toLocaleDateString()
+                : "";
+
+              return (
+                <li
+                  key={r.id}
+                  className="flex items-center gap-3 py-2"
+                >
+                  <div className="relative h-14 w-10 shrink-0 overflow-hidden rounded border border-white/20 bg-black/40">
+                    {r.image_url ? (
+                      <Image
+                        src={r.image_url}
+                        alt={r.card_name ?? "Card"}
+                        fill
+                        unoptimized
+                        className="object-contain"
+                        sizes="40px"
+                      />
+                    ) : (
+                      <div className="grid h-full w-full place-items-center text-[10px] text-white/60">
+                        No image
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex-1">
+                    <div className="line-clamp-1 text-sm font-medium">
+                      {r.card_name ?? r.card_id ?? "Unknown card"}
+                    </div>
+                    <div className="text-xs text-white/60">
+                      {r.set_name ?? "—"} •{" "}
+                      {formatGameLabel(r.game)}
+                    </div>
+                  </div>
+                  <div className="text-right text-xs text-white/60">
+                    <div>{when}</div>
+                    {r.quantity != null && (
+                      <div>{r.quantity}x</div>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      {/* Filter bar */}
+      <div className="rounded-2xl border border-white/20 bg-black/40 p-4 backdrop-blur-sm">
+        <form className="flex flex-wrap items-center gap-3">
+          {/* Sort */}
+          <select
+            name="sort"
+            defaultValue={sort}
+            className="rounded-md bg-white/10 px-3 py-2 text-sm"
+          >
+            <option value="date">Date Added</option>
+            <option value="name">Name</option>
+          </select>
+
+          {/* Game */}
+          <select
+            name="game"
+            defaultValue={game}
+            className="rounded-md bg-white/10 px-3 py-2 text-sm"
+          >
+            <option value="all">All Games</option>
+            <option value="pokemon">Pokémon</option>
+            <option value="mtg">Magic</option>
+            <option value="yugioh">Yu-Gi-Oh!</option>
+          </select>
+
+          {/* Set */}
+          <select
+            name="set"
+            defaultValue={setName}
+            className="rounded-md bg-white/10 px-3 py-2 text-sm"
+          >
+            <option value="all">All Sets</option>
+            {setOptions.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+
+          {/* Folder */}
+          <select
+            name="folder"
+            defaultValue={folder}
+            className="rounded-md bg-white/10 px-3 py-2 text-sm"
+          >
+            <option value="all">All Folders</option>
+            {folderOptions.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+
+          {/* Search */}
+          <input
+            type="text"
+            name="q"
+            placeholder="Search your collection…"
+            defaultValue={query}
+            className="flex-1 rounded-md bg-white/10 px-3 py-2 text-sm"
+          />
+
+          <button className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-700">
+            Filter
+          </button>
+        </form>
+      </div>
+
+      {/* Table */}
+      <div className="w-full overflow-x-auto rounded-2xl border border-white/20 bg-black/40 backdrop-blur-sm">
+        <table className="w-full border-collapse text-sm">
+          <thead className="bg-white/10 text-left text-xs uppercase tracking-wide text-white/70">
+            <tr>
+              <th className="p-2">Photo</th>
+              <th className="p-2">Item</th>
+              <th className="p-2">Grade</th>
+              <th className="p-2">Qty</th>
+              <th className="p-2">Folder</th>
+              <th className="p-2">Cost</th>
+              <th className="p-2">Total Value</th>
+              <th className="p-2">Actions</th>
+            </tr>
+          </thead>
+
+          <CollectionTableBody items={items} />
+        </table>
+      </div>
+    </section>
+  );
+}

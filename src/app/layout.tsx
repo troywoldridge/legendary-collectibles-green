@@ -157,12 +157,12 @@ export default function RootLayout({
           {/* Structured Data */}
           <script
             type="application/ld+json"
-            // eslint-disable-next-line react/no-danger
+             
             dangerouslySetInnerHTML={{ __html: JSON.stringify(ldOrg) }}
           />
           <script
             type="application/ld+json"
-            // eslint-disable-next-line react/no-danger
+             
             dangerouslySetInnerHTML={{ __html: JSON.stringify(ldSite) }}
           />
         </body>
