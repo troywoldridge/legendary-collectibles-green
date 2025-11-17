@@ -14,6 +14,7 @@ import CardActions from "@/components/collection/CardActions";
 
 /* ★ Marketplace CTAs */
 import CardAmazonCTA from "@/components/CardAmazonCTA";
+import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
 
 export const runtime = "nodejs";
@@ -190,10 +191,16 @@ export default async function YugiohCardDetailPage({
   const moneyCents = (c?: number | null) =>
     c == null ? "—" : `$${(c / 100).toFixed(2)}`;
 
+  // Amazon affiliate link (server-side)
+  const amazonLink = await getAffiliateLinkForCard({
+    category: "yugioh",
+    cardId: card.id, // <-- use `id`, not `card_id`
+    marketplace: "amazon",
+  });
+
   /* plan gate */
   const { userId } = await auth();
-const canSave = !!userId;
-
+  const canSave = !!userId;
 
   return (
     <section className="space-y-8">
@@ -265,11 +272,7 @@ const canSave = !!userId;
                 game="Yu-Gi-Oh!"
                 variant="pill"
               />
-              <CardAmazonCTA
-                card={{ id: card.id, name: card.name, set_name: firstSet ?? null }}
-                game="Yu-Gi-Oh!"
-                variant="pill"
-              />
+              <CardAmazonCTA url={amazonLink?.url} label={card.name} />
             </div>
 
             {/* Stat grid */}
@@ -378,9 +381,9 @@ const canSave = !!userId;
               <div className="text-white/90">
                 <div>
                   Median:{" "}
-                  <span className="font-semibold">
-                    {moneyCents(ebay.median_cents)}
-                  </span>{" "}
+                    <span className="font-semibold">
+                      {moneyCents(ebay.median_cents)}
+                    </span>{" "}
                   {ebay.sample_count ? (
                     <span className="text-white/60">
                       • n={ebay.sample_count}

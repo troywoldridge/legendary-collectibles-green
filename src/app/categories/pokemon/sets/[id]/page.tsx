@@ -5,9 +5,7 @@ import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
-/* ★ Marketplace CTAs */
-import CardAmazonCTA from "@/components/CardAmazonCTA";
-import CardEbayCTA from "@/components/CardEbayCTA";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -233,19 +231,7 @@ export default async function SetDetailPage({
             <h1 className="text-2xl font-bold text-white">{setRow.name ?? setParam}</h1>
             {subtitle && <div className="text-sm text-white/80">{subtitle}</div>}
 
-            {/* ★ Set-level CTAs */}
-            <div className="mt-2 flex flex-wrap gap-2">
-              <CardEbayCTA
-                card={{ id: setRow.id, name: setRow.name ?? setRow.id, set_code: setRow.id, set_name: setRow.name ?? setRow.id }}
-                game="Pokémon TCG"
-                variant="pill"
-              />
-              <CardAmazonCTA
-                card={{ id: setRow.id, name: setRow.name ?? setRow.id, set_code: setRow.id, set_name: setRow.name ?? setRow.id }}
-                game="Pokémon TCG"
-                variant="pill"
-              />
-            </div>
+            
           </div>
         </div>
 
@@ -296,7 +282,7 @@ export default async function SetDetailPage({
               name="q"
               defaultValue={q ?? ""}
               placeholder="Search cards (name/rarity/id)…"
-              className="w-[240px] md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
+              className="w-60 md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
             />
             <button type="submit" className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
               Search
@@ -366,32 +352,7 @@ export default async function SetDetailPage({
                   </div>
                 </Link>
 
-                {/* ★ TEXT ABOVE CTAs */}
-                <div className="px-3 pb-3 pt-0">
-                  {/* (already showed rarity above; keep spacing consistent) */}
-                  <div className="mt-2 flex items-center gap-2">
-                    <CardEbayCTA
-                      card={{
-                        id: c.id,
-                        name: c.name ?? c.id,
-                        set_code: setRow.id,
-                        set_name: setRow.name ?? setRow.id,
-                      }}
-                      game="Pokémon TCG"
-                      compact
-                    />
-                    <CardAmazonCTA
-                      card={{
-                        id: c.id,
-                        name: c.name ?? c.id,
-                        set_code: setRow.id,
-                        set_name: setRow.name ?? setRow.id,
-                      }}
-                      game="Pokémon TCG"
-                      compact
-                    />
-                  </div>
-                </div>
+                
               </li>
             );
           })}

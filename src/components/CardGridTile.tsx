@@ -1,9 +1,10 @@
+// src/components/CardGridTile.tsx
 "use client";
 
 import Link from "next/link";
 import Image from "next/image";
-import CardEbayCTA from "@/components/CardEbayCTA";
-import CardAmazonCTA from "@/components/CardAmazonCTA";
+
+
 
 type Game = "Pokemon TCG" | "Magic The Gathering" | "Yu-Gi-Oh!";
 
@@ -82,8 +83,12 @@ export default function CardGridTile({
 
             {(subtitleLeft || subtitleRightLabel) && (
               <div className="mt-1 text-xs text-white/80 flex items-center gap-2">
-                {subtitleLeft ? <span className="truncate">{subtitleLeft}</span> : null}
-                {subtitleLeft && subtitleRightLabel ? <span className="opacity-60">•</span> : null}
+                {subtitleLeft ? (
+                  <span className="truncate">{subtitleLeft}</span>
+                ) : null}
+                {subtitleLeft && subtitleRightLabel ? (
+                  <span className="opacity-60">•</span>
+                ) : null}
                 {subtitleRightLabel ? (
                   subtitleRightHref ? (
                     <Link
@@ -107,8 +112,8 @@ export default function CardGridTile({
         {cta ? (
           <div className="mt-auto px-3 pb-3 pt-0 flex gap-2">
             {/* Keep props minimal to avoid TS prop mismatches across your repo */}
-            <CardEbayCTA card={cta.card} game={cta.game} />
-            <CardAmazonCTA card={cta.card} game={cta.game} />
+          
+            {/* Amazon CTA intentionally removed from grid tiles */}
           </div>
         ) : null}
       </div>

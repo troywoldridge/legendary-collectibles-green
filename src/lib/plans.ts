@@ -1,95 +1,161 @@
 // src/lib/plans.ts
 import "server-only";
+
+import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { plans, userPlans, userSubscriptions } from "@/lib/db/schema/billing";
-import { eq, desc } from "drizzle-orm";
 
 export type PlanId = "free" | "collector" | "pro";
-export type PlanLimits = {
-  maxCollections: number | null;
-  maxItems: number | null;
-  // add more as your plans JSON includes them
-  priceAlerts?: number | null;
-  wantlist?: boolean | null;
-  dailyValuation?: boolean | null;
-  pdfReports?: boolean | null;
+
+export type Plan = {
+  id: PlanId;
+  name: string;
+  badge?: string;
+  priceLabel: string; // "Free", "$7/mo", "$29.99/mo"
+  priceMonthlyCents: number; // 0, 700, 2999
+  description: string;
+
+  limits: {
+    maxCollections: number | null; // null = unlimited
+    maxItemsTotal: number | null;  // null = unlimited
+  };
+
+  features: {
+    amazonCtas: boolean;
+    pricechartingTopLists: boolean;   // “Top {category} by PriceCharting”
+    trendsAndMovers: boolean;         // trends, top gainers/losers
+    csvExports: boolean;              // downloadable price sheets / collection CSV
+    insuranceReports: boolean;        // collection valuation for insurance
+    advancedLtvTools: boolean;        // “list / loy automated calculator”, ROI tools
+  };
 };
 
-const FALLBACK_PLAN: PlanId = "free";
+export const PLANS: Record<PlanId, Plan> = {
+  free: {
+    id: "free",
+    name: "Free",
+    badge: "Starter",
+    priceLabel: "Free",
+    priceMonthlyCents: 0,
+    description:
+      "Track a starter collection and try out Legendary Collectibles with no commitment.",
+    limits: {
+      maxCollections: 1,
+      maxItemsTotal: 500,
+    },
+    features: {
+      amazonCtas: true,
+      pricechartingTopLists: false,
+      trendsAndMovers: false,
+      csvExports: false,
+      insuranceReports: false,
+      advancedLtvTools: false,
+    },
+  },
+  collector: {
+    id: "collector",
+    name: "Collector",
+    badge: "Most Popular",
+    priceLabel: "$7 / month",
+    priceMonthlyCents: 700,
+    description:
+      "For serious collectors who want trends, leaderboards, and deep PriceCharting insights.",
+    limits: {
+      maxCollections: 5,
+      maxItemsTotal: 5000,
+    },
+    features: {
+      amazonCtas: true,
+      pricechartingTopLists: true,
+      trendsAndMovers: true,
+      csvExports: false,
+      insuranceReports: false,
+      advancedLtvTools: false,
+    },
+  },
+  pro: {
+    id: "pro",
+    name: "Pro Collector",
+    badge: "For Power Users",
+    priceLabel: "$29.99 / month",
+    priceMonthlyCents: 2999,
+    description:
+      "High-volume collectors, stores, and investors. Full exports, valuations, and advanced tools.",
+    limits: {
+      maxCollections: null,
+      maxItemsTotal: null,
+    },
+    features: {
+      amazonCtas: true,
+      pricechartingTopLists: true,
+      trendsAndMovers: true,
+      csvExports: true,
+      insuranceReports: true,
+      advancedLtvTools: true,
+    },
+  },
+};
 
-/** Determine the user’s effective plan (active subscription > stored plan > free). */
-export async function getUserPlan(userId: string): Promise<{
-  planId: PlanId;
-  limits: PlanLimits;
-}> {
-  // Prefer an active subscription if you use subscriptions
-  const subRow = (
-    await db
-      .select({
-        planId: userSubscriptions.planId,
-        status: userSubscriptions.status,
-        // comment out if you don't have createdAt in this table
-        // createdAt: userSubscriptions.createdAt,
-      })
-      .from(userSubscriptions)
-      .where(eq(userSubscriptions.userId, userId))
-      // .orderBy(desc(userSubscriptions.createdAt))
-      .limit(1)
-  )[0];
+/* ---------- DB glue: get user plan from subscriptions ---------- */
 
-  let effective: PlanId | null = null;
+type DbPlanRow = {
+  plan_id: PlanId | null;
+};
 
-  if (subRow?.status === "active") {
-    effective = subRow.planId as PlanId;
-  } else {
-    // Fallback to simple mapping table
-    const up = (
-      await db
-        .select({ planId: userPlans.planId })
-        .from(userPlans)
-        .where(eq(userPlans.userId, userId))
-        .limit(1)
-    )[0];
-    effective = (up?.planId as PlanId | null) ?? null;
+// You may already have a subscription table with a different schema.
+// Adjust the SQL if needed.
+export async function getUserPlan(userId: string | null): Promise<Plan> {
+  if (!userId) {
+    return PLANS.free;
   }
 
-  const planId: PlanId = effective ?? FALLBACK_PLAN;
+  // Example: a `user_plans` view or table:
+  //   user_id (text, pk)
+  //   plan_id ("free" | "collector" | "pro")
+  const res = await db.execute<DbPlanRow>(sql`
+    SELECT plan_id
+    FROM user_plans
+    WHERE user_id = ${userId}
+    LIMIT 1
+  `);
 
-  const plan = (
-    await db
-      .select({ limits: plans.limits })
-      .from(plans)
-      .where(eq(plans.id, planId))
-      .limit(1)
-  )[0];
-
-  const limits: PlanLimits =
-    plan?.limits ?? ({ maxCollections: 0, maxItems: 0 } as PlanLimits);
-
-  return { planId, limits };
+  const pid = res.rows?.[0]?.plan_id ?? "free";
+  return PLANS[pid] ?? PLANS.free;
 }
 
-/** Typed error for quota enforcement. */
-export class LimitError extends Error {
-  status: number;
-  constructor(message: string, status = 403) {
-    super(message);
-    this.name = "LimitError";
-    this.status = status;
-  }
+/* ---------- Simple helpers for gating ---------- */
+
+export function canSeePricechartingTop(plan: Plan): boolean {
+  return plan.features.pricechartingTopLists;
 }
 
-/** Throw when the user has hit a plan limit. */
-export function assertLimit(
-  current: number,
-  maybeMax: number | null | undefined,
-  label: string
-) {
-  if (maybeMax == null) return; // unlimited
-  if (current >= maybeMax) {
-    throw new LimitError(
-      `${label} limit reached (${current}/${maybeMax}). Upgrade for more.`,
-      403
-    );
-  }
+export function canSeeTrends(plan: Plan): boolean {
+  return plan.features.trendsAndMovers;
+}
+
+export function canExportCsv(plan: Plan): boolean {
+  return plan.features.csvExports;
+}
+
+export function canSeeInsuranceReports(plan: Plan): boolean {
+  return plan.features.insuranceReports;
+}
+
+export function canUseAdvancedLtvTools(plan: Plan): boolean {
+  return plan.features.advancedLtvTools;
+}
+
+export function canAddCollection(
+  plan: Plan,
+  currentCollections: number,
+): boolean {
+  if (plan.limits.maxCollections == null) return true;
+  return currentCollections < plan.limits.maxCollections;
+}
+
+export function canAddItem(
+  plan: Plan,
+  currentItems: number,
+): boolean {
+  if (plan.limits.maxItemsTotal == null) return true;
+  return currentItems < plan.limits.maxItemsTotal;
 }

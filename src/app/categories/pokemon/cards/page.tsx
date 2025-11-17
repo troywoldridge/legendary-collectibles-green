@@ -4,8 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import CardAmazonCTA from "@/components/CardAmazonCTA";
-import CardEbayCTA from "@/components/CardEbayCTA";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -217,28 +216,7 @@ export default async function PokemonCardsIndex({
                       ) : null}
                     </div>
 
-                    <div className="mt-2 flex items-center gap-2">
-                      <CardEbayCTA
-                        card={{
-                          id: c.id,
-                          name: c.name ?? c.id,
-                          set_code: c.set_id ?? null,
-                          set_name: c.set_name ?? null,
-                        }}
-                        game="Pokemon"
-                        compact
-                      />
-                      <CardAmazonCTA
-                        card={{
-                          id: c.id,
-                          name: c.name ?? c.id,
-                          set_code: c.set_id ?? null,
-                          set_name: c.set_name ?? null,
-                        }}
-                        game="Pokemon"
-                        compact
-                      />
-                    </div>
+                    
                   </div>
                 </div>
               </li>

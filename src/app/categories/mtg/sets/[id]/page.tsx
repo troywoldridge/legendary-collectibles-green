@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import "server-only";
 import Link from "next/link";
 import Image from "next/image";
@@ -6,9 +7,7 @@ import { db } from "@/lib/db";
 import { notFound } from "next/navigation";
 import CardGridTile from "@/components/CardGridTile";
 
-/* ★ Marketplace CTAs (set-level) */
-import CardAmazonCTA from "@/components/CardAmazonCTA";
-import CardEbayCTA from "@/components/CardEbayCTA";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -134,29 +133,7 @@ export default async function MtgSetDetailPage({
               .join(" • ")}
           </div>
 
-          {/* Set-level CTAs (outside links, no unsupported props) */}
-          <div className="mt-2 flex flex-wrap gap-2">
-            <CardEbayCTA
-              card={{
-                id: s.code,
-                name: s.name ?? s.code,
-                number: null,
-                set_code: s.code,
-                set_name: s.name ?? s.code,
-              }}
-              game="Magic The Gathering"
-            />
-            <CardAmazonCTA
-              card={{
-                id: s.code,
-                name: s.name ?? s.code,
-                number: null,
-                set_code: s.code,
-                set_name: s.name ?? s.code,
-              }}
-              game="Magic The Gathering"
-            />
-          </div>
+          
         </div>
 
         <Link href="/categories/mtg/sets" className="text-sky-300 hover:underline">

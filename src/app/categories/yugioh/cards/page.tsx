@@ -1,4 +1,4 @@
-
+// src/app/categories/yugioh/cards/page.tsx
 import "server-only";
 import Image from "next/image";
 import Link from "next/link";
@@ -6,22 +6,19 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import YgoCardSearch from "@/components/ygo/YgoCardSearch";
 
-/* ★ Marketplace CTAs */
-import CardAmazonCTA from "@/components/CardAmazonCTA";
-import CardEbayCTA from "@/components/CardEbayCTA";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /* ---------------- Types ---------------- */
 type ListRow = {
-  id: string;        // ygo_cards.card_id
+  id: string; // ygo_cards.card_id
   name: string;
   type: string | null;
   attribute: string | null;
   race: string | null;
   thumb: string | null;
 };
+
 type CountRow = { count: string };
 
 /* ---------------- Helpers ---------------- */
@@ -29,11 +26,13 @@ function toInt(v: unknown, fallback: number): number {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
+
 function getStr(v: unknown): string | null {
   if (typeof v === "string") return v;
   if (Array.isArray(v) && typeof v[0] === "string") return v[0] ?? null;
   return null;
 }
+
 function qs(next: Record<string, string | number | undefined>) {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(next)) {
@@ -75,9 +74,10 @@ async function fetchCards(opts: { q: string | null; page: number; per: number })
       ) img ON TRUE
       WHERE c.card_id = ${q} OR c.name ILIKE '%' || ${q} || '%'
       ORDER BY
-        CASE WHEN LOWER(c.name) = LOWER(${q}) THEN 0
-             WHEN LOWER(c.name) LIKE LOWER(${q}) || '%' THEN 1
-             ELSE 2
+        CASE
+          WHEN LOWER(c.name) = LOWER(${q}) THEN 0
+          WHEN LOWER(c.name) LIKE LOWER(${q}) || '%' THEN 1
+          ELSE 2
         END,
         c.name ASC
       LIMIT ${per} OFFSET ${offset}
@@ -86,7 +86,9 @@ async function fetchCards(opts: { q: string | null; page: number; per: number })
     return { rows: (listRes.rows ?? []) as ListRow[], total };
   }
 
-  const countRes = await db.execute<CountRow>(sql`SELECT COUNT(*)::bigint::text AS count FROM ygo_cards`);
+  const countRes = await db.execute<CountRow>(
+    sql`SELECT COUNT(*)::bigint::text AS count FROM ygo_cards`,
+  );
   const total = Number(countRes.rows?.[0]?.count ?? "0");
 
   const listRes = await db.execute<ListRow>(sql`
@@ -129,26 +131,31 @@ export default async function YugiohCardsIndexPage({
   const pages = Math.max(1, Math.ceil(total / per));
   const showingFrom = total ? (page - 1) * per + 1 : 0;
   const showingTo = Math.min(total, page * per);
+  const basePath = "/categories/yugioh/cards";
 
   return (
     <section className="space-y-6">
       {/* Search */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-        <div className="mb-2 text-sm font-semibold text-white">Search Yu-Gi-Oh! cards</div>
+        <div className="mb-2 text-sm font-semibold text-white">
+          Search Yu-Gi-Oh! cards
+        </div>
         <YgoCardSearch initialQuery={q ?? ""} />
-        <div className="mt-2 text-xs text-white/60">Tip: type a name or an exact Card ID.</div>
+        <div className="mt-2 text-xs text-white/60">
+          Tip: type a name or an exact Card ID.
+        </div>
       </div>
 
       {/* Header + meta */}
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <h1 className="text-2xl font-bold text-white">Yu-Gi-Oh! Cards</h1>
+        <h1 className="text-2xl font-bold text_white">Yu-Gi-Oh! Cards</h1>
         <div className="text-sm text-white/70">
           {q ? (
             <>
               Showing <span className="text-white">{showingFrom}</span>–
               <span className="text-white">{showingTo}</span> of{" "}
-              <span className="text-white">{total.toLocaleString()}</span> results for{" "}
-              <span className="text-white">&ldquo;{q}&rdquo;</span>
+              <span className="text-white">{total.toLocaleString()}</span> results
+              for <span className="text-white">&ldquo;{q}&rdquo;</span>
             </>
           ) : (
             <>
@@ -167,19 +174,22 @@ export default async function YugiohCardsIndexPage({
         </div>
       ) : (
         <>
-          <ul className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3">
+          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6">
             {rows.map((r) => {
               const hasThumb = !!r.thumb;
               return (
                 <li
                   key={r.id}
-                  className="rounded-xl border border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/10 transition"
+                  className="rounded-xl border border-white/10 bg_white/5 transition hover:border-white/20 hover:bg-white/10"
                 >
                   <Link
-                    href={`/categories/yugioh/cards/${encodeURIComponent(r.id)}`}
-                    className="block group"
+                    href={`${basePath}/${encodeURIComponent(r.id)}`}
+                    className="group block"
                   >
-                    <div className="relative mx-auto w-full" style={{ aspectRatio: "3 / 4" }}>
+                    <div
+                      className="relative mx-auto w-full"
+                      style={{ aspectRatio: "3 / 4" }}
+                    >
                       {hasThumb ? (
                         <Image
                           src={r.thumb as string}
@@ -196,8 +206,10 @@ export default async function YugiohCardsIndexPage({
                       )}
                     </div>
                     <div className="p-3">
-                      <div className="line-clamp-2 text-sm font-medium text-white">{r.name}</div>
-                      {/* ★ TEXT ABOVE CTAs */}
+                      <div className="line-clamp-2 text-sm font-medium text-white">
+                        {r.name}
+                      </div>
+                      {/* meta line */}
                       <div className="mt-1 text-xs text-white/70">
                         {r.id}
                         {r.type ? ` • ${r.type}` : ""}
@@ -206,26 +218,22 @@ export default async function YugiohCardsIndexPage({
                       </div>
                     </div>
                   </Link>
-
-                  {/* CTAs (outside Link) */}
-                  <div className="px-3 pb-3 pt-0">
-                    <div className="mt-2 flex items-center gap-2">
-                      <CardEbayCTA card={{ id: r.id, name: r.name }} game="Yu-Gi-Oh!" compact />
-                      <CardAmazonCTA card={{ id: r.id, name: r.name }} game="Yu-Gi-Oh!" compact />
-                    </div>
-                  </div>
                 </li>
               );
             })}
           </ul>
 
           {/* Pagination */}
-          <nav className="mt-4 flex items-center justify-between gap-2">
+          <nav className="mt-4 flex items-center justify_between gap-2">
             {/* Prev */}
             <div>
               {page > 1 ? (
                 <Link
-                  href={qs({ q: q ?? undefined, page: page - 1, per })}
+                  href={`${basePath}${qs({
+                    q: q ?? undefined,
+                    page: page - 1,
+                    per,
+                  })}`}
                   className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-sky-300 hover:border-white/25 hover:bg-white/10"
                 >
                   ← Prev
@@ -247,7 +255,11 @@ export default async function YugiohCardsIndexPage({
             <div>
               {page < pages ? (
                 <Link
-                  href={qs({ q: q ?? undefined, page: page + 1, per })}
+                  href={`${basePath}${qs({
+                    q: q ?? undefined,
+                    page: page + 1,
+                    per,
+                  })}`}
                   className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-sky-300 hover:border-white/25 hover:bg-white/10"
                 >
                   Next →

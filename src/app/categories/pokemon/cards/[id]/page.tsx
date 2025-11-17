@@ -14,10 +14,10 @@ import { getLatestEbaySnapshot } from "@/lib/ebay";
 
 /* Plan + collection */
 import { auth } from "@clerk/nextjs/server";
-import { getUserPlan } from "@/lib/plans";
 
 /* ★ Marketplace CTAs */
 import CardAmazonCTA from "@/components/CardAmazonCTA";
+import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
 
 /* ★ Collection / Wishlist actions */
@@ -301,6 +301,31 @@ export default async function PokemonCardDetailPage({
     );
   }
 
+  <section className="grid gap-6 md:grid-cols-[2fr,1fr]">
+  {/* left: existing image + details */}
+  <div>{/* ...existing layout... */}</div>
+
+  {/* right column: CTAs */}
+  <div className="space-y-4">
+    {/* existing collection / wishlist buttons, etc. */}
+
+    {/* Amazon CTA (shows only if URL exists in DB) */}
+    <CardAmazonCTA
+      category="pokemon"
+      cardId={card.id}
+      cardName={card.name}
+    />
+  </div>
+</section>
+
+// after you have `card` loaded and before return JSX:
+const amazonLink = await getAffiliateLinkForCard({
+  category: "pokemon",
+  cardId: card.id,        // or card.card_id if that's your field
+  marketplace: "amazon",
+});
+
+
   // downstream
   const ebay = await getLatestEbaySnapshot("pokemon", card.id, "all");
   const legalities: LegalityRow[] =
@@ -397,14 +422,11 @@ export default async function PokemonCardDetailPage({
     return `${sym}${v.value.toFixed(2)}`;
   };
 
+  // --- Auth + collection gating: any signed-in user can save items ---
   const { userId } = await auth();
-  let canSave = false;
-  if (userId) {
-    const { limits } = await getUserPlan(userId);
-    canSave = (limits.maxItems ?? 0) > 0;
-  }
+  const canSave = !!userId;
 
-  // --- Your holdings (per user + card, any game value) ---
+  // --- Your holdings (per user + card) ---
   let holdingSummary:
     | {
         quantity: number;
@@ -436,7 +458,6 @@ export default async function PokemonCardDetailPage({
       };
     }
   }
-
 
   const profitCents =
     holdingSummary != null
@@ -563,15 +584,10 @@ export default async function PokemonCardDetailPage({
                 variant="pill"
               />
               <CardAmazonCTA
-                card={{
-                  id: card.id,
-                  name: card.name ?? card.id,
-                  set_code: card.set_id ?? null,
-                  set_name: card.set_name ?? null,
-                }}
-                game="Pokémon TCG"
-                variant="pill"
-              />
+  url={amazonLink?.url}
+  label={card.name}
+/>
+
             </div>
 
             {/* legality chips */}

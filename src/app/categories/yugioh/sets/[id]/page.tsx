@@ -5,9 +5,7 @@ import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
-/* ★ Marketplace CTAs */
-import CardAmazonCTA from "@/components/CardAmazonCTA";
-import CardEbayCTA from "@/components/CardEbayCTA";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -187,19 +185,7 @@ export default async function YugiohSetDetailPage({
               <div className="text-sm text-white/80">Example code: {header.sample_code}</div>
             )}
 
-            {/* ★ Set-level CTAs */}
-            <div className="mt-2 flex flex-wrap gap-2">
-              <CardEbayCTA
-                card={{ id: header.name, name: header.name, set_name: header.name }}
-                game="Yu-Gi-Oh!"
-                variant="pill"
-              />
-              <CardAmazonCTA
-                card={{ id: header.name, name: header.name, set_name: header.name }}
-                game="Yu-Gi-Oh!"
-                variant="pill"
-              />
-            </div>
+            
           </div>
         </div>
 
@@ -239,7 +225,7 @@ export default async function YugiohSetDetailPage({
               name="q"
               defaultValue={q ?? ""}
               placeholder="Search cards (name or exact ID)…"
-              className="w-[240px] md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
+              className="w-60 md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
             />
             <button type="submit" className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
               Search
@@ -306,22 +292,6 @@ export default async function YugiohSetDetailPage({
                     <div className="mt-1 text-xs text-white/80">{c.rarity ?? ""}</div>
                   </div>
                 </Link>
-
-                {/* ★ TEXT ABOVE CTAs */}
-                <div className="px-3 pb-3 pt-0">
-                  <div className="mt-2 flex items-center gap-2">
-                    <CardEbayCTA
-                      card={{ id: c.id, name: c.name ?? c.id, set_name: header.name }}
-                      game="Yu-Gi-Oh!"
-                      compact
-                    />
-                    <CardAmazonCTA
-                      card={{ id: c.id, name: c.name ?? c.id, set_name: header.name }}
-                      game="Yu-Gi-Oh!"
-                      compact
-                    />
-                  </div>
-                </div>
               </li>
             );
           })}

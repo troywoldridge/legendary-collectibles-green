@@ -1,3 +1,4 @@
+// src/app/categories/magic/cards/[id]/page.tsx
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import Link from "next/link";
@@ -7,13 +8,11 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { getLatestEbaySnapshot } from "@/lib/ebay";
 import EbayFallbackPrice from "@/components/EbayFallbackPrice";
-
-/* Plan gate */
 import { auth } from "@clerk/nextjs/server";
-import { getUserPlan } from "@/lib/plans";
 
 /* Marketplace CTAs */
 import CardAmazonCTA from "@/components/CardAmazonCTA";
+import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
 
 /* New combined actions (collection + wishlist) */
@@ -193,8 +192,12 @@ export default async function MtgCardDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const { id } = await params;
-  const rawParam = decodeURIComponent((id || "").trim());
+  const { id: rawId } = await params;
+  const rawParam = decodeURIComponent(rawId ?? "").trim();
+
+  // Simple auth-based gate: if you're signed in, you can save
+  const { userId } = await auth();
+  const canSave = !!userId;
 
   if (!rawParam) {
     console.error("[MTG detail] notFound: empty param");
@@ -208,7 +211,7 @@ export default async function MtgCardDetailPage({
     SELECT c.id::text AS id
     FROM public.mtg_cards c
     WHERE c.id::text = ${rawParam}
-       OR REPLACE(c.id::text,'-','') = ${idNoDashes}
+      OR REPLACE(c.id::text,'-','') = ${idNoDashes}
     LIMIT 1
   `);
   let foundId = probe.rows?.[0]?.id ?? null;
@@ -303,7 +306,7 @@ export default async function MtgCardDetailPage({
       ) AS ebay_url
     FROM public.mtg_cards c
     LEFT JOIN public.mtg_prices_effective e ON e.scryfall_id = c.id
-    LEFT JOIN public.mtg_prices_scryfall  s ON s.scryfall_id  = c.id
+    LEFT JOIN public.mtg_card_prices     s ON s.scryfall_id  = c.id
     WHERE c.id::text = ${foundId}
     LIMIT 1
   `);
@@ -344,18 +347,6 @@ export default async function MtgCardDetailPage({
         ).rows?.[0] ?? null
       : null;
 
-  // Plan gate (can the user save items?)
-  let canSave = false;
-  try {
-    const { userId } = await auth();
-    if (userId) {
-      const { limits } = await getUserPlan(userId);
-      canSave = (limits.maxItems ?? 0) > 0;
-    }
-  } catch (err) {
-    console.error("[plan gate failed]", err);
-  }
-
   // Fire-and-forget latest eBay snapshot
   try {
     await getLatestEbaySnapshot("mtg", card.id, "all");
@@ -367,7 +358,7 @@ export default async function MtgCardDetailPage({
     (card.image_url ?? "").replace(/^http:\/\//, "https://") || null;
 
   const setHref = card.set_code
-    ? `/categories/mtg/sets/${encodeURIComponent(card.set_code)}`
+    ? `/categories/magic/sets/${encodeURIComponent(card.set_code)}`
     : null;
 
   const price = {
@@ -397,6 +388,14 @@ export default async function MtgCardDetailPage({
   ]
     .filter(Boolean)
     .join(" ");
+
+
+    // after you have `card` loaded and before return JSX:
+const amazonLink = await getAffiliateLinkForCard({
+  category: "mtg",
+  cardId: card.id,        // or card.card_id if that's your field
+  marketplace: "amazon",
+});
 
   /* ---------- Render ---------- */
 
@@ -449,7 +448,9 @@ export default async function MtgCardDetailPage({
                   </>
                 ) : null}
                 {setRow?.released_at && (
-                  <span className="ml-2">• Released: {setRow.released_at}</span>
+                  <span className="ml-2">
+                    • Released: {setRow.released_at}
+                  </span>
                 )}
                 {setRow?.set_type && (
                   <span className="ml-2">• {setRow.set_type}</span>
@@ -482,7 +483,7 @@ export default async function MtgCardDetailPage({
             {/* Mana cost chips */}
             <ManaCost cost={card.mana_cost} />
 
-            {/* Collection + wishlist actions (new combined component) */}
+            {/* Collection + wishlist actions */}
             <div className="mt-4">
               <CardActions
                 game="mtg"
@@ -504,18 +505,13 @@ export default async function MtgCardDetailPage({
                   set_code: card.set_code ?? undefined,
                   set_name: setRow?.name ?? card.set_name ?? undefined,
                 }}
-                game="Magic The Gathering"
+                game="Magic: The Gathering"
               />
               <CardAmazonCTA
-                card={{
-                  id: card.id,
-                  name: card.name ?? "",
-                  number: card.collector_number ?? undefined,
-                  set_code: card.set_code ?? undefined,
-                  set_name: setRow?.name ?? card.set_name ?? undefined,
-                }}
-                game="Magic The Gathering"
-              />
+  url={amazonLink?.url}
+  label={card.name}
+/>
+
             </div>
           </div>
 
@@ -568,7 +564,7 @@ export default async function MtgCardDetailPage({
           {/* eBay snapshot fallback if no primary price */}
           {!hasPrimaryPrice && serverEbayPrice && (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-              <div className="mb-2 flex items-center justify-between">
+              <div className="mb-2 flex items-center justify_between">
                 <h2 className="text-lg font-semibold text-white">
                   Market Prices (eBay snapshot)
                 </h2>

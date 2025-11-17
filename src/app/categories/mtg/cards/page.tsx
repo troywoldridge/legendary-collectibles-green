@@ -5,8 +5,7 @@ import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { unstable_noStore as noStore } from "next/cache";
-import CardAmazonCTA from "@/components/CardAmazonCTA";
-import CardEbayCTA from "@/components/CardEbayCTA";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -401,31 +400,7 @@ export default async function MtgCardsIndex({
                   </div>
                 </Link>
 
-                {/* Market CTAs (outside the Link to avoid nested anchors) */}
-                <div className="px-3 pb-3 pt-0 flex items-center justify-end gap-2">
-                  <CardEbayCTA
-                    card={{
-                      id: c.id,
-                      name: c.name ?? c.id,
-                      number: c.number,
-                      set_code: c.set_code ?? null,
-                      set_name: null,
-                    }}
-                    game="Magic The Gathering"
-                    compact
-                  />
-                  <CardAmazonCTA
-                    card={{
-                      id: c.id,
-                      name: c.name ?? c.id,
-                      number: c.number,
-                      set_code: c.set_code ?? null,
-                      set_name: null,
-                    }}
-                    game="Magic The Gathering"
-                    compact
-                  />
-                </div>
+                
               </li>
             );
           })}

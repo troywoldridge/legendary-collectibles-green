@@ -1,9 +1,10 @@
 // src/app/collection/CollectionTableBody.tsx
 "use client";
 
-import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { useState } from "react";
+import CardSparkline from "@/components/collection/CardSparkline";
 
 export type CollectionItem = {
   id: string;
@@ -26,119 +27,6 @@ type Props = {
   items: CollectionItem[];
 };
 
-export default function CollectionTableBody({ items }: Props) {
-  if (!items.length) {
-    return (
-      <tbody>
-        <tr>
-          <td
-            colSpan={8}
-            className="p-6 text-center text-white/70"
-          >
-            No items found. Try adjusting your filters.
-          </td>
-        </tr>
-      </tbody>
-    );
-  }
-
-  return (
-    <tbody>
-      {items.map((item) => (
-        <CollectionRow key={item.id} item={item} />
-      ))}
-    </tbody>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-
-type RowProps = {
-  item: CollectionItem;
-};
-
-function CollectionRow({ item }: RowProps) {
-  const quantity = item.quantity ?? 0;
-  const lastValue = item.last_value_cents ?? 0;
-  const rowTotalCents = quantity > 0 ? quantity * lastValue : null;
-
-  return (
-    <tr className="border-b border-white/10 hover:bg-white/5">
-      {/* Photo */}
-      <td className="p-2">
-        <div className="relative h-16 w-12 overflow-hidden rounded bg-black/40">
-          {item.image_url ? (
-            <Image
-              src={item.image_url}
-              alt={item.card_name ?? "Card"}
-              fill
-              unoptimized
-              className="object-contain"
-              sizes="48px"
-            />
-          ) : (
-            <div className="grid h-full w-full place-items-center text-[10px] text-white/60">
-              No image
-            </div>
-          )}
-        </div>
-      </td>
-
-      {/* Card / Set */}
-      <td className="p-2">
-        <div className="text-sm font-semibold">
-          {item.card_name ?? item.card_id ?? "Unknown card"}
-        </div>
-        <div className="text-xs text-white/60">
-          {item.set_name ?? "—"}
-        </div>
-      </td>
-
-      {/* Grade */}
-      <td className="p-2">
-        <GradeSelect item={item} />
-      </td>
-
-      {/* Qty */}
-      <td className="p-2">
-        <QtyInput item={item} />
-      </td>
-
-      {/* Folder */}
-      <td className="p-2">
-        <FolderInput item={item} />
-      </td>
-
-      {/* Cost */}
-      <td className="p-2">
-        <CostInput item={item} />
-      </td>
-
-      {/* Total value */}
-      <td className="p-2 text-blue-300">
-        {rowTotalCents != null
-          ? `$${(rowTotalCents / 100).toFixed(2)}`
-          : "—"}
-      </td>
-
-      {/* Actions */}
-      <td className="p-2 space-y-1 text-sm">
-        <Link
-          href={`/collection/edit/${item.id}`}
-          className="block text-blue-400 hover:underline"
-        >
-          Edit
-        </Link>
-        <RemoveButton id={item.id} />
-      </td>
-    </tr>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Inline editors                                                      */
-/* ------------------------------------------------------------------ */
-
 type GradeCompany = "UNGR" | "PSA" | "CGC";
 
 const GRADE_OPTIONS: Record<GradeCompany, string[]> = {
@@ -158,28 +46,240 @@ const GRADE_OPTIONS: Record<GradeCompany, string[]> = {
   CGC: ["CGC 10", "CGC 9.5", "CGC 9", "CGC 8.5", "CGC 8", "CGC 7.5", "CGC 7"],
 };
 
-function normalizeCompany(
-  raw: string | null,
-): GradeCompany {
-  if (raw === "PSA" || raw === "CGC" || raw === "UNGR") {
-    return raw;
-  }
-  return "UNGR";
+function formatMoneyFromCents(cents: number | null | undefined): string {
+  if (cents == null) return "—";
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
-function GradeSelect({ item }: RowProps) {
-  const initialCompany = normalizeCompany(item.grading_company);
+function formatGameLabel(game: string | null | undefined): string {
+  switch (game) {
+    case "pokemon":
+      return "Pokémon";
+    case "mtg":
+    case "magic":
+      return "Magic: The Gathering";
+    case "yugioh":
+    case "ygo":
+      return "Yu-Gi-Oh!";
+    default:
+      return "Other / Unknown";
+  }
+}
+
+// Detail URL per game
+function detailHrefFor(
+  game: string | null,
+  cardId: string | null,
+): string | null {
+  if (!cardId) return null;
+
+  switch (game) {
+    case "pokemon":
+      return `/categories/pokemon/cards/${encodeURIComponent(cardId)}`;
+    case "ygo":
+    case "yugioh":
+      return `/categories/yugioh/cards/${encodeURIComponent(cardId)}`;
+    case "mtg":
+    case "magic":
+      return `/categories/magic/cards/${encodeURIComponent(cardId)}`;
+    default:
+      return null;
+  }
+}
+
+// Price history URL per game
+function priceHistoryHrefFor(
+  game: string | null,
+  cardId: string | null,
+): string | null {
+  if (!cardId) return null;
+
+  switch (game) {
+    case "pokemon":
+      return `/categories/pokemon/cards/${encodeURIComponent(
+        cardId,
+      )}/prices`;
+    case "mtg":
+    case "magic":
+      return `/categories/magic/cards/${encodeURIComponent(cardId)}/prices`;
+    case "ygo":
+    case "yugioh":
+      return `/categories/yugioh/cards/${encodeURIComponent(cardId)}/prices`;
+    default:
+      return null;
+  }
+}
+
+export default function CollectionTableBody({ items }: Props) {
+  if (!items.length) {
+    return (
+      <tbody>
+        <tr>
+          <td
+            colSpan={8}
+            className="p-6 text-center text-sm text-white/70"
+          >
+            No items found.
+          </td>
+        </tr>
+      </tbody>
+    );
+  }
+
+  return (
+    <tbody>
+      {items.map((item) => (
+        <CollectionRow key={item.id} item={item} />
+      ))}
+    </tbody>
+  );
+}
+
+function CollectionRow({ item }: { item: CollectionItem }) {
+  const detailHref = detailHrefFor(item.game, item.card_id);
+  const priceHref = priceHistoryHrefFor(item.game, item.card_id);
+
+  // compute total value (price × qty) once
+  const qty = item.quantity ?? 1;
+  const perCopy = item.last_value_cents ?? null;
+  const totalValueCents =
+    perCopy != null ? perCopy * qty : null;
+
+  return (
+    <tr className="border-b border-white/10 hover:bg-white/5">
+      {/* Photo */}
+      <td className="p-2">
+        <div className="relative h-16 w-12 overflow-hidden rounded border border-white/20 bg-black/40">
+          {item.image_url ? (
+            <Image
+              src={item.image_url}
+              alt={item.card_name ?? "Card"}
+              fill
+              unoptimized
+              className="object-contain"
+              sizes="48px"
+            />
+          ) : (
+            <div className="grid h-full w-full place-items-center text-[10px] text-white/60">
+              No image
+            </div>
+          )}
+        </div>
+      </td>
+
+      {/* Item info + links */}
+      <td className="p-2 align-top">
+        <div className="text-sm font-semibold">
+          {detailHref ? (
+            <Link
+              href={detailHref}
+              className="hover:text-sky-300 hover:underline"
+            >
+              {item.card_name ?? item.card_id ?? "Unknown card"}
+            </Link>
+          ) : (
+            item.card_name ?? item.card_id ?? "Unknown card"
+          )}
+        </div>
+        <div className="text-xs text-white/60">
+          {item.set_name ?? "—"} • {formatGameLabel(item.game)}
+        </div>
+        {priceHref && (
+          <div className="mt-1 text-[11px]">
+            <Link
+              href={priceHref}
+              className="text-sky-300 hover:underline"
+            >
+              Price history
+            </Link>
+          </div>
+        )}
+      </td>
+
+      {/* Grade dropdown */}
+      <td className="p-2 align-top">
+        <GradeSelect item={item} />
+      </td>
+
+      {/* Quantity */}
+      <td className="p-2 align-top">
+        <QtyInput item={item} />
+      </td>
+
+      {/* Folder */}
+      <td className="p-2 align-top">
+        <FolderInput item={item} />
+      </td>
+
+      {/* Cost */}
+      <td className="p-2 align-top">
+        <CostInput item={item} />
+      </td>
+
+      {/* Total value + sparkline */}
+      <td className="p-2 align-top text-sm">
+        <div className="font-semibold text-blue-300">
+          {formatMoneyFromCents(totalValueCents)}
+        </div>
+        <div className="mt-1 h-6">
+          {item.card_id ? (
+            <CardSparkline
+              game={item.game ?? "pokemon"}
+              cardId={item.card_id}
+            />
+          ) : null}
+        </div>
+      </td>
+
+      {/* Actions */}
+      <td className="p-2 align-top space-y-1 text-sm">
+        {detailHref && (
+          <Link
+            href={detailHref}
+            className="block text-sky-300 hover:underline"
+          >
+            View
+          </Link>
+        )}
+        <Link
+          href={`/collection/edit/${item.id}`}
+          className="block text-sky-300 hover:underline"
+        >
+          Edit
+        </Link>
+        <RemoveButton id={item.id} />
+      </td>
+    </tr>
+  );
+}
+
+/* ------------------------------------------------------------------------------------
+   CLIENT CONTROLS (Grade dropdown / qty / folder / cost / remove)
+------------------------------------------------------------------------------------ */
+
+function GradeSelect({ item }: { item: CollectionItem }) {
+  const initialCompany: GradeCompany =
+    (item.grading_company as GradeCompany | null) ?? "UNGR";
   const initialGrade =
     item.grade_label ??
-    GRADE_OPTIONS[initialCompany][0];
+    GRADE_OPTIONS[initialCompany]?.[0] ??
+    "Ungraded";
 
   const [company, setCompany] =
     useState<GradeCompany>(initialCompany);
   const [grade, setGrade] = useState<string>(initialGrade);
+  const grades = GRADE_OPTIONS[company];
 
-  async function update(nextCompany: GradeCompany, nextGrade: string) {
+  async function update(
+    nextCompany: GradeCompany,
+    nextGrade: string,
+  ) {
+    setCompany(nextCompany);
+    setGrade(nextGrade);
+
     await fetch("/api/collection/update", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: item.id,
         grading_company: nextCompany,
@@ -189,18 +289,15 @@ function GradeSelect({ item }: RowProps) {
   }
 
   return (
-    <div className="flex gap-1">
+    <div className="flex gap-2">
       <select
         value={company}
-        onChange={async (e) => {
-          const nextCompany = normalizeCompany(e.target.value);
-          const nextGrade =
-            GRADE_OPTIONS[nextCompany][0] ?? "Ungraded";
-          setCompany(nextCompany);
-          setGrade(nextGrade);
-          await update(nextCompany, nextGrade);
+        onChange={(e) => {
+          const next = (e.target.value || "UNGR") as GradeCompany;
+          const firstGrade = GRADE_OPTIONS[next][0];
+          update(next, firstGrade);
         }}
-        className="rounded bg-white/10 px-2 py-1 text-xs"
+        className="rounded bg-white/10 p-1 text-xs"
       >
         <option value="UNGR">Ungraded</option>
         <option value="PSA">PSA</option>
@@ -212,11 +309,19 @@ function GradeSelect({ item }: RowProps) {
         onChange={async (e) => {
           const nextGrade = e.target.value;
           setGrade(nextGrade);
-          await update(company, nextGrade);
+          await fetch("/api/collection/update", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              id: item.id,
+              grading_company: company,
+              grade_label: nextGrade,
+            }),
+          });
         }}
-        className="rounded bg-white/10 px-2 py-1 text-xs"
+        className="rounded bg-white/10 p-1 text-xs"
       >
-        {(GRADE_OPTIONS[company] ?? ["Ungraded"]).map((g) => (
+        {grades.map((g) => (
           <option key={g} value={g}>
             {g}
           </option>
@@ -226,15 +331,15 @@ function GradeSelect({ item }: RowProps) {
   );
 }
 
-function QtyInput({ item }: RowProps) {
-  const [qty, setQty] = useState<number>(
-    item.quantity ?? 1,
-  );
+function QtyInput({ item }: { item: CollectionItem }) {
+  const [qty, setQty] = useState<number>(item.quantity ?? 1);
 
   async function update(newQty: number) {
     setQty(newQty);
+
     await fetch("/api/collection/update", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: item.id,
         quantity: newQty,
@@ -248,23 +353,23 @@ function QtyInput({ item }: RowProps) {
       min={1}
       value={qty}
       onChange={(e) => {
-        const v = Math.max(1, Number(e.target.value) || 1);
-        update(v);
+        const n = Math.max(1, Number(e.target.value) || 1);
+        update(n);
       }}
-      className="w-16 rounded bg-white/10 px-2 py-1 text-xs"
+      className="w-16 rounded bg-white/10 px-2 py-1 text-sm"
     />
   );
 }
 
-function FolderInput({ item }: RowProps) {
-  const [folder, setFolder] = useState<string>(
-    item.folder ?? "",
-  );
+function FolderInput({ item }: { item: CollectionItem }) {
+  const [folder, setFolder] = useState<string>(item.folder ?? "");
 
   async function update(newFolder: string) {
     setFolder(newFolder);
+
     await fetch("/api/collection/update", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: item.id,
         folder: newFolder || null,
@@ -277,28 +382,30 @@ function FolderInput({ item }: RowProps) {
       type="text"
       value={folder}
       onChange={(e) => update(e.target.value)}
-      className="w-28 rounded bg-white/10 px-2 py-1 text-xs"
+      className="w-28 rounded bg-white/10 px-2 py-1 text-sm"
     />
   );
 }
 
-function CostInput({ item }: RowProps) {
-  const [cost, setCost] = useState<string>(
-    item.cost_cents != null
-      ? (item.cost_cents / 100).toString()
-      : "",
-  );
+function CostInput({ item }: { item: CollectionItem }) {
+  const initialCost =
+    item.cost_cents != null ? item.cost_cents / 100 : "";
+  const [cost, setCost] = useState<string | number>(initialCost);
 
-  async function update(raw: string) {
-    setCost(raw);
-    const val = raw.trim();
+  async function update(val: string) {
+    setCost(val);
+
+    const n =
+      val.trim() === ""
+        ? null
+        : Math.round(Number(val) * 100);
+
     await fetch("/api/collection/update", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         id: item.id,
-        cost_cents: val
-          ? Math.round(Number(val) * 100)
-          : null,
+        cost_cents: n,
       }),
     });
   }
@@ -310,7 +417,7 @@ function CostInput({ item }: RowProps) {
       step="0.01"
       value={cost}
       onChange={(e) => update(e.target.value)}
-      className="w-24 rounded bg:white/10 px-2 py-1 text-xs bg-white/10"
+      className="w-24 rounded bg-white/10 px-2 py-1 text-sm"
     />
   );
 }
@@ -321,10 +428,11 @@ function RemoveButton({ id }: { id: string }) {
 
     await fetch("/api/collection/delete", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     });
 
-    // Quick-and-dirty refresh
+    // simple reload is fine here
     window.location.reload();
   }
 

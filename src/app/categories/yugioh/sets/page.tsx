@@ -5,9 +5,7 @@ import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
-/* ★ Marketplace CTAs */
-import CardAmazonCTA from "@/components/CardAmazonCTA";
-import CardEbayCTA from "@/components/CardEbayCTA";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -132,7 +130,7 @@ export default async function YugiohSetsIndex({
               name="q"
               defaultValue={q ?? ""}
               placeholder="Search sets (name or code)…"
-              className="w-[240px] md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
+              className="w-60 md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
             />
             <button className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
               Search
@@ -190,22 +188,7 @@ export default async function YugiohSetsIndex({
                     </div>
                   </div>
                 </Link>
-
-                {/* ★ TEXT ABOVE CTAs (name already shown) */}
-                <div className="px-3 pb-3 pt-0">
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <CardEbayCTA
-                      card={{ id: s.id, name: s.name ?? s.id, set_name: s.name ?? s.id }}
-                      game="Yu-Gi-Oh!"
-                      variant="pill"
-                    />
-                    <CardAmazonCTA
-                      card={{ id: s.id, name: s.name ?? s.id, set_name: s.name ?? s.id }}
-                      game="Yu-Gi-Oh!"
-                      variant="pill"
-                    />
-                  </div>
-                </div>
+               
               </li>
             );
           })}

@@ -43,6 +43,44 @@ function formatGameLabel(game: string | null | undefined): string {
   }
 }
 
+// Small helper for BIGINT / numeric values coming back as string
+function toNumber(v: unknown): number {
+  if (v == null) return 0;
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) {
+    return Number(v);
+  }
+  return 0;
+}
+
+// Build a tiny SVG sparkline path for value array
+function buildSparklinePath(
+  values: number[],
+  width = 120,
+  height = 32,
+  padX = 2,
+  padY = 4,
+): string | null {
+  if (!values.length) return null;
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const n = values.length;
+
+  return values
+    .map((v, idx) => {
+      const x =
+        n === 1
+          ? width / 2
+          : padX + ((width - padX * 2) * idx) / (n - 1);
+      const norm = (v - min) / span; // 0..1
+      const y = height - padY - norm * (height - padY * 2);
+      return `${idx === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+}
+
 export default async function CollectionPage({
   searchParams,
 }: {
@@ -173,6 +211,30 @@ export default async function CollectionPage({
       ? (portfolioGainCents / totalCostCents) * 100
       : null;
 
+  // ---- Value history for sparkline (last ~60 days) ----
+  const historyRes = await db.execute<{
+    as_of_date: string;
+    total_value_cents: number | string | null;
+  }>(sql`
+    SELECT as_of_date, total_value_cents
+    FROM user_collection_daily_valuations
+    WHERE user_id = ${userId}
+    ORDER BY as_of_date ASC
+    LIMIT 60
+  `);
+
+  const historyRaw = historyRes.rows ?? [];
+  const sparklinePoints = historyRaw
+    .map((row) => ({
+      date: row.as_of_date,
+      value: toNumber(row.total_value_cents),
+    }))
+    .filter((p) => p.value > 0);
+
+  const sparklinePath = buildSparklinePath(
+    sparklinePoints.map((p) => p.value),
+  );
+
   // ---- Recently added (ignores filters, just last 5 overall) ----
   const recentRes = await db.execute<CollectionItem>(sql`
     SELECT
@@ -248,7 +310,7 @@ export default async function CollectionPage({
           </div>
         </div>
 
-        {/* Portfolio value */}
+        {/* Portfolio value + sparkline */}
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
           <div className="text-xs uppercase tracking-wide text-white/60">
             Est. collection value
@@ -262,22 +324,47 @@ export default async function CollectionPage({
             Based on latest price × quantity.
           </div>
           {hasValueData && (
-            <div className="mt-2 text-xs text-white/70">
-              Cost basis:{" "}
-              <span>{formatMoneyFromCents(totalCostCents)}</span>
-              {portfolioGainPct != null && (
-                <span
-                  className={
-                    portfolioGainCents >= 0
-                      ? "ml-2 text-emerald-300"
-                      : "ml-2 text-red-300"
-                  }
-                >
-                  {portfolioGainCents >= 0 ? "▲" : "▼"}{" "}
-                  {Math.abs(portfolioGainPct).toFixed(1)}%
-                </span>
-              )}
-            </div>
+            <>
+              <div className="mt-2 text-xs text-white/70">
+                Cost basis:{" "}
+                <span>{formatMoneyFromCents(totalCostCents)}</span>
+                {portfolioGainPct != null && (
+                  <span
+                    className={
+                      portfolioGainCents >= 0
+                        ? "ml-2 text-emerald-300"
+                        : "ml-2 text-red-300"
+                    }
+                  >
+                    {portfolioGainCents >= 0 ? "▲" : "▼"}{" "}
+                    {Math.abs(portfolioGainPct).toFixed(1)}%
+                  </span>
+                )}
+              </div>
+
+              <div className="mt-3 h-10">
+                {sparklinePath ? (
+                  <svg
+                    viewBox="0 0 120 32"
+                    className="h-full w-full text-emerald-300/80"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d={sparklinePath}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={1.5}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : (
+                  <div className="text-[11px] text-white/50">
+                    Run valuations on multiple days to see a trend.
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </div>
 
@@ -323,7 +410,10 @@ export default async function CollectionPage({
                           style={{
                             width: `${Math.max(
                               8,
-                              Math.min(100, sharePct || 0),
+                              Math.min(
+                                100,
+                                sharePct || 0,
+                              ),
                             )}%`,
                           }}
                         />

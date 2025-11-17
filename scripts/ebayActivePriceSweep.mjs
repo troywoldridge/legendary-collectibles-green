@@ -280,7 +280,7 @@ async function ratePreflight(token) {
 }
 
 /** ------------ Browse search ------------ **/
-async function browseSearch(token, q, offset = 0, limit = 50) {
+async function browseSearch(token, q, offset = 0, limit = 500) {
   await rpmWait();
   const params = new URLSearchParams({
     q,

@@ -6,8 +6,7 @@ import { db } from "@/lib/db";
 import { CF_ACCOUNT_HASH } from "@/lib/cf";
 
 /* ★ Marketplace CTAs */
-import CardAmazonCTA from "@/components/CardAmazonCTA";
-import CardEbayCTA from "@/components/CardEbayCTA";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -196,19 +195,7 @@ export default async function MtgSetsIndex({ searchParams }: { searchParams: Pro
     </div>
   </Link>
 
-  {/* ★ CTAs (outside the Link, below the text) */}
-  <div className="px-3 pb-3 pt-0.5">
-    <div className="flex flex-wrap gap-2">
-      <CardEbayCTA
-        card={{ id: s.id, name: s.name ?? s.id, set_code: s.id, set_name: s.name ?? s.id }}
-        game="Magic The Gathering"
-      />
-      <CardAmazonCTA
-        card={{ id: s.id, name: s.name ?? s.id, set_code: s.id, set_name: s.name ?? s.id }}
-        game="Magic The Gathering"
-      />
-    </div>
-  </div>
+  
 </li>
 
             );

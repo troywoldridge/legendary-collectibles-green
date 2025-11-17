@@ -1,66 +1,48 @@
-// Server component (no "use client")
-type CardBasics = {
-  id: string;
-  name?: string | null;
-  number?: string | null;
-  set_code?: string | null;
-  set_name?: string | null;
-};
+"use client";
+
+import Link from "next/link";
 
 type Props = {
-  card: CardBasics;
-  game: string;
-  /** Visual style: "button" (default) or "pill" */
-  variant?: "button" | "pill";
-  /** Back-compat: when true, renders a smaller pill-style button */
-  compact?: boolean;
-  className?: string;
+  /** Full Amazon affiliate URL – if missing, CTA renders nothing */
+  url?: string | null;
+  /** Human label, usually the card name */
+  label?: string | null;
+
+  /** Kept for compatibility with older call sites – ignored for now */
+  category?: string;
+  cardId?: string;
+  cardName?: string | null;
 };
 
-function labelForGame(game: string): string {
-  const g = game.toLowerCase();
-  if (g.includes("magic")) return "Magic The Gathering";
-  if (g.includes("yugioh") || g.includes("yu-gi")) return "Yu-Gi-Oh!";
-  if (g.includes("pokemon")) return "Pokemon TCG";
-  return game;
-}
+export default function CardAmazonCTA(props: Props) {
+  const url = props.url;
+  const label = props.label ?? props.cardName ?? "This card";
 
-function buildQuery({ card, game }: { card: CardBasics; game: string }): string {
-  const parts = [
-    card.name ?? "",
-    card.set_code ?? card.set_name ?? "",
-    card.number ?? "",
-    labelForGame(game),
-  ]
-    .map((s) => (s ?? "").trim())
-    .filter(Boolean);
-  return parts.join(" ");
-}
-
-function classes(variant: Props["variant"], compact?: boolean, extra?: string): string {
-  const v = compact ? "pill" : (variant ?? "button");
-  const base =
-    v === "pill"
-      ? (compact
-          ? "inline-flex items-center rounded-full border border-white/20 bg-white/10 px-2.5 py-1 text-xs font-medium text-white hover:bg-white/20"
-          : "inline-flex items-center rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium text-white hover:bg-white/20")
-      : "inline-flex items-center rounded-md border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20";
-  return extra ? `${base} ${extra}` : base;
-}
-
-export default function CardAmazonCTA({ card, game, variant, compact, className }: Props) {
-  const q = buildQuery({ card, game });
-  const href = `https://www.amazon.com/s?k=${encodeURIComponent(q)}`;
+  if (!url) {
+    // No URL passed from the server → hide CTA
+    return null;
+  }
 
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className={classes(variant, compact, className)}
-      aria-label={`Search Amazon for ${q}`}
-    >
-      Amazon
-    </a>
+    <div className="rounded-xl border border-amber-400/40 bg-amber-400/5 p-4 shadow-lg shadow-amber-500/15">
+      <div className="text-xs uppercase tracking-wide text-amber-200/80">
+        Amazon Affiliate
+      </div>
+      <div className="mt-1 text-sm text-white/90">
+        Support the site by buying{" "}
+        <span className="font-semibold">{label}</span> on Amazon.
+      </div>
+      <div className="mt-3">
+        <Link
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-black hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+        >
+          View on Amazon
+          <span aria-hidden="true">↗</span>
+        </Link>
+      </div>
+    </div>
   );
 }

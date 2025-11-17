@@ -1,5 +1,5 @@
 // scripts/revalueCollection.mjs
-/* eslint-disable no-console */
+ 
 // Node 20+
 // Uses DATABASE_URL from your .env
 
