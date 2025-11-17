@@ -1,4 +1,4 @@
-// src/app/categories/pokemon/top-pricecharting/page.tsx
+// src/app/categories/mtg/top-pricecharting/page.tsx
 import "server-only";
 
 import Link from "next/link";
@@ -13,49 +13,47 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export default async function PokemonTopPricechartingPage() {
+export default async function MtgTopPricechartingPage() {
   const { userId } = await auth();
   const plan = await getUserPlan(userId ?? null);
 
   const rows: PricechartingCardPriceRow[] =
     await getTopPricechartingCardPrices({
-      category: "pokemon",
+      category: "mtg",
       limit: 100,
       orderBy: "graded_price_cents",
     });
 
   return (
     <section className="space-y-6">
-      {/* Header */}
       <header className="space-y-2">
         <div className="flex items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold text-white">
-              Top Pokémon Cards by PriceCharting
+              Top Magic: The Gathering Cards by PriceCharting
             </h1>
             <p className="text-sm text-white/70">
-              Ranked by graded PriceCharting value. Great for chasing grails and
-              watching high-end cards.
+              Graded MTG heavy-hitters ranked by PriceCharting. Perfect for
+              spotting high-end staples and grails.
             </p>
           </div>
           <Link
-            href="/categories/pokemon/cards"
+            href="/categories/mtg/cards"
             className="text-sm text-sky-300 hover:underline"
           >
-            ← Back to Pokémon cards
+            ← Back to MTG cards
           </Link>
         </div>
         <p className="text-xs text-white/60">
-          This leaderboard uses your connected PriceCharting CSV dataset. Data
-          updates when you run your nightly PriceCharting sync.
+          Collector & Pro Collector plans unlock this leaderboard. Data is
+          updated via your nightly PriceCharting sync.
         </p>
       </header>
 
-      {/* Gated content */}
       <UpgradeGate
         currentPlanId={plan.id}
         requiredPlanId="collector"
-        featureName="Top Pokémon cards by PriceCharting"
+        featureName="Top MTG cards by PriceCharting"
       >
         <div className="overflow-x-auto rounded-2xl border border-white/15 bg-white/5 p-4 text-xs md:text-sm text-white">
           <table className="min-w-full text-left">

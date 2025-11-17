@@ -1,4 +1,4 @@
-// src/app/categories/pokemon/top-pricecharting/page.tsx
+// src/app/categories/yugioh/top-pricecharting/page.tsx
 import "server-only";
 
 import Link from "next/link";
@@ -13,49 +13,46 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export default async function PokemonTopPricechartingPage() {
+export default async function YugiohTopPricechartingPage() {
   const { userId } = await auth();
   const plan = await getUserPlan(userId ?? null);
 
   const rows: PricechartingCardPriceRow[] =
     await getTopPricechartingCardPrices({
-      category: "pokemon",
+      category: "yugioh",
       limit: 100,
       orderBy: "graded_price_cents",
     });
 
   return (
     <section className="space-y-6">
-      {/* Header */}
       <header className="space-y-2">
         <div className="flex items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold text-white">
-              Top Pokémon Cards by PriceCharting
+              Top Yu-Gi-Oh! Cards by PriceCharting
             </h1>
             <p className="text-sm text-white/70">
-              Ranked by graded PriceCharting value. Great for chasing grails and
-              watching high-end cards.
+              High-end YGO grails ranked by graded PriceCharting value.
             </p>
           </div>
           <Link
-            href="/categories/pokemon/cards"
+            href="/categories/yugioh/cards"
             className="text-sm text-sky-300 hover:underline"
           >
-            ← Back to Pokémon cards
+            ← Back to Yu-Gi-Oh! cards
           </Link>
         </div>
         <p className="text-xs text-white/60">
-          This leaderboard uses your connected PriceCharting CSV dataset. Data
-          updates when you run your nightly PriceCharting sync.
+          Requires Collector or Pro Collector. Perfect upgrade carrot for YGO
+          whales.
         </p>
       </header>
 
-      {/* Gated content */}
       <UpgradeGate
         currentPlanId={plan.id}
         requiredPlanId="collector"
-        featureName="Top Pokémon cards by PriceCharting"
+        featureName="Top Yu-Gi-Oh! cards by PriceCharting"
       >
         <div className="overflow-x-auto rounded-2xl border border-white/15 bg-white/5 p-4 text-xs md:text-sm text-white">
           <table className="min-w-full text-left">

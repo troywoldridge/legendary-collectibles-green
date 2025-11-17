@@ -5,6 +5,7 @@ import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
+import { getUserPlan } from "@/lib/plans";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -102,6 +103,8 @@ export default async function CollectionAnalyticsPage() {
     );
   }
 
+  const plan = await getUserPlan(userId);
+
   // ----- Load daily valuations -----
   const dailyRes = await db.execute<DailyValRow>(sql`
     SELECT
@@ -152,12 +155,14 @@ export default async function CollectionAnalyticsPage() {
     GROUP BY game
     ORDER BY game ASC
   `);
-  const byGame = (gameRes.rows ?? []).map((r) => ({
-    game: r.game,
-    label: gameLabel(r.game),
-    qty: Number(r.qty ?? 0),
-    valueCents: r.value_cents != null ? Number(r.value_cents) : 0,
-  })).sort((a, b) => b.valueCents - a.valueCents);
+  const byGame = (gameRes.rows ?? [])
+    .map((r) => ({
+      game: r.game,
+      label: gameLabel(r.game),
+      qty: Number(r.qty ?? 0),
+      valueCents: r.value_cents != null ? Number(r.value_cents) : 0,
+    }))
+    .sort((a, b) => b.valueCents - a.valueCents);
 
   // ----- Recently added -----
   const recentRes = await db.execute<RecentItemRow>(sql`
@@ -177,6 +182,8 @@ export default async function CollectionAnalyticsPage() {
   `);
   const recent = recentRes.rows ?? [];
 
+  const isPro = plan.id === "pro";
+
   return (
     <section className="max-w-6xl mx-auto px-4 py-6 text-white space-y-8">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -187,12 +194,30 @@ export default async function CollectionAnalyticsPage() {
             money is concentrated.
           </p>
         </div>
-        <Link
-          href="/collection"
-          className="text-sm text-sky-300 hover:underline"
-        >
-          ← Back to collection
-        </Link>
+        <div className="flex flex-col items-end gap-2 sm:items-end">
+          <Link
+            href="/collection"
+            className="text-sm text-sky-300 hover:underline"
+          >
+            ← Back to collection
+          </Link>
+
+          {isPro ? (
+            <a
+              href="/api/collection/export"
+              className="inline-flex items-center rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10"
+            >
+              Download collection CSV
+            </a>
+          ) : (
+            <Link
+              href="/pricing"
+              className="inline-flex items-center rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/20"
+            >
+              Upgrade to Pro for CSV exports
+            </Link>
+          )}
+        </div>
       </header>
 
       {/* --- Top summary cards --- */}
@@ -235,7 +260,7 @@ export default async function CollectionAnalyticsPage() {
           )}
           {daily.length <= 1 && (
             <div className="mt-2 text-sm text-white/60">
-              History will build up as your nightly revalue job runs.
+            History will build up as your nightly revalue job runs.
             </div>
           )}
         </div>

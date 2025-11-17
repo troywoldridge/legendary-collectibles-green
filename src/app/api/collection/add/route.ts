@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { db } from "@/lib/db";
 import { sql } from "drizzle-orm";
+import { getUserPlan } from "@/lib/plans";
 
 export const runtime = "nodejs";
 
@@ -34,6 +35,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
+  const plan = await getUserPlan(userId);
+  const isPro = plan.id === "pro";
+  const isCollector = plan.id === "collector";
+  const isFree = !isPro && !isCollector;
+
   // ---- Core fields ----
   const game = (body.game ?? "").trim().toLowerCase();
   const cardId = (body.cardId ?? "").trim();
@@ -52,6 +58,7 @@ export async function POST(req: Request) {
     Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.floor(qtyRaw) : 1;
 
   const folder = body.folder ?? null;
+  const normalizedFolderKey = folder ?? "__default__";
 
   const costCents =
     typeof body.cost_cents === "number" && Number.isFinite(body.cost_cents)
@@ -61,10 +68,116 @@ export async function POST(req: Request) {
   if (!game || !cardId) {
     return NextResponse.json(
       { error: "Missing required fields game/cardId" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
+  // ---- Plan-based limits (items + collections) ----
+  // Free: 1 collection, 500 items
+  // Collector: 5 collections, 5000 items
+  // Pro: unlimited
+  if (!isPro) {
+    // current totals
+    const usageRes = await db.execute<{
+      total_items: string | null;
+      collections: number | null;
+    }>(sql`
+      SELECT
+        COALESCE(SUM(quantity), 0)::bigint::text AS total_items,
+        COUNT(DISTINCT COALESCE(folder, '__default__'))::integer AS collections
+      FROM user_collection_items
+      WHERE user_id = ${userId}
+    `);
+
+    const usage = usageRes.rows?.[0] ?? {
+      total_items: "0",
+      collections: 0,
+    };
+
+    const currentItems = Number(usage.total_items ?? "0");
+    const currentCollections = Number(usage.collections ?? 0);
+
+    // Will this create a new collection (folder)?
+    const hasFolderRes = await db.execute<{ exists: number }>(sql`
+      SELECT 1 AS exists
+      FROM user_collection_items
+      WHERE user_id = ${userId}
+        AND COALESCE(folder, '__default__') = ${normalizedFolderKey}
+      LIMIT 1
+    `);
+    const isNewCollection = hasFolderRes.rows.length === 0;
+
+    const projectedItems = currentItems + quantity;
+    const projectedCollections =
+      currentCollections + (isNewCollection ? 1 : 0);
+
+    let maxCollections: number | null = null;
+    let maxItems: number | null = null;
+
+    if (isFree) {
+      maxCollections = 1;
+      maxItems = 500;
+    } else if (isCollector) {
+      maxCollections = 5;
+      maxItems = 5000;
+    }
+
+    if (
+      (maxItems != null && projectedItems > maxItems) ||
+      (maxCollections != null && projectedCollections > maxCollections)
+    ) {
+      // Figure out which limit hit first for a clearer error
+      const hitItems =
+        maxItems != null && projectedItems > maxItems;
+      const hitCollections =
+        maxCollections != null &&
+        projectedCollections > maxCollections;
+
+      const planName = isFree
+        ? "Free"
+        : isCollector
+        ? "Collector"
+        : plan.id;
+
+      const errorParts: string[] = [];
+      if (hitItems && maxItems != null) {
+        errorParts.push(
+          `item limit reached (${currentItems}/${maxItems} items)`,
+        );
+      }
+      if (hitCollections && maxCollections != null) {
+        errorParts.push(
+          `collection limit reached (${currentCollections}/${maxCollections} collections)`,
+        );
+      }
+
+      return NextResponse.json(
+        {
+          error: "Plan limit reached",
+          message: `Your ${planName} plan has reached its limit: ${errorParts.join(
+            " and ",
+          )}.`,
+          plan: planName,
+          current: {
+            items: currentItems,
+            collections: currentCollections,
+          },
+          projected: {
+            items: projectedItems,
+            collections: projectedCollections,
+          },
+          limits: {
+            maxItems,
+            maxCollections,
+          },
+          upgradeUrl: "/pricing",
+        },
+        { status: 403 },
+      );
+    }
+  }
+
+  // ---- Insert / upsert ----
   try {
     await db.execute(
       sql`
@@ -111,7 +224,7 @@ export async function POST(req: Request) {
           folder     = COALESCE(EXCLUDED.folder, user_collection_items.folder),
           cost_cents = COALESCE(EXCLUDED.cost_cents, user_collection_items.cost_cents),
           updated_at = NOW()
-      `
+      `,
     );
 
     return NextResponse.json({ ok: true });
@@ -119,7 +232,7 @@ export async function POST(req: Request) {
     console.error("collection/add failed", err);
     return NextResponse.json(
       { error: "Database error inserting collection item" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

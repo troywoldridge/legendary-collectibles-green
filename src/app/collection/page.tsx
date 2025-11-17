@@ -6,6 +6,7 @@ import Image from "next/image";
 import { auth } from "@clerk/nextjs/server";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { getUserPlan } from "@/lib/plans";
 import CollectionDashboardClient from "@/components/collection/CollectionDashboardClient";
 
 import CollectionTableBody, {
@@ -102,6 +103,17 @@ export default async function CollectionPage({
       </section>
     );
   }
+
+  const plan = await getUserPlan(userId);
+  const isPro = plan.id === "pro";
+  const isCollector = plan.id === "collector";
+  const isFree = !isPro && !isCollector;
+
+  const planLabel = isPro
+    ? "Pro Collector"
+    : isCollector
+    ? "Collector"
+    : "Free";
 
   // ---- Filters from query string ----
   const sort = first(sp.sort) ?? "date";
@@ -261,23 +273,63 @@ export default async function CollectionPage({
 
   return (
     <section className="mx-auto max-w-7xl space-y-6 p-4 text-white">
-      {/* Header */}
-      <header>
-        <h1 className="text-3xl font-bold">My Collection</h1>
-        <p className="mt-1 text-sm text-white/80">
-          Manage your personal collection across Pokémon, Magic, and
-          Yu-Gi-Oh!. Filters, summary, and analytics update live.
-        </p>
-        <p className="mt-1 text-sm text-white/70">
-          Track your portfolio on the{" "}
-          <Link
-            href="/collection/analytics"
-            className="text-sky-300 hover:underline"
-          >
-            analytics page
-          </Link>
-          .
-        </p>
+      {/* Header with plan + actions */}
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">My Collection</h1>
+          <p className="mt-1 text-sm text-white/80">
+            Manage your personal collection across Pokémon, Magic, and
+            Yu-Gi-Oh!. Filters, summary, and analytics update live.
+          </p>
+          <p className="mt-1 text-sm text-white/70">
+            View detailed charts and historical valuations on the{" "}
+            <Link
+              href="/collection/analytics"
+              className="text-sky-300 hover:underline"
+            >
+              analytics page
+            </Link>
+            .
+          </p>
+        </div>
+
+        <div className="flex flex-col items-start gap-2 sm:items-end">
+          {/* Plan pill */}
+          <div className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/5 px-3 py-1 text-xs">
+            <span className="uppercase tracking-wide text-white/50">
+              Plan
+            </span>
+            <span className="font-semibold text-white">
+              {planLabel}
+            </span>
+          </div>
+
+          {/* Actions */}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Link
+              href="/collection/analytics"
+              className="rounded-lg border border-white/25 bg-white/10 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/20"
+            >
+              View analytics
+            </Link>
+
+            {isPro ? (
+              <a
+                href="/api/collection/export"
+                className="rounded-lg border border-emerald-400/50 bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-50 hover:bg-emerald-500/30"
+              >
+                Download collection CSV
+              </a>
+            ) : (
+              <Link
+                href="/pricing"
+                className="rounded-lg border border-amber-400/50 bg-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-50 hover:bg-amber-500/30"
+              >
+                Upgrade to Pro for CSV exports
+              </Link>
+            )}
+          </div>
+        </div>
       </header>
 
       <CollectionDashboardClient />
