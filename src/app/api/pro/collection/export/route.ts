@@ -30,10 +30,17 @@ export async function GET() {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  // src/app/api/pro/alerts/route.ts
+
   const plan = await getUserPlan(userId);
-  if ((plan?.limits?.maxItems ?? 0) <= 0) {
+
+  // Use maxItemsTotal here, not maxItems
+  const maxItemsTotal = plan?.limits?.maxItemsTotal ?? 0;
+
+  if (maxItemsTotal <= 0) {
     return NextResponse.json({ error: "Pro required" }, { status: 402 });
   }
+
 
   // Adjust table/columns if your collection table differs.
   const rows = (await db.execute<Row>(sql`

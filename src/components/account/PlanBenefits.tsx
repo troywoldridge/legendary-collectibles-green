@@ -3,12 +3,9 @@ import "server-only";
 
 import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
-import { getUserPlan } from "@/lib/plans";
+import { getUserPlan, type PlanId, PLANS, PLAN_ORDER } from "@/lib/plans";
 
 export const runtime = "nodejs";
-
-const PLAN_ORDER = ["free", "collector", "pro"] as const;
-type PlanId = (typeof PLAN_ORDER)[number];
 
 const LABEL: Record<PlanId, string> = {
   free: "Free",
@@ -64,8 +61,8 @@ const FEATURES: Record<PlanId, string[]> = {
 
 export default async function PlanBenefits() {
   const { userId } = await auth();
-  const plan = userId ? await getUserPlan(userId) : { id: "free" };
-  const currentId = (plan.id ?? "free") as PlanId;
+  const plan = userId ? await getUserPlan(userId) : PLANS.free;
+  const currentId = plan.id as PlanId;
 
   return (
     <section className="rounded-2xl border border-white/15 bg-white/5 p-4 text-white backdrop-blur-sm">

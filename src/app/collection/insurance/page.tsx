@@ -5,7 +5,7 @@ import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { getUserPlan } from "@/lib/plans";
+import { getUserPlan, planCapabilities } from "@/lib/plans";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,7 +58,8 @@ export default async function InsuranceValuationPage() {
   }
 
   const plan = await getUserPlan(userId);
-  const isPro = plan.id === "pro";
+  const caps = planCapabilities(plan);
+  const isProFeature = caps.canGenerateInsuranceReport;
 
   // Load latest valuation snapshot
   const valRes = await db.execute<ValRow>(sql`
@@ -75,17 +76,13 @@ export default async function InsuranceValuationPage() {
   `);
 
   const latest = valRes.rows?.[0] ?? null;
-  const latestValueCents = latest
-    ? Number(latest.total_value_cents ?? 0)
-    : 0;
-  const costCents = latest
-    ? Number(latest.total_cost_cents ?? 0)
-    : null;
+  const latestValueCents = latest ? Number(latest.total_value_cents ?? 0) : 0;
+  const costCents = latest ? Number(latest.total_cost_cents ?? 0) : null;
   const unrealizedCents =
     costCents != null ? latestValueCents - costCents : null;
 
   return (
-    <section className="mx-auto max-w-4xl px-4 py-6 text-white space-y-6">
+    <section className="mx-auto max-w-4xl space-y-6 px-4 py-6 text-white">
       <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">
@@ -106,7 +103,7 @@ export default async function InsuranceValuationPage() {
       </header>
 
       {/* Plan gate for non-Pro */}
-      {!isPro && (
+      {!isProFeature && (
         <div className="rounded-2xl border border-amber-400/60 bg-amber-500/15 p-4 text-sm text-amber-50">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -133,7 +130,7 @@ export default async function InsuranceValuationPage() {
         </div>
       )}
 
-      {/* Summary card – visible to everyone with data, but copy shifts if not Pro */}
+      {/* Summary card */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         {latest ? (
           <>
@@ -191,7 +188,7 @@ export default async function InsuranceValuationPage() {
         )}
       </div>
 
-      {/* Download action – enabled only for Pro, but still visible for everyone */}
+      {/* Download action – enabled only for Pro + snapshot */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -207,17 +204,17 @@ export default async function InsuranceValuationPage() {
           <div className="flex flex-col items-start gap-2 sm:items-end">
             <button
               type="button"
-              disabled={!isPro || !latest}
+              disabled={!isProFeature || !latest}
               className={`inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-semibold ${
-                !isPro || !latest
-                  ? "cursor-not-allowed bg-white/10 text-white/50"
+                !isProFeature || !latest
+                  ? "cursor-not-allowed bg.white/10 text-white/50"
                   : "bg-emerald-500 text-black hover:bg-emerald-400"
               }`}
             >
               Download PDF (coming soon)
             </button>
             <div className="text-[11px] text-white/60">
-              {isPro
+              {isProFeature
                 ? "PDF export wiring is next on the roadmap."
                 : "Upgrade to Pro Collector to unlock insurance-ready PDF exports."}
             </div>

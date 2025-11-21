@@ -44,6 +44,7 @@ async function getAlerts(userId: string) {
 
 export default async function ProPage() {
   const { userId } = await auth();
+
   if (!userId) {
     return (
       <div className="space-y-4">
@@ -53,15 +54,20 @@ export default async function ProPage() {
     );
   }
 
+  // Load the user's plan and infer "Pro access" from limits
   const plan = await getUserPlan(userId);
-  const isPro = (plan?.limits?.maxItems ?? 0) > 0;
+  const maxItemsTotal = plan?.limits?.maxItemsTotal ?? 0;
+  const isPro = maxItemsTotal > 0; // tweak later if you add an explicit plan.slug
 
   if (!isPro) {
     return (
       <div className="space-y-4">
         <h1 className="text-2xl font-bold text-white">Pro</h1>
         <p className="text-white/80">Upgrade to unlock downloads and alerts.</p>
-        <Link href="/pricing" className="inline-block rounded bg-amber-500 px-4 py-2 text-white">
+        <Link
+          href="/pricing"
+          className="inline-block rounded bg-amber-500 px-4 py-2 text-white"
+        >
           See plans
         </Link>
       </div>
@@ -79,7 +85,7 @@ export default async function ProPage() {
 
       {/* Alerts + card autocomplete */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-        <h2 className="text-lg font-semibold text-white mb-3">Price Alerts</h2>
+        <h2 className="mb-3 text-lg font-semibold text-white">Price Alerts</h2>
         <AlertsForm />
 
         <div className="mt-4 space-y-2">
@@ -91,14 +97,17 @@ export default async function ProPage() {
                 key={a.id}
                 className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
               >
-                <div className="text-white/90 text-sm">
+                <div className="text-sm text-white/90">
                   <b>{a.game}</b> • {a.card_id} • {a.source} • {a.rule_type} $
                   {Number(a.threshold).toFixed(2)}
                 </div>
                 <button
                   className="text-sm text-red-300 hover:text-red-200"
                   onClick={async () => {
-                    await fetch(`/api/pro/alerts?id=${a.id}`, { method: "DELETE", cache: "no-store" });
+                    await fetch(`/api/pro/alerts?id=${a.id}`, {
+                      method: "DELETE",
+                      cache: "no-store",
+                    });
                     location.reload();
                   }}
                 >

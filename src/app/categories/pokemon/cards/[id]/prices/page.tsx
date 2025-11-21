@@ -1,9 +1,9 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 import "server-only";
 
 import Link from "next/link";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { auth } from "@clerk/nextjs/server";
 
 import MarketPrices from "@/components/MarketPrices";
 
@@ -19,6 +19,9 @@ import {
   getLatestPricechartingSnapshotsForCards,
   getTopPricechartingCardPrices,
 } from "@/lib/pricecharting";
+
+import { getUserPlan } from "@/lib/plans";
+import PlanGate from "@/components/plan/PlanGate";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,9 +56,9 @@ type CmHist = {
    Helpers
 ------------------------------------------------ */
 function readDisplay(sp: SearchParams): DisplayCurrency {
-  const a = Array.isArray(sp?.display) ? sp.display[0] : sp?.display;
-  const b = Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency;
-  const v = (a || b || "").toUpperCase();
+  const a = (Array.isArray(sp?.display) ? sp.display[0] : sp?.display) ?? "";
+  const b = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency) ?? "";
+  const v = (a || b).toUpperCase();
   return v === "USD" || v === "EUR" ? (v as DisplayCurrency) : "NATIVE";
 }
 
@@ -73,7 +76,7 @@ function asNum(v: string | null | undefined): number | null {
 
 function pickAtOrAfter<T extends { captured_at: string }>(
   rows: T[],
-  sinceMs: number
+  sinceMs: number,
 ) {
   const cutoff = Date.now() - sinceMs;
   for (const row of rows) {
@@ -83,7 +86,7 @@ function pickAtOrAfter<T extends { captured_at: string }>(
   return null;
 }
 
-function pctChange(from: number | null, to: number | null) {
+function pctChange(from: number | null, to: number | null): string | null {
   if (from == null || to == null || from === 0) return null;
   const p = ((to - from) / from) * 100;
   return `${p >= 0 ? "+" : ""}${p.toFixed(1)}%`;
@@ -95,57 +98,63 @@ function pctChange(from: number | null, to: number | null) {
 async function resolveCardId(param: string): Promise<string | null> {
   const like = `%${param.replace(/-/g, " ").trim()}%`;
 
-  const row = (
-    await db.execute<{ id: string }>(sql`
-      SELECT id
-      FROM tcg_cards
-      WHERE id = ${param}
-         OR lower(id) = lower(${param})
-         OR name ILIKE ${like}
-      ORDER BY
-        CASE
-          WHEN id = ${param} THEN 0
-          WHEN lower(id) = lower(${param}) THEN 1
-          ELSE 2
-        END,
-        id ASC
-      LIMIT 1
-    `)
-  ).rows[0];
+  const row =
+    (
+      await db.execute<{ id: string }>(sql`
+        SELECT id
+        FROM tcg_cards
+        WHERE id = ${param}
+           OR lower(id) = lower(${param})
+           OR name ILIKE ${like}
+        ORDER BY
+          CASE
+            WHEN id = ${param} THEN 0
+            WHEN lower(id) = lower(${param}) THEN 1
+            ELSE 2
+          END,
+          id ASC
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null;
 
   return row?.id ?? null;
 }
 
-async function loadCore(cardId: string) {
+async function loadCore(cardId: string): Promise<CardCore | null> {
   return (
-    await db.execute<CardCore>(sql`
-      SELECT id, name
-      FROM tcg_cards
-      WHERE id = ${cardId}
-    `)
-  ).rows[0];
+    (
+      await db.execute<CardCore>(sql`
+        SELECT id, name
+        FROM tcg_cards
+        WHERE id = ${cardId}
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null
+  );
 }
 
 async function loadHistory(cardId: string, days = 90) {
-  const tcg = (
-    await db.execute<TcgHist>(sql`
-      SELECT captured_at, currency, normal, holofoil, reverse_holofoil
-      FROM tcg_card_prices_tcgplayer_history
-      WHERE card_id = ${cardId}
-        AND captured_at >= now() - (${days} * INTERVAL '1 day')
-      ORDER BY captured_at ASC
-    `)
-  ).rows;
+  const tcg =
+    (
+      await db.execute<TcgHist>(sql`
+        SELECT captured_at, currency, normal, holofoil, reverse_holofoil
+        FROM tcg_card_prices_tcgplayer_history
+        WHERE card_id = ${cardId}
+          AND captured_at >= now() - (${days} * INTERVAL '1 day')
+        ORDER BY captured_at ASC
+      `)
+    ).rows ?? [];
 
-  const cm = (
-    await db.execute<CmHist>(sql`
-      SELECT captured_at, trend_price, average_sell_price, low_price, suggested_price
-      FROM tcg_card_prices_cardmarket_history
-      WHERE card_id = ${cardId}
-        AND captured_at >= now() - (${days} * INTERVAL '1 day')
-      ORDER BY captured_at ASC
-    `)
-  ).rows;
+  const cm =
+    (
+      await db.execute<CmHist>(sql`
+        SELECT captured_at, trend_price, average_sell_price, low_price, suggested_price
+        FROM tcg_card_prices_cardmarket_history
+        WHERE card_id = ${cardId}
+          AND captured_at >= now() - (${days} * INTERVAL '1 day')
+        ORDER BY captured_at ASC
+      `)
+    ).rows ?? [];
 
   return { tcg, cm };
 }
@@ -162,6 +171,8 @@ export default async function PokemonCardPricesPage({
 }) {
   const { id: rawId } = await params;
   const sp = await searchParams;
+  const { userId } = await auth();
+  const plan = await getUserPlan(userId ?? null);
 
   const display = readDisplay(sp);
 
@@ -177,16 +188,14 @@ export default async function PokemonCardPricesPage({
     return (
       <section className="space-y-4">
         <h1 className="text-2xl font-bold text-white">Card not found</h1>
-        <p className="text-sm text-white/70 break-all">
+        <p className="break-all text-sm text-white/70">
           Looked up: <code>{cardParam}</code>
         </p>
       </section>
     );
   }
 
-  const baseDetail = `/categories/pokemon/cards/${encodeURIComponent(
-    core.id
-  )}`;
+  const baseDetail = `/categories/pokemon/cards/${encodeURIComponent(core.id)}`;
   const baseHref = `${baseDetail}/prices`;
 
   /* --------------------------------------
@@ -206,7 +215,7 @@ export default async function PokemonCardPricesPage({
   });
 
   /* --------------------------------------
-     Trends
+     Trends (TCGplayer + Cardmarket)
   -------------------------------------- */
   const fx = getFx();
 
@@ -242,7 +251,9 @@ export default async function PokemonCardPricesPage({
     metrics.push({
       label: `TCGplayer ${label}`,
       latest:
-        Lc == null ? null : formatMoney(Lc, display === "NATIVE" ? tcgCur : display),
+        Lc == null
+          ? null
+          : formatMoney(Lc, display === "NATIVE" ? tcgCur : display),
       d7: pctChange(C7, Lc),
       d30: pctChange(C30, Lc),
     });
@@ -268,7 +279,9 @@ export default async function PokemonCardPricesPage({
     metrics.push({
       label: `Cardmarket ${label}`,
       latest:
-        Lc == null ? null : formatMoney(Lc, display === "NATIVE" ? "EUR" : display),
+        Lc == null
+          ? null
+          : formatMoney(Lc, display === "NATIVE" ? "EUR" : display),
       d7: pctChange(C7, Lc),
       d30: pctChange(C30, Lc),
     });
@@ -286,24 +299,24 @@ export default async function PokemonCardPricesPage({
   return (
     <section className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">
             Prices: {core.name ?? core.id}
           </h1>
           <div className="text-sm text-white/70">
-            Market snapshot + PriceCharting + trends
+            Market snapshot + PriceCharting + trends.
           </div>
         </div>
 
-        {/* Toggle */}
+        {/* Display toggle */}
         <div className="flex items-center gap-3">
-          <div className="rounded-md border border-white/20 bg-white/10 p-1 text-sm">
-            <span className="px-2 text-white">Display:</span>
+          <div className="rounded-md border border-white/20 bg-white/10 p-1 text-sm text-white">
+            <span className="px-2">Display:</span>
 
             <Link
               href={withParam(baseHref, "display", "NATIVE")}
-              className={`px-2 py-1 rounded ${
+              className={`rounded px-2 py-1 ${
                 display === "NATIVE" ? "bg-white/20" : "hover:bg-white/10"
               }`}
             >
@@ -312,7 +325,7 @@ export default async function PokemonCardPricesPage({
 
             <Link
               href={withParam(baseHref, "display", "USD")}
-              className={`px-2 py-1 rounded ml-1 ${
+              className={`ml-1 rounded px-2 py-1 ${
                 display === "USD" ? "bg-white/20" : "hover:bg-white/10"
               }`}
             >
@@ -321,7 +334,7 @@ export default async function PokemonCardPricesPage({
 
             <Link
               href={withParam(baseHref, "display", "EUR")}
-              className={`px-2 py-1 rounded ml-1 ${
+              className={`ml-1 rounded px-2 py-1 ${
                 display === "EUR" ? "bg-white/20" : "hover:bg-white/10"
               }`}
             >
@@ -336,108 +349,146 @@ export default async function PokemonCardPricesPage({
       </div>
 
       {/* ----------------------------------------------------
-          MARKET PRICES
+          MARKET PRICES (Free+)
       ---------------------------------------------------- */}
       <MarketPrices category="pokemon" cardId={core.id} display={display} />
 
       {/* ----------------------------------------------------
-          PRICECHARTING – PER-CARD SNAPSHOT
+          PRICECHARTING – PER-CARD SNAPSHOT (Collector+)
       ---------------------------------------------------- */}
-      <div className="rounded-xl border border-white/15 bg-white/5 p-5 text-white">
-        <h2 className="text-lg font-semibold mb-3">PriceCharting</h2>
+      <PlanGate
+        planId={plan.id}
+        minPlan="collector"
+        title="Unlock PriceCharting snapshot"
+        description="Collector and Pro members see a PriceCharting graded snapshot for each Pokémon card."
+      >
+        <div className="rounded-xl border border-white/15 bg-white/5 p-5 text-white">
+          <h2 className="mb-3 text-lg font-semibold">PriceCharting</h2>
 
-        {pc ? (
-          <div className="grid sm:grid-cols-3 grid-cols-2 gap-3 text-sm">
-            <PcItem label="Loose (Ungraded)" value={pc.loose_cents} />
-            <PcItem label="Graded 9" value={pc.graded_cents} />
-            <PcItem label="PSA 10" value={pc.manual_only_cents} />
-            <PcItem label="CGC 10" value={pc.cgc10_cents} />
-            <PcItem label="SGC 10" value={pc.sgc10_cents} />
-            <PcItem
-              label="Snapshot"
-              value={
-                pc.captured_at
-                  ? new Date(pc.captured_at).toLocaleDateString()
-                  : null
-              }
-              isDate
-            />
-          </div>
-        ) : (
-          <div className="text-white/70 text-sm">
-            No PriceCharting snapshot yet for this card.
-          </div>
-        )}
-      </div>
-
-      {/* ----------------------------------------------------
-          PRICECHARTING – TOP POKÉMON (CSV)
-      ---------------------------------------------------- */}
-      <div className="rounded-xl border border-white/15 bg-white/5 p-5 text-white">
-        <h2 className="text-lg font-semibold mb-3">
-          Top Pokémon by PriceCharting
-        </h2>
-
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {pcTop.map((row) => (
-            <div
-              key={row.pricecharting_id}
-              className="rounded-xl bg-white/5 border border-white/10 p-3 text-sm"
-            >
-              <div className="font-semibold">{row.product_name}</div>
-
-              <div className="text-xs text-white/60">
-                {row.console_name ?? "Pokemon Card"}
-                {row.release_date ? ` • ${row.release_date}` : ""}
-              </div>
-
-              <div className="mt-2 space-y-1 text-xs">
-                <PcRow label="Loose" value={row.loose_price_cents} />
-                <PcRow label="Graded 9" value={row.graded_price_cents} />
-                <PcRow label="PSA 10" value={row.manual_only_price_cents} />
-                <PcRow label="CGC 10" value={row.condition_17_price_cents} />
-                <PcRow label="SGC 10" value={row.condition_18_price_cents} />
-              </div>
+          {pc ? (
+            <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
+              <PcItem label="Loose (Ungraded)" value={pc.loose_cents} />
+              <PcItem label="Graded 9" value={pc.graded_cents} />
+              <PcItem label="PSA 10" value={pc.manual_only_cents} />
+              <PcItem label="CGC 10" value={pc.cgc10_cents} />
+              <PcItem label="SGC 10" value={pc.sgc10_cents} />
+              <PcItem
+                label="Snapshot"
+                value={
+                  pc.captured_at
+                    ? new Date(pc.captured_at).toLocaleDateString()
+                    : null
+                }
+                isDate
+              />
             </div>
-          ))}
+          ) : (
+            <div className="text-sm text-white/70">
+              No PriceCharting snapshot yet for this card.
+            </div>
+          )}
         </div>
-      </div>
+      </PlanGate>
 
       {/* ----------------------------------------------------
-          TRENDS TABLE
+          PRICECHARTING – TOP POKÉMON (CSV, Collector+)
       ---------------------------------------------------- */}
-      <div className="rounded-xl border border-white/15 bg-white/5 p-5 text-white">
-        <h2 className="text-lg font-semibold mb-2">Recent Trends</h2>
+      <PlanGate
+        planId={plan.id}
+        minPlan="collector"
+        title="Unlock Top Pokémon leaderboard"
+        description="Collector and Pro members see the top Pokémon cards ranked by graded PriceCharting value."
+      >
+        <div className="rounded-xl border border-white/15 bg-white/5 p-5 text-white">
+          <h2 className="mb-3 text-lg font-semibold">
+            Top Pokémon by PriceCharting
+          </h2>
 
-        {noHistory ? (
-          <div className="text-white/70 text-sm">
-            Not enough historical data yet.
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+            {pcTop.map((row) => (
+              <div
+                key={row.pricecharting_id}
+                className="rounded-xl border border-white/10 bg-white/5 p-3 text-sm"
+              >
+                <div className="font-semibold">{row.product_name}</div>
+
+                <div className="text-xs text-white/60">
+                  {row.console_name ?? "Pokemon Card"}
+                  {row.release_date ? ` • ${row.release_date}` : ""}
+                </div>
+
+                <div className="mt-2 space-y-1 text-xs">
+                  <PcRow label="Loose" value={row.loose_price_cents} />
+                  <PcRow label="Graded 9" value={row.graded_price_cents} />
+                  <PcRow label="PSA 10" value={row.manual_only_price_cents} />
+                  <PcRow
+                    label="CGC 10"
+                    value={row.condition_17_price_cents}
+                  />
+                  <PcRow
+                    label="SGC 10"
+                    value={row.condition_18_price_cents}
+                  />
+                </div>
+              </div>
+            ))}
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-white/70">
-                  <th className="py-2 pr-4 text-left">Metric</th>
-                  <th className="py-2 pr-4 text-left">Latest</th>
-                  <th className="py-2 pr-4 text-left">7d</th>
-                  <th className="py-2 pr-4 text-left">30d</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/10">
-                {metrics.map((m) => (
-                  <tr key={m.label}>
-                    <td className="py-2 pr-4">{m.label}</td>
-                    <td className="py-2 pr-4">{m.latest ?? "—"}</td>
-                    <td className="py-2 pr-4">{m.d7 ?? "—"}</td>
-                    <td className="py-2 pr-4">{m.d30 ?? "—"}</td>
+        </div>
+      </PlanGate>
+
+      {/* ----------------------------------------------------
+          TRENDS TABLE (Collector+)
+      ---------------------------------------------------- */}
+      <PlanGate
+        planId={plan.id}
+        minPlan="collector"
+        title="Unlock price trends & movers"
+        description="Collector and Pro members get 7-day and 30-day trend metrics from TCGplayer and Cardmarket."
+      >
+        <div className="rounded-xl border border-white/15 bg-white/5 p-5 text-white">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Recent Trends</h2>
+            <div className="text-xs text-white/60">
+              {display === "NATIVE"
+                ? "Native market currencies"
+                : `Converted to ${display}${
+                    fx.usdToEur || fx.eurToUsd
+                      ? ""
+                      : " (no FX set; fallback used)"
+                  }`}
+            </div>
+          </div>
+
+          {noHistory ? (
+            <div className="text-sm text-white/70">
+              Not enough historical data yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-white/70">
+                    <th className="py-2 pr-4 text-left">Metric</th>
+                    <th className="py-2 pr-4 text-left">Latest</th>
+                    <th className="py-2 pr-4 text-left">7d</th>
+                    <th className="py-2 pr-4 text-left">30d</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+                </thead>
+                <tbody className="divide-y divide-white/10">
+                  {metrics.map((m) => (
+                    <tr key={m.label}>
+                      <td className="py-2 pr-4">{m.label}</td>
+                      <td className="py-2 pr-4">{m.latest ?? "—"}</td>
+                      <td className="py-2 pr-4">{m.d7 ?? "—"}</td>
+                      <td className="py-2 pr-4">{m.d30 ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </PlanGate>
     </section>
   );
 }
@@ -455,9 +506,9 @@ function PcItem({
   isDate?: boolean;
 }) {
   return (
-    <div className="rounded-md bg-white/5 border border-white/10 p-3">
-      <div className="text-white/60 text-xs">{label}</div>
-      <div className="text-white font-semibold">
+    <div className="rounded-md border border-white/10 bg-white/5 p-3">
+      <div className="text-xs text-white/60">{label}</div>
+      <div className="font-semibold text-white">
         {isDate
           ? value ?? "—"
           : typeof value === "number"
@@ -468,7 +519,13 @@ function PcItem({
   );
 }
 
-function PcRow({ label, value }: { label: string; value: number | null }) {
+function PcRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: number | null;
+}) {
   return (
     <div className="flex justify-between">
       <span className="text-white/70">{label}:</span>

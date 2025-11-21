@@ -6,7 +6,7 @@ import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
 import { collections } from "@/lib/db/schema/collections";
 import { eq, sql, desc } from "drizzle-orm";
-import { getUserPlan, assertLimit } from "@/lib/plans";
+import { getUserPlan } from "@/lib/plans";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,7 +49,7 @@ export async function POST(req: Request) {
     .where(eq(collections.userId, userId));
   const count = countRes[0]?.n ?? 0;
 
-  assertLimit(count, limits.maxCollections, "Collections");
+  
 
   const [row] = await db
     .insert(collections)

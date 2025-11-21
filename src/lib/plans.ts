@@ -1,5 +1,5 @@
 // src/lib/plans.ts
-import "server-only";
+
 
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
@@ -28,6 +28,9 @@ export type Plan = {
     advancedLtvTools: boolean;        // “list / loy automated calculator”, ROI tools
   };
 };
+
+// canonical order for “at least Collector”, “at least Pro”, etc.
+export const PLAN_ORDER: PlanId[] = ["free", "collector", "pro"];
 
 export const PLANS: Record<PlanId, Plan> = {
   free: {
@@ -120,6 +123,39 @@ export async function getUserPlan(userId: string | null): Promise<Plan> {
 
   const pid = res.rows?.[0]?.plan_id ?? "free";
   return PLANS[pid] ?? PLANS.free;
+}
+
+/* ---------- Plan hierarchy helpers ---------- */
+
+export function planRank(id: PlanId): number {
+  return PLAN_ORDER.indexOf(id);
+}
+
+export function isPlanAtLeast(current: PlanId, required: PlanId): boolean {
+  return planRank(current) >= planRank(required);
+}
+
+/**
+ * “Capabilities” object you can use in UI and backend.
+ * Convenience wrapper over limits + features.
+ */
+export function planCapabilities(plan: Plan) {
+  return {
+    // analytics
+    canSeeBasicAnalytics: true, // everyone gets some summary
+    canSeeFullAnalytics: isPlanAtLeast(plan.id, "collector"),
+
+    // feature flags
+    canSeePricechartingTopLists: plan.features.pricechartingTopLists,
+    canSeeTrendsAndMovers: plan.features.trendsAndMovers,
+    canExportCsv: plan.features.csvExports,
+    canGenerateInsuranceReport: plan.features.insuranceReports,
+    canUseAdvancedLtvTools: plan.features.advancedLtvTools,
+
+    // limits
+    maxCollections: plan.limits.maxCollections,
+    maxItemsTotal: plan.limits.maxItemsTotal,
+  };
 }
 
 /* ---------- Simple helpers for gating ---------- */

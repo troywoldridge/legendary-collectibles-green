@@ -39,7 +39,9 @@
     "prices:ebay:mtg": "node scripts/cron/fetchMtgEbayPrices.mjs --all --limit=0 --batch=800 --concurrency=4",
     "prices:ebay:pokemon": "node scripts/cron/fetchPkmnEbayPrices.mjs --all --limit=0 --batch=800 --concurrency=4",
     "prices:ebay:ygo": "node scripts/cron/fetchYgoEbayPrices.mjs --all --limit=0 --batch=800 --concurrency=4",
-    "prices:all": "node scripts/cron/runAllPrices.mjs"
+    "prices:all": "node scripts/cron/runAllPrices.mjs",
+    "cron:ygo:snapshot-history": "node scripts/cron/ygoPricesSnapshotHistory.mjs"
+  
   },
   "dependencies": {
     "@clerk/nextjs": "^6.34.5",

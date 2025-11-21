@@ -4,7 +4,7 @@ import "server-only";
 import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import { getUserPlan } from "@/lib/plans";
-import UpgradeGate from "@/components/UpgradeGate";
+import PlanGate from "@/components/plan/PlanGate";
 import {
   getTopPricechartingCardPrices,
   type PricechartingCardPriceRow,
@@ -45,15 +45,16 @@ export default async function MtgTopPricechartingPage() {
           </Link>
         </div>
         <p className="text-xs text-white/60">
-          Collector & Pro Collector plans unlock this leaderboard. Data is
-          updated via your nightly PriceCharting sync.
+          Data is sourced from your PriceCharting imports and refreshed on your
+          nightly sync.
         </p>
       </header>
 
-      <UpgradeGate
-        currentPlanId={plan.id}
-        requiredPlanId="collector"
-        featureName="Top MTG cards by PriceCharting"
+      <PlanGate
+        planId={plan.id}
+        minPlan="collector"
+        title="Unlock Top MTG leaderboard"
+        description="Collector and Pro members get full access to the Top 100 Magic cards by graded PriceCharting value."
       >
         <div className="overflow-x-auto rounded-2xl border border-white/15 bg-white/5 p-4 text-xs md:text-sm text-white">
           <table className="min-w-full text-left">
@@ -123,7 +124,7 @@ export default async function MtgTopPricechartingPage() {
             </tbody>
           </table>
         </div>
-      </UpgradeGate>
+      </PlanGate>
     </section>
   );
 }

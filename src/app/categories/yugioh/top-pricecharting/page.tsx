@@ -4,7 +4,7 @@ import "server-only";
 import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import { getUserPlan } from "@/lib/plans";
-import UpgradeGate from "@/components/UpgradeGate";
+import PlanGate from "@/components/plan/PlanGate";
 import {
   getTopPricechartingCardPrices,
   type PricechartingCardPriceRow,
@@ -44,15 +44,16 @@ export default async function YugiohTopPricechartingPage() {
           </Link>
         </div>
         <p className="text-xs text-white/60">
-          Requires Collector or Pro Collector. Perfect upgrade carrot for YGO
-          whales.
+          This leaderboard is ideal for showing YGO whales the true top end of the
+          market using your PriceCharting data.
         </p>
       </header>
 
-      <UpgradeGate
-        currentPlanId={plan.id}
-        requiredPlanId="collector"
-        featureName="Top Yu-Gi-Oh! cards by PriceCharting"
+      <PlanGate
+        planId={plan.id}
+        minPlan="collector"
+        title="Unlock Top Yu-Gi-Oh! leaderboard"
+        description="Collector and Pro members get full access to the Top 100 Yu-Gi-Oh! cards by graded PriceCharting value."
       >
         <div className="overflow-x-auto rounded-2xl border border-white/15 bg-white/5 p-4 text-xs md:text-sm text-white">
           <table className="min-w-full text-left">
@@ -122,7 +123,7 @@ export default async function YugiohTopPricechartingPage() {
             </tbody>
           </table>
         </div>
-      </UpgradeGate>
+      </PlanGate>
     </section>
   );
 }

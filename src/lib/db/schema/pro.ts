@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import { pgEnum, pgTable, uuid, text, timestamp, boolean, jsonb, numeric } from "drizzle-orm/pg-core";
 
 export const gameEnum = pgEnum("game", ["yugioh", "pokemon", "mtg"]);
@@ -16,15 +17,3 @@ export const proExports = pgTable("pro_exports", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const priceAlerts = pgTable("price_alerts", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  userId: text("user_id").notNull(),
-  game: gameEnum("game").notNull(),
-  targetCardId: text("target_card_id").notNull(),
-  source: priceSourceEnum("source").notNull(),        // which price field to read
-  ruleType: alertRuleTypeEnum("rule_type").notNull(), // above|below
-  threshold: numeric("threshold", { precision: 10, scale: 2 }).notNull(),
-  active: boolean("active").notNull().default(true),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
-});

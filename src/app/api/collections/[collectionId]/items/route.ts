@@ -5,8 +5,11 @@ import { auth } from "@clerk/nextjs/server";
 import { nanoid } from "nanoid";
 import { db } from "@/lib/db";
 import { collections, collectionItems } from "@/lib/db/schema/collections";
-import { and, eq, sql, desc } from "drizzle-orm";
-import { getUserPlan, assertLimit } from "@/lib/plans";
+import { and, eq, desc } from "drizzle-orm";
+import {
+  ensureCanAddItem,
+  ItemLimitError,
+} from "@/lib/collections/limits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,7 +39,7 @@ type CreateItemBody = Partial<{
 
 export async function GET(
   _req: NextRequest,
-  ctx: { params: Promise<{ collectionId: string }> }
+  ctx: { params: Promise<{ collectionId: string }> },
 ) {
   const { userId } = await auth();
   if (!userId) return bad("Unauthorized", 401);
@@ -64,7 +67,7 @@ export async function GET(
 
 export async function POST(
   req: NextRequest,
-  ctx: { params: Promise<{ collectionId: string }> }
+  ctx: { params: Promise<{ collectionId: string }> },
 ) {
   const { userId } = await auth();
   if (!userId) return bad("Unauthorized", 401);
@@ -95,15 +98,22 @@ export async function POST(
 
   const quantity = Number.isFinite(body.quantity) ? Number(body.quantity) : 1;
 
-  // Plan limit on items per collection
-  const { limits } = await getUserPlan(userId);
-  const countRes = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(collectionItems)
-    .where(eq(collectionItems.collectionId, coll[0].id));
-  const count = countRes[0]?.n ?? 0;
-
-  assertLimit(count, limits.maxItems, "Items");
+  // 🔒 Plan limit: items (Free: 500, Collector: 5000, Pro: unlimited)
+  try {
+    await ensureCanAddItem(userId);
+  } catch (err) {
+    if (err instanceof ItemLimitError) {
+      return NextResponse.json(
+        {
+          error: err.message,
+          code: err.code,
+          details: err.details,
+        },
+        { status: err.status },
+      );
+    }
+    throw err;
+  }
 
   const [row] = await db
     .insert(collectionItems)
@@ -121,7 +131,9 @@ export async function POST(
       gradeCompany: body.gradeCompany ?? null,
       grade: body.grade != null ? String(body.grade) : null,
       purchasePriceCents:
-        typeof body.purchasePriceCents === "number" ? body.purchasePriceCents : null,
+        typeof body.purchasePriceCents === "number"
+          ? body.purchasePriceCents
+          : null,
       currency: body.currency ?? "USD",
       acquiredAt: body.acquiredAt ? new Date(body.acquiredAt) : null,
       location: body.location ?? null,
