@@ -2,7 +2,6 @@ import "server-only";
 
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { centsToUsd } from "@/lib/pricecharting";
 import { type DisplayCurrency, convert, formatMoney } from "@/lib/pricing";
 
 type Props = {
@@ -20,16 +19,29 @@ type CurrentPriceRow = {
   as_of_date: string;
 };
 
+/**
+ * Resolve canonical market_item_id for a given (game, external_id).
+ * Note: category maps to market_items.game.
+ *
+ * We prefer an eBay mapping if multiple exist, but will fallback to any.
+ */
 async function resolveMarketItemId(category: string, cardId: string) {
-  const res = await db.execute<{ market_item_id: string }>(sql`
-    SELECT market_item_id
-    FROM public.market_item_external_ids
-    WHERE category = ${category}
-      AND external_id = ${cardId}
+  const res = await db.execute<{ id: string }>(sql`
+    SELECT id
+    FROM public.market_items
+    WHERE game = ${category}
+      AND canonical_id = ${cardId}
+    ORDER BY
+      CASE
+        WHEN canonical_source = 'tcgdex' THEN 0
+        WHEN canonical_source = 'internal' THEN 1
+        ELSE 2
+      END,
+      updated_at DESC
     LIMIT 1
   `);
 
-  return res.rows?.[0]?.market_item_id ?? null;
+  return res.rows?.[0]?.id ?? null;
 }
 
 async function loadCurrentMarketPrice(
@@ -42,20 +54,20 @@ async function loadCurrentMarketPrice(
       source,
       price_type,
       confidence,
-      as_of_date::text
+      as_of_date::text AS as_of_date
     FROM public.market_prices_current
     WHERE market_item_id = ${marketItemId}
+    ORDER BY
+      CASE WHEN source = 'priority_fallback' THEN 0 ELSE 1 END,
+      updated_at DESC
     LIMIT 1
   `);
 
   return res.rows?.[0] ?? null;
 }
 
-export default async function MarketPrices({
-  category,
-  cardId,
-  display,
-}: Props) {
+
+export default async function MarketPrices({ category, cardId, display }: Props) {
   const marketItemId = await resolveMarketItemId(category, cardId);
 
   if (!marketItemId) {
@@ -82,7 +94,8 @@ export default async function MarketPrices({
     );
   }
 
-  const native = price.currency.toUpperCase() as "USD" | "EUR";
+  const native = (price.currency || "USD").toUpperCase() as "USD" | "EUR";
+
   const converted =
     display === "NATIVE"
       ? price.price_cents
@@ -97,9 +110,7 @@ export default async function MarketPrices({
     <div className="rounded-xl border border-white/15 bg-white/5 p-5 text-white">
       <div className="mb-2 flex items-center justify-between">
         <h2 className="text-lg font-semibold">Market Price</h2>
-        <div className="text-xs text-white/60">
-          As of {price.as_of_date}
-        </div>
+        <div className="text-xs text-white/60">As of {price.as_of_date}</div>
       </div>
 
       <div className="text-2xl font-bold">{formatted}</div>

@@ -1,5 +1,5 @@
 // src/lib/plans.ts
-
+import "server-only";
 
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
@@ -16,16 +16,16 @@ export type Plan = {
 
   limits: {
     maxCollections: number | null; // null = unlimited
-    maxItemsTotal: number | null;  // null = unlimited
+    maxItemsTotal: number | null; // null = unlimited
   };
 
   features: {
     amazonCtas: boolean;
-    pricechartingTopLists: boolean;   // “Top {category} by PriceCharting”
-    trendsAndMovers: boolean;         // trends, top gainers/losers
-    csvExports: boolean;              // downloadable price sheets / collection CSV
-    insuranceReports: boolean;        // collection valuation for insurance
-    advancedLtvTools: boolean;        // “list / loy automated calculator”, ROI tools
+    pricechartingTopLists: boolean; // “Top {category} by PriceCharting”
+    trendsAndMovers: boolean; // trends, top gainers/losers
+    csvExports: boolean; // downloadable price sheets / collection CSV
+    insuranceReports: boolean; // collection valuation for insurance
+    advancedLtvTools: boolean; // ROI tools, etc
   };
 };
 
@@ -98,31 +98,53 @@ export const PLANS: Record<PlanId, Plan> = {
   },
 };
 
-/* ---------- DB glue: get user plan from subscriptions ---------- */
+/* ---------- DB glue ---------- */
 
 type DbPlanRow = {
-  plan_id: PlanId | null;
+  plan_id: string | null;
 };
 
-// You may already have a subscription table with a different schema.
-// Adjust the SQL if needed.
+/**
+ * Ensure a user has a plan row. Safe to call repeatedly.
+ * Call this on first login / post-auth / dashboard load if you want.
+ */
+export async function ensureUserPlanRow(userId: string) {
+  if (!userId) return;
+
+  try {
+    await db.execute(sql`
+      INSERT INTO public.user_plans (user_id, plan_id, updated_at)
+      VALUES (${userId}, 'free', now())
+      ON CONFLICT (user_id) DO NOTHING
+    `);
+  } catch (err) {
+    console.error("[ensureUserPlanRow] failed", err);
+  }
+}
+
+/**
+ * Load user's plan. If missing/invalid/unavailable → returns Free.
+ */
 export async function getUserPlan(userId: string | null): Promise<Plan> {
-  if (!userId) {
+  if (!userId) return PLANS.free;
+
+  try {
+    const res = await db.execute<DbPlanRow>(sql`
+      SELECT plan_id
+      FROM public.user_plans
+      WHERE user_id = ${userId}
+      LIMIT 1
+    `);
+
+    const raw = res.rows?.[0]?.plan_id ?? "free";
+    const pid: PlanId =
+      raw === "collector" || raw === "pro" || raw === "free" ? raw : "free";
+
+    return PLANS[pid] ?? PLANS.free;
+  } catch (err) {
+    console.error("[getUserPlan] failed, defaulting to free", err);
     return PLANS.free;
   }
-
-  // Example: a `user_plans` view or table:
-  //   user_id (text, pk)
-  //   plan_id ("free" | "collector" | "pro")
-  const res = await db.execute<DbPlanRow>(sql`
-    SELECT plan_id
-    FROM user_plans
-    WHERE user_id = ${userId}
-    LIMIT 1
-  `);
-
-  const pid = res.rows?.[0]?.plan_id ?? "free";
-  return PLANS[pid] ?? PLANS.free;
 }
 
 /* ---------- Plan hierarchy helpers ---------- */
@@ -137,12 +159,11 @@ export function isPlanAtLeast(current: PlanId, required: PlanId): boolean {
 
 /**
  * “Capabilities” object you can use in UI and backend.
- * Convenience wrapper over limits + features.
  */
 export function planCapabilities(plan: Plan) {
   return {
     // analytics
-    canSeeBasicAnalytics: true, // everyone gets some summary
+    canSeeBasicAnalytics: true,
     canSeeFullAnalytics: isPlanAtLeast(plan.id, "collector"),
 
     // feature flags
@@ -180,18 +201,12 @@ export function canUseAdvancedLtvTools(plan: Plan): boolean {
   return plan.features.advancedLtvTools;
 }
 
-export function canAddCollection(
-  plan: Plan,
-  currentCollections: number,
-): boolean {
+export function canAddCollection(plan: Plan, currentCollections: number): boolean {
   if (plan.limits.maxCollections == null) return true;
   return currentCollections < plan.limits.maxCollections;
 }
 
-export function canAddItem(
-  plan: Plan,
-  currentItems: number,
-): boolean {
+export function canAddItem(plan: Plan, currentItems: number): boolean {
   if (plan.limits.maxItemsTotal == null) return true;
   return currentItems < plan.limits.maxItemsTotal;
 }
