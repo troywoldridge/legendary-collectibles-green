@@ -80,3 +80,8 @@ legendary_neon.sql
 # Local dumps / crash files
 core
 legendary_neon.sql
+
+# --- Drizzle migrations + snapshots (commit these) ---
+!drizzle/
+!drizzle/**
+
