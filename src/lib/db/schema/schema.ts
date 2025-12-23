@@ -245,14 +245,30 @@ export const userWishlistItems = pgTable("user_wishlist_items", {
 		}).onDelete("set null"),
 ]);
 
-export const cartLines = pgTable("cart_lines", {
-	id: serial().primaryKey().notNull(),
-	cartId: uuid("cart_id").notNull(),
-	productId: integer("product_id").notNull(),
-	qty: integer().notNull(),
-	createdAt: timestamp("created_at", { mode: 'string' }),
-	updatedAt: timestamp("updated_at", { mode: 'string' }),
-});
+export const cartLines = pgTable(
+  "cart_lines",
+  {
+    id: serial("id").primaryKey().notNull(),
+
+    cartId: uuid("cart_id").notNull(),
+
+    // OLD flow (products table)
+    productId: integer("product_id"), // now nullable
+
+    // NEW store flow (store_listings table)
+    listingId: uuid("listing_id"),
+
+    qty: integer("qty").notNull(),
+
+    createdAt: timestamp("created_at", { mode: "string" }),
+    updatedAt: timestamp("updated_at", { mode: "string" }),
+  },
+  (t) => ({
+    cartIdx: index("idx_cart_lines_cart_id").on(t.cartId),
+    productIdx: index("idx_cart_lines_product_id").on(t.productId),
+    listingIdx: index("idx_cart_lines_listing_id").on(t.listingId),
+  }),
+);
 
 export const carts = pgTable("carts", {
 	id: uuid().primaryKey().notNull(),

@@ -184,6 +184,9 @@ const logoCandidates = useMemo(() => {
               <DropdownLink href="/categories/magic/cards">MTG Cards</DropdownLink>
             </NavDropdown>
 
+            <NavLink href="/store" active={isActive("/store")}>Shop</NavLink>
+
+
             {FEATURES.funko && (
               <NavLink href="/categories/funko/sets" active={isActive("/categories/funko")}>
                 Funko Pop

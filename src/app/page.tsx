@@ -41,9 +41,9 @@ const CATEGORIES_FALLBACK: ReadonlyArray<CategoryCard> = [
   { slug: "pokemon", label: "Pokémon", blurb: "Booster boxes, ETBs, singles", cfId: "b4e6cda2-4739-4717-5005-e0b84d75c200" },
   { slug: "yugioh", label: "Yu-Gi-Oh!", blurb: "Boxes, tins, structure decks", cfId: "87101a20-6ada-4b66-0057-2d210feb9d00" },
   { slug: "mtg", label: "Magic: The Gathering", blurb: "Play boosters, commander", cfId: "69ab5d2b-407c-4538-3c82-be8a551efa00" },
-  { slug: "sports", label: "Sports Cards", blurb: "NFL, NBA, MLB, UFC", cfId: "f95ef753-c5fd-4079-9743-27cf651fd500" },
-  { slug: "anime", label: "Anime TCGs", blurb: "One Piece, DBSCG, WS", cfId: "dbb25cb7-55f0-4b38-531a-2c26f513c700" },
-  { slug: "funko", label: "Funko & Figures", blurb: "Exclusives, vaulted, waves", cfId: "a9d2f9ea-6b9b-4f7a-93a1-7aa587842b00" },
+  //{ slug: "sports", label: "Sports Cards", blurb: "NFL, NBA, MLB, UFC", cfId: "f95ef753-c5fd-4079-9743-27cf651fd500" },
+  //{ slug: "anime", label: "Anime TCGs", blurb: "One Piece, DBSCG, WS", cfId: "dbb25cb7-55f0-4b38-531a-2c26f513c700" },
+  //{ slug: "funko", label: "Funko & Figures", blurb: "Exclusives, vaulted, waves", cfId: "a9d2f9ea-6b9b-4f7a-93a1-7aa587842b00" },
 ];
 
 /* ---------------- Helpers ---------------- */
@@ -168,26 +168,35 @@ export default async function HomePage() {
                     Sealed heat, graded grails, and weekly drops—curated for real collectors. Fast shipping. Authenticity guaranteed.
                   </p>
 
-                  {/* CTAs */}
                   <div className="flex flex-wrap items-center justify-center gap-3">
+                    <Link
+                      href="/store"
+                      className="inline-flex items-center rounded-lg border border-white/70 bg-indigo-600/80 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm hover:bg-indigo-600"
+                    >
+                      Shop Listings
+                    </Link>
+
                     <Link
                       href="/categories"
                       className="inline-flex items-center rounded-lg border border-white/60 bg-white/5 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm hover:bg-white/10"
                     >
                       Browse Categories
                     </Link>
+
                     <Link
                       href="/search"
                       className="inline-flex items-center rounded-lg border border-white/50 bg-white/5 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm hover:bg-white/10"
                     >
                       Search the Vault
                     </Link>
+
                     <Link
                       href="/cart"
                       className="inline-flex items-center rounded-lg border border-white/50 bg-white/5 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm hover:bg-white/10"
                     >
                       View Cart
                     </Link>
+
                     <Link
                       href="/categories/pokemon/cards"
                       className="inline-flex items-center rounded-lg border border-white/50 bg-white/5 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm hover:bg-white/10"
@@ -195,6 +204,7 @@ export default async function HomePage() {
                       Pokémon Cards
                     </Link>
                   </div>
+
 
                   {/* Brand chips */}
                   <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
@@ -231,6 +241,15 @@ export default async function HomePage() {
               >
                 View all →
               </Link>
+              <div className="mt-2 flex items-center justify-center gap-4">
+              <Link
+                href="/store"
+                className="text-sm font-semibold text-white/90 underline underline-offset-4 hover:text-white"
+              >
+                Shop listings →
+              </Link>
+            </div>
+
             </div>
 
             {(() => {

@@ -22,6 +22,13 @@
       "when": 1766458889829,
       "tag": "0002_big_namor",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1766459419504,
+      "tag": "0003_remarkable_patch",
+      "breakpoints": true
     }
   ]
 }
