@@ -483,10 +483,8 @@ export const ygoCardBanlist = pgTable(
   })
 );
 
-// -----------------------------
+
 // ygo_card_sets  (minimal columns used in your queries)
-// If your actual DDL differs, tweak below to match Neon exactly.
-// -----------------------------
 export const ygoCardSets = pgTable(
   "ygo_card_sets",
   {
@@ -496,12 +494,16 @@ export const ygoCardSets = pgTable(
     setName: text("set_name"),
     setCode: text("set_code"),
     setRarity: text("set_rarity"),
+
+    // ✅ needed for YGOPRODeck import
+    setRarityCode: text("set_rarity_code"),
+    setPrice: numeric("set_price", { precision: 12, scale: 2 }),
   },
   (t) => ({
-    // matches common PK shape for YGO exports
     pk: primaryKey({ columns: [t.cardId, t.setCode] }),
   })
 );
+
 
 export const ygoCardSetsRelations = relations(ygoCardSets, ({ one }) => ({
   card: one(ygoCards, {
@@ -564,7 +566,7 @@ export const tcgVendorPrices = pgTable("tcg_vendor_prices", {
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
   meta: jsonb("meta"),
 }, (t) => ({
-  pk: primaryKey({ columns: [t.game, t.cardId, t.vendor], name: "tcg_vendor_prices_pk" }),
+  pk: primaryKey({ columns: [t.game, t.cardId, t.vendor] }),
 }));
 
 export const tcgVendorMaps = pgTable("tcg_vendor_maps", {
@@ -583,9 +585,7 @@ export const tcgVendorMaps = pgTable("tcg_vendor_maps", {
       .defaultNow(),
   },
  (t) => ({
-   pk: primaryKey({ columns: [t.category, t.cardId, t.vendor], name: "tcg_vendor_prices_pk" }),
-    cardIdx: index("tcg_vendor_prices_card_idx").on(t.cardId),
-    vendorIdx: index("tcg_vendor_prices_vendor_idx").on(t.vendor),
+  pk: primaryKey({ columns: [t.category, t.cardId, t.vendor] }),
 }));
 
 
@@ -652,3 +652,5 @@ export const emailEvents = pgTable(
 
 export type EmailEvent = InferSelectModel<typeof emailEvents>;
 export type NewEmailEvent = InferInsertModel<typeof emailEvents>;
+// Re-export MTG schema tables (Scryfall sync expects these)
+export * from "./schema/mtg";

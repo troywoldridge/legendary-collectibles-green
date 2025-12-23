@@ -1,22 +1,20 @@
-
 import "server-only";
+
 import Link from "next/link";
 import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
-
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-/* ---------- Types ---------- */
 type SetRow = {
   id: string;
   name: string | null;
   series: string | null;
   ptcgo_code: string | null;
-  release_date: string | null;
+  release_date: string | null; // TEXT in DB
   logo_url: string | null;
   symbol_url: string | null;
 };
@@ -31,26 +29,36 @@ type CardRow = {
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
-/* ---------- Helpers ---------- */
 const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
 
+function first(v?: string | string[]) {
+  return Array.isArray(v) ? v[0] : v;
+}
+
 function parsePerPage(v?: string | string[]) {
-  const s = Array.isArray(v) ? v[0] : v;
-  const n = Number(s ?? 30);
+  const n = Number(first(v) ?? 30);
   return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 30;
 }
+
 function parsePage(v?: string | string[]) {
-  const s = Array.isArray(v) ? v[0] : v;
-  const n = Number(s ?? 1);
+  const n = Number(first(v) ?? 1);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
+
 function parseBool(v?: string | string[]) {
-  const s = (Array.isArray(v) ? v[0] : v)?.toLowerCase();
+  const s = (first(v) ?? "").toLowerCase();
   return s === "1" || s === "true" || s === "on" || s === "yes";
 }
+
 function buildHref(
   base: string,
-  qs: { q?: string | null; page?: number; perPage?: number; rares?: boolean; holo?: boolean }
+  qs: {
+    q?: string | null;
+    page?: number;
+    perPage?: number;
+    rares?: boolean;
+    holo?: boolean;
+  }
 ) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", qs.q);
@@ -61,18 +69,26 @@ function buildHref(
   const s = p.toString();
   return s ? `${base}?${s}` : base;
 }
-function bestCardImg(c: CardRow): string | null {
-  if (c.large_image) return c.large_image;
-  if (c.small_image) return c.small_image;
+
+function isHttpUrl(v?: string | null): v is string {
+  if (!v) return false;
+  return /^https?:\/\//i.test(v.trim());
+}
+
+function pickHttpUrl(a?: string | null, b?: string | null): string | null {
+  if (isHttpUrl(a)) return a.trim();
+  if (isHttpUrl(b)) return b.trim();
   return null;
 }
 
-/* ---------- Page ---------- */
+function bestCardImg(c: CardRow) {
+  return pickHttpUrl(c.large_image, c.small_image);
+}
+
 export default async function SetDetailPage({
   params,
   searchParams,
 }: {
-  /** Next 15: both are Promises */
   params: Promise<{ id: string }>;
   searchParams: Promise<SearchParams>;
 }) {
@@ -84,35 +100,42 @@ export default async function SetDetailPage({
   const likeGuess = `%${nameGuess}%`;
   const baseHref = `/categories/pokemon/sets/${encodeURIComponent(setParam)}`;
 
-  const q = (Array.isArray(sp?.q) ? sp.q[0] : sp?.q)?.trim() || null;
+  const q = (first(sp?.q) ?? "").trim() || null;
   const perPage = parsePerPage(sp?.perPage);
   const reqPage = parsePage(sp?.page);
   const raresOnly = parseBool(sp?.rares);
   const holoOnly = parseBool(sp?.holo);
 
-  /* 1) Resolve the set */
+  // Resolve set (view optional, base table fallback)
   let setRow: SetRow | undefined;
 
   try {
     const res = await db.execute<SetRow>(sql`
-      SELECT id, name, series, ptcgo_code, release_date, logo_url, symbol_url
+      SELECT
+        id,
+        name,
+        series,
+        ptcgo_code,
+        release_date,
+        logo_url,
+        symbol_url
       FROM v_tcg_sets_images
       WHERE id = ${setParam}
          OR lower(ptcgo_code) = lower(${setParam})
          OR lower(name) = lower(${nameGuess})
          OR name ILIKE ${likeGuess}
       ORDER BY
-        CASE WHEN id = ${setParam} THEN 0
-             WHEN lower(ptcgo_code) = lower(${setParam}) THEN 1
-             WHEN lower(name) = lower(${nameGuess}) THEN 2
-             ELSE 3
-        END,
-        release_date DESC NULLS LAST
+        CASE
+          WHEN id = ${setParam} THEN 0
+          WHEN lower(ptcgo_code) = lower(${setParam}) THEN 1
+          WHEN lower(name) = lower(${nameGuess}) THEN 2
+          ELSE 3
+        END
       LIMIT 1
     `);
     setRow = res.rows?.[0];
   } catch {
-    // ignore view errors
+    // ignore; fallback below
   }
 
   if (!setRow) {
@@ -123,20 +146,20 @@ export default async function SetDetailPage({
         series,
         ptcgo_code,
         release_date,
-        COALESCE(unlimited, logo_url)   AS logo_url,
-        COALESCE(expanded,  symbol_url) AS symbol_url
+        logo_url,
+        symbol_url
       FROM tcg_sets
       WHERE id = ${setParam}
          OR lower(ptcgo_code) = lower(${setParam})
          OR lower(name) = lower(${nameGuess})
          OR name ILIKE ${likeGuess}
       ORDER BY
-        CASE WHEN id = ${setParam} THEN 0
-             WHEN lower(ptcgo_code) = lower(${setParam}) THEN 1
-             WHEN lower(name) = lower(${nameGuess}) THEN 2
-             ELSE 3
-        END,
-        release_date DESC NULLS LAST
+        CASE
+          WHEN id = ${setParam} THEN 0
+          WHEN lower(ptcgo_code) = lower(${setParam}) THEN 1
+          WHEN lower(name) = lower(${nameGuess}) THEN 2
+          ELSE 3
+        END
       LIMIT 1
     `);
     setRow = res.rows?.[0];
@@ -146,32 +169,43 @@ export default async function SetDetailPage({
     return (
       <section className="space-y-4">
         <h1 className="text-2xl font-bold text-white">Set not found</h1>
-        <p className="text-white/70 text-sm break-all">Looked up: <code>{setParam}</code></p>
-        <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">← Back to all sets</Link>
+        <p className="text-sm break-all text-white/70">
+          Looked up: <code>{setParam}</code>
+        </p>
+        <Link
+          href="/categories/pokemon/sets"
+          className="text-sky-300 hover:underline"
+        >
+          ← Back to all sets
+        </Link>
       </section>
     );
   }
 
   const canonicalSetId = setRow.id;
 
-  /* --- Card filters --- */
+  // Card filters
   const conditions = [sql`set_id = ${canonicalSetId}`];
+
   if (q) {
     conditions.push(
       sql`(name ILIKE ${"%" + q + "%"} OR rarity ILIKE ${"%" + q + "%"} OR id ILIKE ${"%" + q + "%"})`
     );
   }
+
   if (raresOnly && holoOnly) {
-    conditions.push(sql`(rarity ILIKE '%Rare%' AND (rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%'))`);
+    conditions.push(
+      sql`(rarity ILIKE '%Rare%' AND (rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%'))`
+    );
   } else if (raresOnly) {
     conditions.push(sql`(rarity ILIKE '%Rare%')`);
   } else if (holoOnly) {
     conditions.push(sql`(rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%')`);
   }
+
   const whereSql = sql.join(conditions, sql` AND `);
 
-  /* Count + page slice */
-  const total: number =
+  const total =
     (
       await db.execute<{ count: number }>(
         sql`SELECT COUNT(*)::int AS count FROM tcg_cards WHERE ${whereSql}`
@@ -179,7 +213,7 @@ export default async function SetDetailPage({
     ).rows?.[0]?.count ?? 0;
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
-  const safePage = Math.min(totalPages, reqPage);
+  const safePage = Math.min(totalPages, Math.max(1, reqPage));
   const safeOffset = (safePage - 1) * perPage;
 
   const cards =
@@ -196,13 +230,22 @@ export default async function SetDetailPage({
   const from = total === 0 ? 0 : safeOffset + 1;
   const to = Math.min(safeOffset + perPage, total);
 
-  /* ---------- UI ---------- */
-  const banner = setRow.logo_url || setRow.symbol_url || null;
+  const prevPage = Math.max(1, safePage - 1);
+  const nextPage = Math.min(totalPages, safePage + 1);
+  const isFirst = safePage <= 1;
+  const isLast = safePage >= totalPages;
+
+  // ✅ FIX: only allow real URLs for the banner
+  const banner = pickHttpUrl(setRow.logo_url, setRow.symbol_url);
+
   const subtitleParts = [
     setRow.series ?? undefined,
     setRow.ptcgo_code ? `PTCGO: ${setRow.ptcgo_code}` : undefined,
-    setRow.release_date ? `Released: ${setRow.release_date}` : undefined,
+    setRow.release_date
+      ? `Released: ${setRow.release_date.replaceAll("/", "-")}`
+      : undefined,
   ].filter(Boolean);
+
   const subtitle = subtitleParts.join(" • ");
 
   return (
@@ -210,7 +253,7 @@ export default async function SetDetailPage({
       {/* Header */}
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-4">
-          <div className="relative h-20 w-36 shrink-0 rounded-lg bg-white/5 ring-1 ring-white/10 overflow-hidden">
+          <div className="relative h-20 w-36 shrink-0 overflow-hidden rounded-lg bg-white/5 ring-1 ring-white/10">
             {banner ? (
               <Image
                 src={banner}
@@ -222,16 +265,17 @@ export default async function SetDetailPage({
                 priority
               />
             ) : (
-              <div className="absolute inset-0 grid place-items-center text-white/60 text-xs">
+              <div className="absolute inset-0 grid place-items-center text-xs text-white/60">
                 No image
               </div>
             )}
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-white">{setRow.name ?? setParam}</h1>
-            {subtitle && <div className="text-sm text-white/80">{subtitle}</div>}
 
-            
+          <div>
+            <h1 className="text-2xl font-bold text-white">
+              {setRow.name ?? setParam}
+            </h1>
+            {subtitle && <div className="text-sm text-white/80">{subtitle}</div>}
           </div>
         </div>
 
@@ -242,7 +286,10 @@ export default async function SetDetailPage({
           >
             View price overview →
           </Link>
-          <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">
+          <Link
+            href="/categories/pokemon/sets"
+            className="text-sky-300 hover:underline"
+          >
             ← All sets
           </Link>
         </div>
@@ -262,34 +309,54 @@ export default async function SetDetailPage({
             {raresOnly ? <input type="hidden" name="rares" value="1" /> : null}
             {holoOnly ? <input type="hidden" name="holo" value="1" /> : null}
             <input type="hidden" name="page" value="1" />
-            <label htmlFor="pp" className="sr-only">Per page</label>
-            <select id="pp" name="perPage" defaultValue={String(perPage)}
-              className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white">
-              {PER_PAGE_OPTIONS.map((n) => (<option key={n} value={n}>{n}</option>))}
+
+            <label htmlFor="pp" className="sr-only">
+              Per page
+            </label>
+            <select
+              id="pp"
+              name="perPage"
+              defaultValue={String(perPage)}
+              className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white"
+            >
+              {PER_PAGE_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
             </select>
-            <button type="submit" className="rounded-md border border-white/20 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20">
+
+            <button
+              type="submit"
+              className="rounded-md border border-white/20 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20"
+            >
               Apply
             </button>
           </form>
 
-          {/* Search within set */}
+          {/* Search */}
           <form action={baseHref} method="get" className="flex items-center gap-2">
             {raresOnly ? <input type="hidden" name="rares" value="1" /> : null}
             {holoOnly ? <input type="hidden" name="holo" value="1" /> : null}
             <input type="hidden" name="perPage" value={String(perPage)} />
             <input type="hidden" name="page" value="1" />
+
             <input
               name="q"
               defaultValue={q ?? ""}
               placeholder="Search cards (name/rarity/id)…"
-              className="w-60 md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
+              className="w-60 rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50 md:w-[320px]"
             />
-            <button type="submit" className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
+            <button
+              type="submit"
+              className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20"
+            >
               Search
             </button>
-            {q && (
+
+            {(q || raresOnly || holoOnly) && (
               <Link
-                href={buildHref(baseHref, { perPage, page: 1, rares: raresOnly, holo: holoOnly })}
+                href={buildHref(baseHref, { perPage, page: 1, rares: false, holo: false })}
                 className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
               >
                 Clear
@@ -302,6 +369,7 @@ export default async function SetDetailPage({
             {q ? <input type="hidden" name="q" value={q} /> : null}
             <input type="hidden" name="perPage" value={String(perPage)} />
             <input type="hidden" name="page" value="1" />
+
             <label className="inline-flex items-center gap-2 text-sm text-white/90">
               <input type="checkbox" name="rares" value="1" defaultChecked={raresOnly} />
               Rares+
@@ -310,7 +378,11 @@ export default async function SetDetailPage({
               <input type="checkbox" name="holo" value="1" defaultChecked={holoOnly} />
               Holo only
             </label>
-            <button type="submit" className="rounded-md border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/20">
+
+            <button
+              type="submit"
+              className="rounded-md border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/20"
+            >
               Apply
             </button>
           </form>
@@ -320,19 +392,25 @@ export default async function SetDetailPage({
       {/* Cards grid */}
       {cards.length === 0 ? (
         <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">
-          {q || raresOnly || holoOnly ? "No cards matched your filters." : "No cards found in this set."}
+          {q || raresOnly || holoOnly
+            ? "No cards matched your filters."
+            : "No cards found in this set."}
         </div>
       ) : (
         <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
           {cards.map((c) => {
             const img = bestCardImg(c);
+
             return (
               <li
                 key={c.id}
-                className="rounded-xl border border-white/10 bg-white/5 overflow-hidden backdrop-blur-sm hover:bg-white/10 hover:border-white/20 transition"
+                className="overflow-hidden rounded-xl border border-white/10 bg-white/5 backdrop-blur-sm transition hover:border-white/20 hover:bg-white/10"
               >
-                <Link href={`/categories/pokemon/cards/${encodeURIComponent(c.id)}`} className="block">
-                  <div className="relative w-full" style={{ aspectRatio: "3 / 4" }}>
+                <Link
+                  href={`/categories/pokemon/cards/${encodeURIComponent(c.id)}`}
+                  className="block"
+                >
+                  <div className="relative aspect-[3/4] w-full">
                     {img ? (
                       <Image
                         src={img}
@@ -343,16 +421,21 @@ export default async function SetDetailPage({
                         sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
                       />
                     ) : (
-                      <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
+                      <div className="absolute inset-0 grid place-items-center text-white/70">
+                        No image
+                      </div>
                     )}
                   </div>
+
                   <div className="p-3">
-                    <div className="line-clamp-2 text-sm font-medium text-white">{c.name ?? c.id}</div>
-                    <div className="mt-1 text-xs text-white/80">{c.rarity ?? ""}</div>
+                    <div className="line-clamp-2 text-sm font-medium text-white">
+                      {c.name ?? c.id}
+                    </div>
+                    <div className="mt-1 text-xs text-white/80">
+                      {c.rarity ?? ""}
+                    </div>
                   </div>
                 </Link>
-
-                
               </li>
             );
           })}
@@ -363,24 +446,38 @@ export default async function SetDetailPage({
       {total > perPage && (
         <nav className="mt-4 flex items-center justify-center gap-2 text-sm">
           <Link
-            href={buildHref(baseHref, { q, perPage, rares: raresOnly, holo: holoOnly, page: Math.max(1, safePage - 1) })}
-            aria-disabled={safePage === 1}
+            href={buildHref(baseHref, {
+              q,
+              perPage,
+              rares: raresOnly,
+              holo: holoOnly,
+              page: prevPage,
+            })}
+            aria-disabled={isFirst}
             className={`rounded-md border px-3 py-1 ${
-              safePage === 1
+              isFirst
                 ? "pointer-events-none border-white/10 text-white/40"
                 : "border-white/20 text-white hover:bg-white/10"
             }`}
           >
             ← Prev
           </Link>
+
           <span className="px-2 text-white/80">
             Page {safePage} of {totalPages}
           </span>
+
           <Link
-            href={buildHref(baseHref, { q, perPage, rares: raresOnly, holo: holoOnly, page: safePage + 1 })}
-            aria-disabled={safeOffset + perPage >= total}
+            href={buildHref(baseHref, {
+              q,
+              perPage,
+              rares: raresOnly,
+              holo: holoOnly,
+              page: nextPage,
+            })}
+            aria-disabled={isLast}
             className={`rounded-md border px-3 py-1 ${
-              safeOffset + perPage >= total
+              isLast
                 ? "pointer-events-none border-white/10 text-white/40"
                 : "border-white/20 text-white hover:bg-white/10"
             }`}

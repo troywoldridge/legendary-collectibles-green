@@ -3,6 +3,16 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /* Site background image */
+  --site-bg-image: url("/backgrounds/site-bg.png");
+
+  /* Glass system */
+  --glass-bg: rgba(10, 10, 10, 0.35);
+  --glass-bg-strong: rgba(10, 10, 10, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-highlight: rgba(255, 255, 255, 0.10);
+  --glass-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
 @theme inline {
@@ -19,10 +29,45 @@
   }
 }
 
+/* Ensure full-height pages */
+html,
 body {
+  height: 100%;
+}
+
+body {
+  position: relative;
+  min-height: 100%;
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Site-wide background image (behind everything) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+
+  background-image: var(--site-bg-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* Dark overlay for readability */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+
+  background: radial-gradient(
+    circle at 50% 20%,
+    rgba(0, 0, 0, 0.25),
+    rgba(0, 0, 0, 0.9)
+  );
 }
 
 /* --- Mana symbols --- */
@@ -35,22 +80,113 @@ body {
 }
 
 /* single colors */
-.mana--W { background: #f5f5f5; color: #111827; } /* white -> dark text */
-.mana--U { background: #3b82f6; }                 /* sky-500 */
-.mana--B { background: #111827; }                 /* gray-900 */
-.mana--R { background: #ef4444; }                 /* red-500 */
-.mana--G { background: #10b981; }                 /* emerald-500 */
-.mana--C { background: #6b7280; }                 /* gray-500 (colorless) */
-.mana--S { background: #94a3b8; }                 /* slate-400 (snow) */
+.mana--W {
+  background: #f5f5f5;
+  color: #111827;
+} /* white -> dark text */
+.mana--U {
+  background: #3b82f6;
+} /* sky-500 */
+.mana--B {
+  background: #111827;
+} /* gray-900 */
+.mana--R {
+  background: #ef4444;
+} /* red-500 */
+.mana--G {
+  background: #10b981;
+} /* emerald-500 */
+.mana--C {
+  background: #6b7280;
+} /* gray-500 (colorless) */
+.mana--S {
+  background: #94a3b8;
+} /* slate-400 (snow) */
 
 /* numeric / variable */
-.mana--num { background: #374151; }               /* gray-700 */
-.mana--var { background: #4b5563; }               /* gray-600 */
+.mana--num {
+  background: #374151;
+} /* gray-700 */
+.mana--var {
+  background: #4b5563;
+} /* gray-600 */
 
 /* symbol */
-.mana--sym { background: #6b7280; }               /* gray-500 */
+.mana--sym {
+  background: #6b7280;
+} /* gray-500 */
 
 /* hybrid—uses CSS variables for left/right halves */
 .mana--hybrid {
-  background-image: linear-gradient(135deg, var(--c1, #6b7280) 0 50%, var(--c2, #374151) 50% 100%);
+  background-image: linear-gradient(
+    135deg,
+    var(--c1, #6b7280) 0 50%,
+    var(--c2, #374151) 50% 100%
+  );
+}
+
+/* --- Global glass chip style (used by header + tiles) --- */
+.glass-chip {
+  border-radius: 14px;
+
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.06),
+    rgba(255, 255, 255, 0.02)
+  );
+  background-color: var(--glass-bg);
+
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
+
+.glass-chip--strong {
+  background-color: var(--glass-bg-strong);
+}
+
+/* --- Global Header Glass --- */
+/* Add this class to your header wrapper */
+.site-header-glass {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.08),
+    rgba(255, 255, 255, 0.02)
+  );
+  background-color: rgba(10, 10, 10, 0.35);
+
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
+
+  backdrop-filter: blur(16px) saturate(1.25);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+}
+
+.site-header-glass {
+  border-radius: 14px;
+  margin-top: 10px;
+}
+
+
+/* Inner header chip */
+.site-header-glass .site-header-inner {
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.18);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.30);
+
+  backdrop-filter: blur(10px) saturate(1.2);
+  -webkit-backdrop-filter: blur(10px) saturate(1.2);
+
+  border-radius: 14px;
+}
+
+/* Make inputs/selects match the glass vibe inside header */
+.site-header-glass input,
+.site-header-glass select {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }

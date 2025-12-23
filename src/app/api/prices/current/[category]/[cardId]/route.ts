@@ -48,16 +48,16 @@ export async function GET(
 
     const canonicalSource = canonicalSourceForGame(game);
     if (!canonicalSource) {
-      return NextResponse.json({ error: `No canonical source mapping for category: ${category}` }, { status: 400 });
+      return NextResponse.json(
+        { error: `No canonical source mapping for category: ${category}` },
+        { status: 400 }
+      );
     }
 
     const url = new URL(req.url);
     const currency = (url.searchParams.get("currency") || "USD").toUpperCase();
 
-    const daysRaw = url.searchParams.get("days") || "90";
-    const days = Math.max(1, Math.min(3650, parseInt(daysRaw, 10) || 90)); // cap 10 years
-
-    // 1) Resolve market_item_id (use the real uniqueness key)
+    // 1) Resolve market_item_id using the UNIQUE key
     const miRes = await pool.query(
       `
       SELECT id
@@ -72,48 +72,70 @@ export async function GET(
 
     if (miRes.rowCount === 0) {
       return NextResponse.json(
-        { error: "market_item not found", game, canonical_source: canonicalSource, canonical_id: cardId },
+        {
+          error: "market_item not found",
+          game,
+          canonical_source: canonicalSource,
+          canonical_id: cardId,
+        },
         { status: 404 }
       );
     }
 
     const market_item_id = miRes.rows[0].id as string;
 
-    // 2) Pull daily series (already blended by script 03)
-    // NOTE: date - int is clean and index-friendly (as_of_date is DATE)
-    const histRes = await pool.query(
+    // 2) Fetch current price row
+    const curRes = await pool.query(
       `
       SELECT
-        as_of_date,
-        value_cents,
+        market_item_id,
+        currency,
+        price_cents,
+        source,
+        price_type,
         confidence,
+        as_of_date,
         sources_used,
-        method
-      FROM public.market_price_daily
+        updated_at
+      FROM public.market_prices_current
       WHERE market_item_id = $1
         AND currency = $2
-        AND as_of_date >= (CURRENT_DATE - $3::int)
-      ORDER BY as_of_date ASC
+      LIMIT 1
       `,
-      [market_item_id, currency, days]
+      [market_item_id, currency]
     );
+
+    if (curRes.rowCount === 0) {
+      return NextResponse.json(
+        {
+          error: "no current price for item",
+          game,
+          canonical_source: canonicalSource,
+          canonical_id: cardId,
+          currency,
+          market_item_id,
+        },
+        { status: 404 }
+      );
+    }
+
+    const row = curRes.rows[0];
 
     return NextResponse.json({
       ok: true,
       game,
-      canonical_id: cardId,
       canonical_source: canonicalSource,
+      canonical_id: cardId,
       market_item_id,
-      currency,
-      days,
-      points: histRes.rows.map((r) => ({
-        as_of_date: r.as_of_date,
-        value_cents: r.value_cents,
-        value_usd: Number(r.value_cents) / 100,
-        confidence: r.confidence,
-        method: r.method,
-        sources_used: r.sources_used,
-      })),
+      currency: row.currency,
+      price_cents: row.price_cents,
+      price_usd: Number(row.price_cents) / 100,
+      source: row.source,
+      price_type: row.price_type,
+      confidence: row.confidence,
+      as_of_date: row.as_of_date,
+      sources_used: row.sources_used,
+      updated_at: row.updated_at,
       ms: Date.now() - startedAt,
     });
   } catch (err: any) {

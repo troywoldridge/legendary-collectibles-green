@@ -1,9 +1,9 @@
 import "server-only";
+
 import Link from "next/link";
 import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { getLatestEbaySnapshot } from "@/lib/ebay";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +20,7 @@ type CardRow = {
   source: string | null;
   source_url: string | null;
   canonical_key: string | null;
+
   // resolved via lateral joins:
   set_id: string | null;
   cf_image_id: string | null;
@@ -44,10 +45,12 @@ type SearchParams = Record<string, string | string[] | undefined>;
 /* ---------------- helpers ---------------- */
 const CF_ACCOUNT_HASH =
   process.env.NEXT_PUBLIC_CF_ACCOUNT_HASH || process.env.CF_ACCOUNT_HASH || "";
+
 function cfUrl(cfImageId: string, variant = "card") {
   if (!CF_ACCOUNT_HASH) return null;
   return `https://imagedelivery.net/${CF_ACCOUNT_HASH}/${cfImageId}/${variant}`;
 }
+
 function bestImg(c: Pick<CardRow, "cf_image_id" | "src_url">) {
   if (c.cf_image_id) {
     return (
@@ -58,9 +61,13 @@ function bestImg(c: Pick<CardRow, "cf_image_id" | "src_url">) {
   }
   return c.src_url || null;
 }
+
 function fmtUsdCents(n?: number | null) {
-  if (n == null) return null;
-  return (n / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+  if (n == null) return "—";
+  return (n / 100).toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+  });
 }
 
 /* ---------------- page ---------------- */
@@ -72,7 +79,7 @@ export default async function SportsCardDetailPage({
   searchParams: Promise<SearchParams>;
 }) {
   const { id } = await params;
-  await searchParams; // (reserved)
+  await searchParams; // reserved
   const wanted = decodeURIComponent(id ?? "").trim();
 
   // Resolve by exact id; fallback to canonical_key (case-insensitive)
@@ -135,12 +142,20 @@ export default async function SportsCardDetailPage({
     return (
       <section className="space-y-4">
         <h1 className="text-2xl font-bold text-white">Card not found</h1>
-        <p className="text-white/70 text-sm break-all">Tried: <code>{wanted}</code></p>
+        <p className="text-white/70 text-sm break-all">
+          Tried: <code>{wanted}</code>
+        </p>
         <div className="flex gap-4">
-          <Link href="/categories/sports/cards" className="text-sky-300 hover:underline">
+          <Link
+            href="/categories/sports/cards"
+            className="text-sky-300 hover:underline"
+          >
             ← Back to all cards
           </Link>
-          <Link href="/categories/sports/sets" className="text-sky-300 hover:underline">
+          <Link
+            href="/categories/sports/sets"
+            className="text-sky-300 hover:underline"
+          >
             ← Browse sets
           </Link>
         </div>
@@ -178,10 +193,6 @@ export default async function SportsCardDetailPage({
       `)
     ).rows?.[0] ?? null;
 
-  // eBay Snapshot (sports)
-  const ebay = await getLatestEbaySnapshot("sports", card.id, "all");
-  const money = (c?: number | null) => (c == null ? "—" : `$${(c / 100).toFixed(2)}`);
-
   const subtitleBits = [
     card.sport ? card.sport[0].toUpperCase() + card.sport.slice(1) : undefined,
     card.year != null ? String(card.year) : undefined,
@@ -205,7 +216,9 @@ export default async function SportsCardDetailPage({
               priority
             />
           ) : (
-            <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
+            <div className="absolute inset-0 grid place-items-center text-white/70">
+              No image
+            </div>
           )}
         </div>
       </div>
@@ -246,14 +259,20 @@ export default async function SportsCardDetailPage({
           )}
           {card.canonical_key && (
             <div className="col-span-2 break-all">
-              <span className="text-white/70">Canonical Key:</span> {card.canonical_key}
+              <span className="text-white/70">Canonical Key:</span>{" "}
+              {card.canonical_key}
             </div>
           )}
           {card.source && (
             <div className="col-span-2">
               <span className="text-white/70">Source:</span>{" "}
               {card.source_url ? (
-                <a href={card.source_url} target="_blank" className="text-sky-300 hover:underline">
+                <a
+                  href={card.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sky-300 hover:underline"
+                >
                   {card.source}
                 </a>
               ) : (
@@ -267,34 +286,40 @@ export default async function SportsCardDetailPage({
         {price ? (
           <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-white">Price Snapshot</h2>
+              <h2 className="text-lg font-semibold text-white">
+                Price Snapshot
+              </h2>
               <div className="text-xs text-white/60">
                 {price.last_seen ? `Last seen: ${price.last_seen}` : ""}
               </div>
             </div>
+
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <div className="text-sm text-white/80">Loose</div>
                 <div className="mt-1 text-lg font-semibold text-white">
-                  {fmtUsdCents(price.loose_price) ?? "—"}
+                  {fmtUsdCents(price.loose_price)}
                 </div>
               </div>
+
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <div className="text-sm text-white/80">CIB</div>
                 <div className="mt-1 text-lg font-semibold text-white">
-                  {fmtUsdCents(price.cib_price) ?? "—"}
+                  {fmtUsdCents(price.cib_price)}
                 </div>
               </div>
+
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <div className="text-sm text-white/80">New/Sealed</div>
                 <div className="mt-1 text-lg font-semibold text-white">
-                  {fmtUsdCents(price.new_price) ?? "—"}
+                  {fmtUsdCents(price.new_price)}
                 </div>
               </div>
+
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <div className="text-sm text-white/80">Graded</div>
                 <div className="mt-1 text-lg font-semibold text-white">
-                  {fmtUsdCents(price.graded_price) ?? "—"}
+                  {fmtUsdCents(price.graded_price)}
                 </div>
               </div>
             </div>
@@ -320,35 +345,12 @@ export default async function SportsCardDetailPage({
           </section>
         ) : null}
 
-        {/* eBay Snapshot */}
-        {ebay && ebay.median_cents != null && (
-          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-white">eBay Snapshot</h2>
-              <div className="text-xs text-white/60">
-                {ebay.created_at ? new Date(ebay.created_at).toLocaleDateString() : ""}
-              </div>
-            </div>
-            <div className="text-white/90">
-              <div>
-                Median: <span className="font-semibold">{money(ebay.median_cents)}</span>{" "}
-                {ebay.sample_count ? (
-                  <span className="text-white/60">• n={ebay.sample_count}</span>
-                ) : null}
-              </div>
-              <div className="text-sm text-white/80">
-                IQR: {money(ebay.p25_cents)} – {money(ebay.p75_cents)}
-              </div>
-              <div className="text-xs text-white/60 mt-1">
-                Source: eBay Browse API (US, USD; filtered and outliers pruned)
-              </div>
-            </div>
-          </section>
-        )}
-
         {/* back links */}
         <div className="mt-2 flex gap-4">
-          <Link href="/categories/sports/cards" className="text-sky-300 hover:underline">
+          <Link
+            href="/categories/sports/cards"
+            className="text-sky-300 hover:underline"
+          >
             ← Back to cards
           </Link>
           {setHref && (

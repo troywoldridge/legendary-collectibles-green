@@ -69,3 +69,14 @@ data/
 *.json
 *.jsonl
 *.zst
+
+# Local dumps / crash files
+core
+legendary_neon.sql
+*.sql
+*.dump
+*.tar
+
+# Local dumps / crash files
+core
+legendary_neon.sql

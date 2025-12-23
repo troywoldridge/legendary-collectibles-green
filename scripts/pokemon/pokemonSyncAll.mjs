@@ -17,9 +17,14 @@
  *   LOAD_DB=true                      # enable DB writes
  *   LOAD_HISTORY=true                 # also write to *_history tables (optional)
  *
+ * NEW FLAGS:
+ *   --db-only      # skips ALL API fetching, loads DB from existing JSONL files
+ *   --skip-fetch   # same as --db-only (alias)
+ *
  * USAGE:
  *   node scripts/pokemonSyncAll.mjs
  *   LOAD_DB=true PG_DSN="postgres://user:pass@host/db" node scripts/pokemonSyncAll.mjs
+ *   LOAD_DB=true PG_DSN="$DATABASE_URL" node scripts/pokemonSyncAll.mjs --db-only
  */
 
 import fs from "node:fs";
@@ -38,6 +43,11 @@ try {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/* ----------------------------- CLI FLAGS ----------------------------- */
+const DB_ONLY = process.argv.includes("--db-only") || process.argv.includes("--skip-fetch");
+const SKIP_FETCH = DB_ONLY;
+
+/* ----------------------------- CONFIG ----------------------------- */
 const API_BASE = "https://api.pokemontcg.io/v2";
 const API_KEY = process.env.POKEMON_TCG_API_KEY || "";
 const LOAD_DB = String(process.env.LOAD_DB || "").toLowerCase() === "true";
@@ -45,12 +55,12 @@ const LOAD_HISTORY = String(process.env.LOAD_HISTORY || "").toLowerCase() === "t
 const PG_DSN = process.env.PG_DSN || process.env.DATABASE_URL || "";
 
 const OUT_DIR = path.resolve(__dirname, "..", "data", "pokemontcg");
-const CHECKPOINT = path.join(OUT_DIR, ".checkpoint.json");
+const CHECKPOINT = path.join(OUT_DIR, ".checkpoint.json"); // (not used yet; reserved)
 const MAX_PAGE_SIZE = 100;
 const MAX_RETRIES = 8;
 
 const HEADERS = {
-  "Accept": "application/json",
+  Accept: "application/json",
   ...(API_KEY ? { "X-Api-Key": API_KEY } : {}),
 };
 
@@ -65,6 +75,7 @@ async function fetchWithRetry(url, opts = {}, label = "") {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await fetch(url, { ...opts, headers: { ...HEADERS, ...(opts.headers || {}) } });
+
       if (res.status === 429 || res.status >= 500) {
         const txt = await res.text().catch(() => "");
         if (attempt === MAX_RETRIES) throw new Error(`HTTP ${res.status} after ${MAX_RETRIES} retries: ${txt}`);
@@ -73,10 +84,12 @@ async function fetchWithRetry(url, opts = {}, label = "") {
         await sleep(wait);
         continue;
       }
+
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status} ${res.statusText}: ${txt}`);
       }
+
       return await res.json();
     } catch (err) {
       if (attempt === MAX_RETRIES) throw err;
@@ -88,7 +101,10 @@ async function fetchWithRetry(url, opts = {}, label = "") {
   throw new Error("unreachable");
 }
 
-async function ensureDir(p) { await fsp.mkdir(p, { recursive: true }); }
+async function ensureDir(p) {
+  await fsp.mkdir(p, { recursive: true });
+}
+
 async function appendJSONL(filePath, items) {
   if (!items?.length) return;
   const lines = items.map((o) => JSON.stringify(o)).join("\n") + "\n";
@@ -114,6 +130,7 @@ async function fetchPaged(endpoint, outFile) {
   const firstUrl = `${API_BASE}/${endpoint}?page=1&pageSize=${MAX_PAGE_SIZE}`;
   const first = await fetchWithRetry(firstUrl, {}, `${endpoint} initial`);
   const totalCount = first.totalCount ?? first.total ?? first.count ?? (first.data ? first.data.length : 0);
+
   await appendJSONL(outFile, first.data || []);
 
   let wrote = first.data?.length || 0;
@@ -141,17 +158,23 @@ async function withPg(fn) {
   const { Client } = await import("pg");
   const client = new Client({ connectionString: PG_DSN });
   await client.connect();
-  try { await fn(client); } finally { await client.end(); }
+  try {
+    await fn(client);
+  } finally {
+    await client.end();
+  }
 }
 
 const jf = (v) => (v == null ? null : JSON.stringify(v));
 const arr = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
 const toStr = (v) => (v == null ? null : String(v));
+
 const numOrNull = (v) => {
   if (v == null || v === "") return null;
   const n = typeof v === "number" ? v : parseFloat(v);
   return Number.isFinite(n) ? n : null;
 };
+
 const safeDateFromYYYYMMDD = (s) => {
   if (!s || typeof s !== "string") return null;
   const iso = s.replace(/\//g, "-") + "T00:00:00Z";
@@ -190,7 +213,10 @@ async function upsertMetaTables(client, { types, subtypes, supertypes, rarities 
 }
 
 async function upsertSetsFromFile(client, setsFile) {
-  if (!fs.existsSync(setsFile)) return;
+  if (!fs.existsSync(setsFile)) {
+    console.log(`[db] sets file missing: ${setsFile}`);
+    return;
+  }
 
   const rl = (await import("node:readline")).createInterface({
     input: fs.createReadStream(setsFile, "utf8"),
@@ -228,6 +254,7 @@ async function upsertSetsFromFile(client, setsFile) {
         legal.expanded ?? null,
         legal.unlimited ?? null
       );
+
       setValues.push(
         `($${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++})`
       );
@@ -239,7 +266,6 @@ async function upsertSetsFromFile(client, setsFile) {
 
     await client.query("BEGIN");
     try {
-      // upsert tcg_sets
       await client.query(
         `
         INSERT INTO tcg_sets
@@ -263,12 +289,12 @@ async function upsertSetsFromFile(client, setsFile) {
         setParams
       );
 
-      // refresh tcg_sets_legalities for affected set_ids
       const setIds = batch.map((s) => s.id);
       if (setIds.length) {
         const delList = setIds.map((_, idx) => `$${idx + 1}`).join(",");
         await client.query(`DELETE FROM tcg_sets_legalities WHERE set_id IN (${delList})`, setIds);
       }
+
       if (setsLegalitiesRows.length) {
         const params = setsLegalitiesRows.flat();
         const values = setsLegalitiesRows.map((_, k) => {
@@ -296,6 +322,7 @@ async function upsertSetsFromFile(client, setsFile) {
     if (batch.length >= BATCH_SIZE) await flush();
   }
   await flush();
+
   console.log("[db] upserted sets (+tcg_sets_legalities)");
 }
 
@@ -313,7 +340,10 @@ function tcgplayerMarketNum(prices, key) {
 }
 
 async function upsertCardsFromFile(client, cardsFile) {
-  if (!fs.existsSync(cardsFile)) return;
+  if (!fs.existsSync(cardsFile)) {
+    console.log(`[db] cards file missing: ${cardsFile}`);
+    return;
+  }
 
   const rl = (await import("node:readline")).createInterface({
     input: fs.createReadStream(cardsFile, "utf8"),
@@ -326,21 +356,19 @@ async function upsertCardsFromFile(client, cardsFile) {
   const flush = async () => {
     if (!cardsBatch.length) return;
 
-    // Prepare child/inlined rows
-    const imagesRows = [];         // (card_id, small, large, source)
-    const cardLegalitiesRows = []; // (card_id, format, legality)
-    const abilitiesRows = [];      // (card_id, name, text, type, slot)
-    const attacksRows = [];        // (card_id, slot, name, text, damage, converted_energy_cost, cost)
-    const weaknessesRows = [];     // (card_id, type, value, slot)
-    const resistancesRows = [];    // (card_id, type, value, slot)
+    const imagesRows = [];
+    const cardLegalitiesRows = [];
+    const abilitiesRows = [];
+    const attacksRows = [];
+    const weaknessesRows = [];
+    const resistancesRows = [];
 
-    const tcgplayerRows = [];      // one row per card_id in your “current” table
-    const cardmarketRows = [];     // one row per card_id in your “current” table
+    const tcgplayerRows = [];
+    const cardmarketRows = [];
 
-    const histTcgRows = [];        // *_history numeric snapshot (optional)
+    const histTcgRows = [];
     const histCmRows = [];
 
-    // main cards
     const cardParams = [];
     const cardValues = [];
     let i = 1;
@@ -352,7 +380,6 @@ async function upsertCardsFromFile(client, cardsFile) {
       const legal = c.legalities || {};
       const anc = c.ancientTrait || {};
 
-      // tcg_cards
       cardParams.push(
         c.id,
         c.name ?? null,
@@ -391,34 +418,25 @@ async function upsertCardsFromFile(client, cardsFile) {
         c.cardmarket?.url ?? null,
         c.cardmarket?.updatedAt ?? null
       );
+
       cardValues.push(
-        `($${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++})`
+        `($${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++},$${i++})`
       );
 
-      // images (one row)
       if (images.small || images.large) {
         imagesRows.push([c.id, images.small ?? null, images.large ?? null, "pokemontcg"]);
       }
 
-      // card legalities -> rows
       for (const [format, legality] of Object.entries(legal)) {
         if (legality) cardLegalitiesRows.push([c.id, format, legality]);
       }
 
-      // abilities
       if (Array.isArray(c.abilities)) {
         c.abilities.forEach((a, idx) => {
-          abilitiesRows.push([
-            c.id,
-            a?.name ?? null,
-            a?.text ?? null,
-            a?.type ?? null,
-            String(idx),
-          ]);
+          abilitiesRows.push([c.id, a?.name ?? null, a?.text ?? null, a?.type ?? null, String(idx)]);
         });
       }
 
-      // attacks
       if (Array.isArray(c.attacks)) {
         c.attacks.forEach((a, idx) => {
           attacksRows.push([
@@ -433,20 +451,13 @@ async function upsertCardsFromFile(client, cardsFile) {
         });
       }
 
-      // weaknesses
       if (Array.isArray(c.weaknesses)) {
-        c.weaknesses.forEach((w, idx) => {
-          weaknessesRows.push([c.id, w?.type ?? null, w?.value ?? null, String(idx)]);
-        });
+        c.weaknesses.forEach((w, idx) => weaknessesRows.push([c.id, w?.type ?? null, w?.value ?? null, String(idx)]));
       }
-      // resistances
       if (Array.isArray(c.resistances)) {
-        c.resistances.forEach((r, idx) => {
-          resistancesRows.push([c.id, r?.type ?? null, r?.value ?? null, String(idx)]);
-        });
+        c.resistances.forEach((r, idx) => resistancesRows.push([c.id, r?.type ?? null, r?.value ?? null, String(idx)]));
       }
 
-      // prices: TCGPlayer (current)
       if (c.tcgplayer) {
         const prices = c.tcgplayer.prices || {};
         tcgplayerRows.push([
@@ -475,7 +486,6 @@ async function upsertCardsFromFile(client, cardsFile) {
         }
       }
 
-      // prices: Cardmarket (current)
       if (c.cardmarket) {
         const p = c.cardmarket.prices || {};
         cardmarketRows.push([
@@ -525,7 +535,6 @@ async function upsertCardsFromFile(client, cardsFile) {
 
     await client.query("BEGIN");
     try {
-      // Upsert tcg_cards
       await client.query(
         `
         INSERT INTO tcg_cards
@@ -576,7 +585,6 @@ async function upsertCardsFromFile(client, cardsFile) {
         cardParams
       );
 
-      // For affected card_ids, refresh child + price rows
       const ids = cardsBatch.map((c) => c.id);
       if (ids.length) {
         const del = ids.map((_, idx) => `$${idx + 1}`).join(",");
@@ -596,10 +604,7 @@ async function upsertCardsFromFile(client, cardsFile) {
           const b = 4 * k;
           return `($${b + 1},$${b + 2},$${b + 3},$${b + 4})`;
         });
-        await client.query(
-          `INSERT INTO tcg_card_images (card_id, small, large, source) VALUES ${values.join(",")}`,
-          params
-        );
+        await client.query(`INSERT INTO tcg_card_images (card_id, small, large, source) VALUES ${values.join(",")}`, params);
       }
 
       if (cardLegalitiesRows.length) {
@@ -608,10 +613,7 @@ async function upsertCardsFromFile(client, cardsFile) {
           const b = 3 * k;
           return `($${b + 1},$${b + 2},$${b + 3})`;
         });
-        await client.query(
-          `INSERT INTO tcg_card_legalities (card_id, format, legality) VALUES ${values.join(",")}`,
-          params
-        );
+        await client.query(`INSERT INTO tcg_card_legalities (card_id, format, legality) VALUES ${values.join(",")}`, params);
       }
 
       if (abilitiesRows.length) {
@@ -633,8 +635,7 @@ async function upsertCardsFromFile(client, cardsFile) {
           return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7})`;
         });
         await client.query(
-          `INSERT INTO tcg_card_attacks
-           (card_id, slot, name, text, damage, converted_energy_cost, cost)
+          `INSERT INTO tcg_card_attacks (card_id, slot, name, text, damage, converted_energy_cost, cost)
            VALUES ${values.join(",")}`,
           params
         );
@@ -646,10 +647,7 @@ async function upsertCardsFromFile(client, cardsFile) {
           const b = 4 * k;
           return `($${b + 1},$${b + 2},$${b + 3},$${b + 4})`;
         });
-        await client.query(
-          `INSERT INTO tcg_card_weaknesses (card_id, type, value, slot) VALUES ${values.join(",")}`,
-          params
-        );
+        await client.query(`INSERT INTO tcg_card_weaknesses (card_id, type, value, slot) VALUES ${values.join(",")}`, params);
       }
 
       if (resistancesRows.length) {
@@ -658,10 +656,7 @@ async function upsertCardsFromFile(client, cardsFile) {
           const b = 4 * k;
           return `($${b + 1},$${b + 2},$${b + 3},$${b + 4})`;
         });
-        await client.query(
-          `INSERT INTO tcg_card_resistances (card_id, type, value, slot) VALUES ${values.join(",")}`,
-          params
-        );
+        await client.query(`INSERT INTO tcg_card_resistances (card_id, type, value, slot) VALUES ${values.join(",")}`, params);
       }
 
       if (tcgplayerRows.length) {
@@ -694,7 +689,6 @@ async function upsertCardsFromFile(client, cardsFile) {
         );
       }
 
-      // optional history snapshots
       if (LOAD_HISTORY && histTcgRows.length) {
         const params = histTcgRows.flat();
         const values = histTcgRows.map((_, k) => {
@@ -734,15 +728,18 @@ async function upsertCardsFromFile(client, cardsFile) {
     cardsBatch = [];
   };
 
+  let batchCount = 0;
   for await (const line of rl) {
     if (!line.trim()) continue;
     cardsBatch.push(JSON.parse(line));
     if (cardsBatch.length >= BATCH_SIZE) {
       await flush();
-      console.log("[db] upserted another batch of cards…");
+      batchCount++;
+      if (batchCount % 10 === 0) console.log(`[db] upserted ${batchCount * BATCH_SIZE} cards so far…`);
     }
   }
   await flush();
+
   console.log("[db] upserted cards + images/legalities/abilities/attacks/weaknesses/resistances/prices (+history if enabled)");
 }
 
@@ -760,23 +757,49 @@ async function main() {
     rarities: path.join(OUT_DIR, "rarities.json"),
   };
 
-  // fresh snapshots (append JSONL as we go)
-  await fsp.writeFile(files.cards, "");
-  await fsp.writeFile(files.sets, "");
+  let meta = null;
 
-  console.log("Fetching meta lists…");
-  const meta = await fetchMetaLists();
-  await fsp.writeFile(files.types, JSON.stringify(meta.types, null, 2));
-  await fsp.writeFile(files.subtypes, JSON.stringify(meta.subtypes, null, 2));
-  await fsp.writeFile(files.supertypes, JSON.stringify(meta.supertypes, null, 2));
-  await fsp.writeFile(files.rarities, JSON.stringify(meta.rarities, null, 2));
-  console.log("Saved meta lists.");
+  if (!SKIP_FETCH) {
+    // Fresh snapshots (append JSONL as we go)
+    await fsp.writeFile(files.cards, "");
+    await fsp.writeFile(files.sets, "");
 
-  console.log("Fetching sets…");
-  await fetchPaged("sets", files.sets);
+    console.log("Fetching meta lists…");
+    meta = await fetchMetaLists();
+    await fsp.writeFile(files.types, JSON.stringify(meta.types, null, 2));
+    await fsp.writeFile(files.subtypes, JSON.stringify(meta.subtypes, null, 2));
+    await fsp.writeFile(files.supertypes, JSON.stringify(meta.supertypes, null, 2));
+    await fsp.writeFile(files.rarities, JSON.stringify(meta.rarities, null, 2));
+    console.log("Saved meta lists.");
 
-  console.log("Fetching cards… (this is the long one)");
-  await fetchPaged("cards", files.cards);
+    console.log("Fetching sets…");
+    await fetchPaged("sets", files.sets);
+
+    console.log("Fetching cards… (this is the long one)");
+    await fetchPaged("cards", files.cards);
+  } else {
+    console.log("Skipping fetch (--db-only/--skip-fetch). Will load DB from existing JSON/JSONL files.");
+    const readJsonIfExists = async (p) => {
+      if (!fs.existsSync(p)) return [];
+      const txt = await fsp.readFile(p, "utf8");
+      return JSON.parse(txt);
+    };
+    meta = {
+      types: await readJsonIfExists(files.types),
+      subtypes: await readJsonIfExists(files.subtypes),
+      supertypes: await readJsonIfExists(files.supertypes),
+      rarities: await readJsonIfExists(files.rarities),
+    };
+
+    if (!fs.existsSync(files.sets) || !fs.existsSync(files.cards)) {
+      throw new Error(
+        `--db-only requires existing JSONL files:\n` +
+          `  missing? ${!fs.existsSync(files.sets) ? files.sets : ""}\n` +
+          `  missing? ${!fs.existsSync(files.cards) ? files.cards : ""}\n` +
+          `Run without --db-only once to fetch, or confirm OUT_DIR path is correct.`
+      );
+    }
+  }
 
   if (LOAD_DB && PG_DSN) {
     console.log("DB load enabled — writing to Postgres…");

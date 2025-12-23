@@ -41,7 +41,6 @@
     "prices:ebay:ygo": "node scripts/cron/fetchYgoEbayPrices.mjs --all --limit=0 --batch=800 --concurrency=4",
     "prices:all": "node scripts/cron/runAllPrices.mjs",
     "cron:ygo:snapshot-history": "node scripts/cron/ygoPricesSnapshotHistory.mjs"
-  
   },
   "dependencies": {
     "@clerk/nextjs": "^6.34.5",
@@ -57,7 +56,7 @@
     "imghash": "^1.1.0",
     "jimp": "^1.6.0",
     "nanoid": "^5.1.6",
-    "next": "16.0.1",
+    "next": "16.0.7",
     "node-html-parser": "^7.0.1",
     "nodemailer": "^7.0.10",
     "p-limit": "^7.2.0",

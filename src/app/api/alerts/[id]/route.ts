@@ -2,23 +2,29 @@
 // PATCH /api/alerts/[id]
 // DELETE /api/alerts/[id]
 import "server-only";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { db } from "@/lib/db";
 import { priceAlerts } from "@/lib/db/schema/priceAlerts";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
+
+type AlertRouteContext = {
+  params: Promise<{ id: string }>;
+};
 
 export async function PATCH(
-  _req: Request,
-  { params }: { params: { id: string } }
+  req: NextRequest,
+  context: AlertRouteContext
 ) {
+  const { id } = await context.params;
+
   const { userId } = await auth();
-  if (!userId)
+  if (!userId) {
     return NextResponse.json({ error: "Not signed in" }, { status: 401 });
+  }
 
-  const alertId = Number(params.id);
-
-  const body = await _req.json();
+  const alertId = Number(id);
+  const body = await req.json();
 
   const updated = await db
     .update(priceAlerts)
@@ -30,14 +36,17 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _req: Request,
-  { params }: { params: { id: string } }
+  _req: NextRequest,
+  context: AlertRouteContext
 ) {
-  const { userId } = await auth();
-  if (!userId)
-    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
+  const { id } = await context.params;
 
-  const alertId = Number(params.id);
+  const { userId } = await auth();
+  if (!userId) {
+    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
+  }
+
+  const alertId = Number(id);
 
   await db.delete(priceAlerts).where(eq(priceAlerts.id, alertId));
 

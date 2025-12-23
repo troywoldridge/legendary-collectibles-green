@@ -1,14 +1,17 @@
 // src/app/categories/magic/cards/[id]/page.tsx
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import "server-only";
+
 import Link from "next/link";
 import Image from "next/image";
 import { notFound } from "next/navigation";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { auth } from "@clerk/nextjs/server";
+
 import { getLatestEbaySnapshot } from "@/lib/ebay";
 import EbayFallbackPrice from "@/components/EbayFallbackPrice";
-import { auth } from "@clerk/nextjs/server";
 
 /* Marketplace CTAs */
 import CardAmazonCTA from "@/components/CardAmazonCTA";
@@ -47,7 +50,7 @@ type CardRow = {
   tix: string | null;
   price_updated: string | null;
 
-  ebay_usd: string | null;
+  ebay_usd_cents: number | null;
   ebay_url: string | null;
 };
 
@@ -195,7 +198,6 @@ export default async function MtgCardDetailPage({
   const { id: rawId } = await params;
   const rawParam = decodeURIComponent(rawId ?? "").trim();
 
-  // Simple auth-based gate: if you're signed in, you can save
   const { userId } = await auth();
   const canSave = !!userId;
 
@@ -239,13 +241,11 @@ export default async function MtgCardDetailPage({
 
   if (!foundId) {
     try {
-      const meta = await db.execute(
-        sql`SELECT current_database() AS db, current_user AS usr`,
-      );
+      const meta = await db.execute(sql`SELECT current_database() AS db, current_user AS usr`);
       console.error("[MTG detail] notFound: no foundId", {
         rawParam,
-        db: meta.rows?.[0]?.db,
-        usr: meta.rows?.[0]?.usr,
+        db: (meta.rows?.[0] as any)?.db,
+        usr: (meta.rows?.[0] as any)?.usr,
       });
     } catch {
       // ignore
@@ -254,6 +254,7 @@ export default async function MtgCardDetailPage({
   }
 
   // STEP 2: load full card row
+  // NOTE: ebay_* now comes from market tables (NOT ebay_price_snapshots)
   const rowRes = await db.execute<CardRow>(sql`
     SELECT
       c.id,
@@ -291,19 +292,26 @@ export default async function MtgCardDetailPage({
       ) AS price_updated,
 
       (
-        SELECT eps.price::text
-        FROM public.ebay_price_snapshots eps
-        WHERE eps.scryfall_id = c.id
-        ORDER BY eps.fetched_at DESC
+        SELECT mpc.price_cents
+        FROM public.market_items mi
+        JOIN public.market_prices_current mpc ON mpc.market_item_id = mi.id
+        WHERE mi.category = 'mtg'
+          AND mi.card_id = c.id::text
+          AND mpc.source = 'ebay'
         LIMIT 1
-      ) AS ebay_usd,
+      ) AS ebay_usd_cents,
+
       (
-        SELECT eps.url
-        FROM public.ebay_price_snapshots eps
-        WHERE eps.scryfall_id = c.id
-        ORDER BY eps.fetched_at DESC
+        SELECT mei.external_url
+        FROM public.market_items mi
+        JOIN public.market_item_external_ids mei ON mei.market_item_id = mi.id
+        WHERE mi.category = 'mtg'
+          AND mi.card_id = c.id::text
+          AND mei.marketplace = 'ebay'
+        ORDER BY mei.updated_at DESC NULLS LAST, mei.created_at DESC NULLS LAST
         LIMIT 1
       ) AS ebay_url
+
     FROM public.mtg_cards c
     LEFT JOIN public.mtg_prices_effective e ON e.scryfall_id = c.id
     LEFT JOIN public.mtg_card_prices     s ON s.scryfall_id  = c.id
@@ -315,14 +323,12 @@ export default async function MtgCardDetailPage({
 
   if (!card) {
     try {
-      const meta = await db.execute(
-        sql`SELECT current_database() AS db, current_user AS usr`,
-      );
+      const meta = await db.execute(sql`SELECT current_database() AS db, current_user AS usr`);
       console.error("[MTG detail] notFound: no card row", {
         rawParam,
         foundId,
-        db: meta.rows?.[0]?.db,
-        usr: meta.rows?.[0]?.usr,
+        db: (meta.rows?.[0] as any)?.db,
+        usr: (meta.rows?.[0] as any)?.usr,
       });
     } catch {
       // ignore
@@ -347,15 +353,18 @@ export default async function MtgCardDetailPage({
         ).rows?.[0] ?? null
       : null;
 
-  // Fire-and-forget latest eBay snapshot
+  // Fire-and-forget latest eBay snapshot (now reads market_* tables)
   try {
-    await getLatestEbaySnapshot("mtg", card.id, "all");
+    await getLatestEbaySnapshot({
+      category: "mtg",
+      cardId: card.id,
+      segment: "all",
+    });
   } catch (err) {
     console.error("[ebay snapshot failed]", err);
   }
 
-  const hero =
-    (card.image_url ?? "").replace(/^http:\/\//, "https://") || null;
+  const hero = (card.image_url ?? "").replace(/^http:\/\//, "https://") || null;
 
   const setHref = card.set_code
     ? `/categories/magic/sets/${encodeURIComponent(card.set_code)}`
@@ -377,7 +386,9 @@ export default async function MtgCardDetailPage({
     !!price.eur ||
     !!price.tix;
 
-  const serverEbayPrice = card.ebay_usd ? Number(card.ebay_usd) : null;
+  // market table values
+  const serverEbayPrice =
+    typeof card.ebay_usd_cents === "number" ? card.ebay_usd_cents / 100 : null;
   const serverEbayUrl = card.ebay_url || null;
 
   const ebayQ = [
@@ -389,27 +400,19 @@ export default async function MtgCardDetailPage({
     .filter(Boolean)
     .join(" ");
 
-
-    // after you have `card` loaded and before return JSX:
-const amazonLink = await getAffiliateLinkForCard({
-  category: "mtg",
-  cardId: card.id,        // or card.card_id if that's your field
-  marketplace: "amazon",
-});
-
-  /* ---------- Render ---------- */
+  const amazonLink = await getAffiliateLinkForCard({
+    category: "mtg",
+    cardId: card.id,
+    marketplace: "amazon",
+  });
 
   return (
     <section className="space-y-8">
-      {/* Top: image left, info right */}
       <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
         {/* Left: card image */}
         <div className="md:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div
-              className="relative mx-auto w-full max-w-md"
-              style={{ aspectRatio: "3 / 4" }}
-            >
+            <div className="relative mx-auto w-full max-w-md" style={{ aspectRatio: "3 / 4" }}>
               {hero ? (
                 <Image
                   src={hero}
@@ -431,59 +434,38 @@ const amazonLink = await getAffiliateLinkForCard({
 
         {/* Right: meta + actions + CTAs */}
         <div className="md:col-span-7 space-y-4">
-          {/* Main info card */}
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            {/* Set + release line */}
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm text-white/80">
                 {setHref ? (
                   <>
                     Set:{" "}
-                    <Link
-                      href={setHref}
-                      className="text-sky-300 hover:underline"
-                    >
+                    <Link href={setHref} className="text-sky-300 hover:underline">
                       {setRow?.name ?? card.set_name ?? card.set_code}
                     </Link>
                   </>
                 ) : null}
-                {setRow?.released_at && (
-                  <span className="ml-2">
-                    • Released: {setRow.released_at}
-                  </span>
-                )}
-                {setRow?.set_type && (
-                  <span className="ml-2">• {setRow.set_type}</span>
-                )}
-                {setRow?.block && (
-                  <span className="ml-2">• {setRow.block}</span>
-                )}
+                {setRow?.released_at && <span className="ml-2">• Released: {setRow.released_at}</span>}
+                {setRow?.set_type && <span className="ml-2">• {setRow.set_type}</span>}
+                {setRow?.block && <span className="ml-2">• {setRow.block}</span>}
               </div>
             </div>
 
-            {/* Title */}
-            <h1 className="mt-2 text-2xl font-bold text-white">
-              {card.name ?? card.id}
-            </h1>
+            <h1 className="mt-2 text-2xl font-bold text-white">{card.name ?? card.id}</h1>
 
-            {/* Quick facts line */}
             <div className="mt-1 text-sm text-white/70">
               {[
                 card.type_line || undefined,
                 card.cmc ? `CMC: ${card.cmc}` : undefined,
                 card.rarity || undefined,
-                card.collector_number
-                  ? `No. ${card.collector_number}`
-                  : undefined,
+                card.collector_number ? `No. ${card.collector_number}` : undefined,
               ]
                 .filter(Boolean)
                 .join(" • ")}
             </div>
 
-            {/* Mana cost chips */}
             <ManaCost cost={card.mana_cost} />
 
-            {/* Collection + wishlist actions */}
             <div className="mt-4">
               <CardActions
                 game="mtg"
@@ -495,7 +477,6 @@ const amazonLink = await getAffiliateLinkForCard({
               />
             </div>
 
-            {/* Marketplace CTAs under actions */}
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <CardEbayCTA
                 card={{
@@ -507,11 +488,8 @@ const amazonLink = await getAffiliateLinkForCard({
                 }}
                 game="Magic: The Gathering"
               />
-              <CardAmazonCTA
-  url={amazonLink?.url}
-  label={card.name}
-/>
 
+              <CardAmazonCTA url={amazonLink?.url} label={card.name} />
             </div>
           </div>
 
@@ -519,67 +497,47 @@ const amazonLink = await getAffiliateLinkForCard({
           {hasPrimaryPrice && (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
               <div className="mb-2 flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-white">
-                  Market Prices
-                </h2>
-                <div className="text-xs text-white/60">
-                  Updated {price.updated_at ?? "—"}
-                </div>
+                <h2 className="text-lg font-semibold text-white">Market Prices</h2>
+                <div className="text-xs text-white/60">Updated {price.updated_at ?? "—"}</div>
               </div>
+
               <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
                 <div>
                   <div className="text-sm text-white/70">USD</div>
-                  <div className="text-lg font-semibold text-white">
-                    {price.usd ?? "—"}
-                  </div>
+                  <div className="text-lg font-semibold text-white">{price.usd ?? "—"}</div>
                 </div>
                 <div>
                   <div className="text-sm text-white/70">USD Foil</div>
-                  <div className="text-lg font-semibold text-white">
-                    {price.usd_foil ?? "—"}
-                  </div>
+                  <div className="text-lg font-semibold text-white">{price.usd_foil ?? "—"}</div>
                 </div>
                 <div>
                   <div className="text-sm text-white/70">USD Etched</div>
-                  <div className="text-lg font-semibold text-white">
-                    {price.usd_etched ?? "—"}
-                  </div>
+                  <div className="text-lg font-semibold text-white">{price.usd_etched ?? "—"}</div>
                 </div>
                 <div>
                   <div className="text-sm text-white/70">EUR</div>
-                  <div className="text-lg font-semibold text-white">
-                    {price.eur ?? "—"}
-                  </div>
+                  <div className="text-lg font-semibold text-white">{price.eur ?? "—"}</div>
                 </div>
                 <div>
                   <div className="text-sm text-white/70">TIX</div>
-                  <div className="text-lg font-semibold text-white">
-                    {price.tix ?? "—"}
-                  </div>
+                  <div className="text-lg font-semibold text-white">{price.tix ?? "—"}</div>
                 </div>
               </div>
             </section>
           )}
 
           {/* eBay snapshot fallback if no primary price */}
-          {!hasPrimaryPrice && serverEbayPrice && (
+          {!hasPrimaryPrice && serverEbayPrice != null && (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
               <div className="mb-2 flex items-center justify_between">
-                <h2 className="text-lg font-semibold text-white">
-                  Market Prices (eBay snapshot)
-                </h2>
-                <div className="text-xs text-white/60">
-                  Latest server snapshot
-                </div>
+                <h2 className="text-lg font-semibold text-white">Market Prices (eBay)</h2>
+                <div className="text-xs text-white/60">Latest market snapshot</div>
               </div>
+
               <div className="text-lg font-semibold text-white">
-                ${serverEbayPrice.toFixed(2)}{" "}
+                ${serverEbayPrice.toFixed(2)}
                 {serverEbayUrl ? (
-                  <Link
-                    href={serverEbayUrl}
-                    className="ml-2 text-sky-300 underline"
-                    target="_blank"
-                  >
+                  <Link href={serverEbayUrl} className="ml-2 text-sky-300 underline" target="_blank">
                     View on eBay
                   </Link>
                 ) : null}
@@ -599,9 +557,7 @@ const amazonLink = await getAffiliateLinkForCard({
           {card.oracle_text && (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
               <h2 className="text-lg font-semibold text-white">Rules Text</h2>
-              <div className="mt-2 text-sm text-white/85">
-                {nl2p(card.oracle_text)}
-              </div>
+              <div className="mt-2 text-sm text-white/85">{nl2p(card.oracle_text)}</div>
             </section>
           )}
         </div>

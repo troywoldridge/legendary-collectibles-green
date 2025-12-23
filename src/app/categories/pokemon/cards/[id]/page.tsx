@@ -1,26 +1,24 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
+
 import Image from "next/image";
 import Link from "next/link";
+import { unstable_noStore as noStore } from "next/cache";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { unstable_noStore as noStore } from "next/cache";
+import { auth } from "@clerk/nextjs/server";
 
 import MarketPrices from "@/components/MarketPrices";
 import PriceSparkline from "@/components/PriceSparkline";
+
 import { type DisplayCurrency, getFx } from "@/lib/pricing";
 import { getVendorPricesForCard } from "@/lib/vendorPrices";
 import { getLatestEbaySnapshot } from "@/lib/ebay";
 
-/* Plan + collection */
-import { auth } from "@clerk/nextjs/server";
-
-/* ★ Marketplace CTAs */
 import CardAmazonCTA from "@/components/CardAmazonCTA";
-import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
+import { getAffiliateLinkForCard } from "@/lib/affiliate";
 
-/* ★ Collection / Wishlist actions */
 import CardActions from "@/components/collection/CardActions";
 
 export const runtime = "nodejs";
@@ -29,6 +27,7 @@ export const revalidate = 0;
 export const fetchCache = "force-no-store";
 
 /* ---------------- Types ---------------- */
+type SearchParams = Record<string, string | string[] | undefined>;
 type RawRow = Record<string, any>;
 
 type CardRow = {
@@ -46,6 +45,7 @@ type CardRow = {
   ancient_trait_text: string | null;
   converted_retreat_cost: string | null;
   retreat_cost: string | null;
+
   set_id: string | null;
   set_name: string | null;
   series: string | null;
@@ -53,11 +53,14 @@ type CardRow = {
   total: string | null;
   ptcgo_code: string | null;
   release_date: string | null;
+
   artist: string | null;
   rarity: string | null;
   flavor_text: string | null;
+
   small_image: string | null;
   large_image: string | null;
+
   tcgplayer_url: string | null;
   tcgplayer_updated_at: string | null;
   cardmarket_url: string | null;
@@ -65,11 +68,10 @@ type CardRow = {
 };
 
 type LegalityRow = { format: string | null; legality: string | null };
-type SearchParams = Record<string, string | string[] | undefined>;
+
 type VendorKey = "ebay" | "amazon" | "coolstuffinc";
 type VendorPrice = { value: number | null; currency: string; url: string | null };
 
-/* aggregate holdings row from user_collection_items */
 type HoldingRow = {
   total_quantity: string | null;
   total_cost_cents: string | null;
@@ -78,6 +80,26 @@ type HoldingRow = {
 };
 
 /* ---------------- Helpers ---------------- */
+function first(v: string | string[] | undefined) {
+  return Array.isArray(v) ? v[0] : v;
+}
+
+/** Accept both ?display= and legacy ?currency= (USD|EUR) else NATIVE */
+function readDisplay(sp: SearchParams): DisplayCurrency {
+  const a = (first(sp?.display) ?? "").toUpperCase();
+  const b = (first(sp?.currency) ?? "").toUpperCase();
+  const v = (a || b).toUpperCase();
+  return v === "USD" || v === "EUR" ? (v as DisplayCurrency) : "NATIVE";
+}
+
+function normalizeId(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[–—−]/g, "-")
+    .replace(/\s+/g, "");
+}
+
 function normalizeImg(u?: string | null): string | null {
   if (!u) return null;
   let s = String(u).trim();
@@ -86,14 +108,13 @@ function normalizeImg(u?: string | null): string | null {
   s = s.replace(/^http:\/\//i, "https://");
   if (s.includes(" ")) s = s.replace(/ /g, "%20");
   try {
-    const url = new URL(s);
-    return url.href;
+    return new URL(s).href;
   } catch {
     return s;
   }
 }
 
-const coerceText = (v: any): string | null => {
+function coerceText(v: any): string | null {
   if (v == null) return null;
   if (typeof v === "string") return v;
   try {
@@ -101,26 +122,20 @@ const coerceText = (v: any): string | null => {
   } catch {
     return String(v);
   }
-};
-
-const bestImg = (c: CardRow) => c.large_image || c.small_image || null;
+}
 
 function splitList(s?: string | null): string[] {
   if (!s) return [];
   const t = s.trim();
   if (!t) return [];
-  if (
-    (t.startsWith("[") && t.endsWith("]")) ||
-    (t.startsWith("{") && t.endsWith("}"))
-  ) {
+  if ((t.startsWith("[") && t.endsWith("]")) || (t.startsWith("{") && t.endsWith("}"))) {
     try {
       const parsed = JSON.parse(t);
-      if (Array.isArray(parsed))
-        return parsed.map((x) => String(x)).filter(Boolean);
+      if (Array.isArray(parsed)) return parsed.map((x) => String(x)).filter(Boolean);
       if (parsed && typeof parsed === "object")
         return Object.values(parsed).map((x) => String(x)).filter(Boolean);
     } catch {
-      // ignore JSON parse errors
+      // ignore
     }
   }
   return t
@@ -132,26 +147,6 @@ function splitList(s?: string | null): string[] {
 function fmtList(s?: string | null, sep = ", "): string {
   const a = splitList(s);
   return a.length ? a.join(sep) : "";
-}
-
-/** Accept both ?display= and legacy ?currency= (USD|EUR) else NATIVE */
-function readDisplay(sp: SearchParams): DisplayCurrency {
-  const a = (
-    Array.isArray(sp?.display) ? sp.display[0] : sp?.display
-  )?.toUpperCase();
-  const b = (
-    Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency
-  )?.toUpperCase();
-  const v = a || b;
-  return v === "USD" || v === "EUR" ? (v as DisplayCurrency) : "NATIVE";
-}
-
-function normalizeId(s: string): string {
-  return s
-    .trim()
-    .toLowerCase()
-    .replace(/[–—−]/g, "-")
-    .replace(/\s+/g, "");
 }
 
 function mapRow(r: RawRow): CardRow {
@@ -171,26 +166,25 @@ function mapRow(r: RawRow): CardRow {
     converted_retreat_cost: coerceText(r.converted_retreat_cost),
     retreat_cost: coerceText(r.retreat_cost),
 
-    set_id: r["set.id"] ?? r.set_id ?? null,
-    set_name: r["set.name"] ?? r.set_name ?? null,
-    series: r["set.series"] ?? r.series ?? r.set_series ?? null,
-    printed_total:
-      r["set.printedTotal"] ?? r.printed_total ?? r.set_printed_total ?? null,
-    total: r["set.total"] ?? r.total ?? r.set_total ?? null,
-    ptcgo_code:
-      r["set.ptcgoCode"] ?? r.ptcgo_code ?? r.set_ptcgo_code ?? null,
-    release_date:
-      r["set.releaseDate"] ?? r.release_date ?? r.set_release_date ?? null,
+    set_id: (r["set.id"] ?? r.set_id ?? null) as string | null,
+    set_name: (r["set.name"] ?? r.set_name ?? null) as string | null,
+    series: (r["set.series"] ?? r.series ?? r.set_series ?? null) as string | null,
+    printed_total: (r["set.printedTotal"] ?? r.printed_total ?? r.set_printed_total ?? null) as
+      | string
+      | null,
+    total: (r["set.total"] ?? r.total ?? r.set_total ?? null) as string | null,
+    ptcgo_code: (r["set.ptcgoCode"] ?? r.ptcgo_code ?? r.set_ptcgo_code ?? null) as string | null,
+    release_date: (r["set.releaseDate"] ?? r.release_date ?? r.set_release_date ?? null) as
+      | string
+      | null,
 
-    small_image: (r.small_image ?? r.image_small ?? r.imageSmall ?? null) as
-      | string
-      | null,
-    large_image: (r.large_image ?? r.image_large ?? r.imageLarge ?? null) as
-      | string
-      | null,
+    small_image: (r.small_image ?? r.image_small ?? r.imageSmall ?? null) as string | null,
+    large_image: (r.large_image ?? r.image_large ?? r.imageLarge ?? null) as string | null,
+
     artist: coerceText(r.artist),
     rarity: coerceText(r.rarity),
     flavor_text: coerceText(r.flavor_text),
+
     tcgplayer_url: coerceText(r.tcgplayer_url),
     tcgplayer_updated_at: coerceText(r.tcgplayer_updated_at),
     cardmarket_url: coerceText(r.cardmarket_url),
@@ -198,13 +192,16 @@ function mapRow(r: RawRow): CardRow {
   };
 }
 
+function bestImg(c: CardRow) {
+  return c.large_image || c.small_image || null;
+}
+
 /* ---------------- Data loaders ---------------- */
 async function loadExact(id: string) {
-  const rs = await db.execute<RawRow>(
-    sql`SELECT * FROM tcg_cards WHERE id = ${id} LIMIT 1`,
-  );
+  const rs = await db.execute<RawRow>(sql`SELECT * FROM tcg_cards WHERE id = ${id} LIMIT 1`);
   return rs.rows?.[0] ? mapRow(rs.rows[0]) : null;
 }
+
 async function loadCaseInsensitive(id: string) {
   const rs = await db.execute<RawRow>(sql`
     SELECT * FROM tcg_cards
@@ -213,6 +210,7 @@ async function loadCaseInsensitive(id: string) {
   `);
   return rs.rows?.[0] ? mapRow(rs.rows[0]) : null;
 }
+
 async function loadNormalized(id: string) {
   const wanted = normalizeId(id);
   const rs = await db.execute<RawRow>(sql`
@@ -234,13 +232,17 @@ async function loadNormalized(id: string) {
   `);
   return rs.rows?.[0] ? mapRow(rs.rows[0]) : null;
 }
+
 async function loadCardById(wanted: string) {
   let card = await loadExact(wanted);
   if (card) return { card, path: "exact" as const };
+
   card = await loadCaseInsensitive(wanted);
   if (card) return { card, path: "lowercase" as const };
+
   card = await loadNormalized(wanted);
   if (card) return { card, path: "normalized" as const };
+
   return { card: null as CardRow | null, path: "miss" as const };
 }
 
@@ -256,10 +258,12 @@ export default async function PokemonCardDetailPage({
 
   const p = await params;
   const sp = await searchParams;
+
   const rawId = Array.isArray(p?.id) ? p.id[0] : p?.id;
   const wanted = decodeURIComponent(String(rawId ?? "")).trim();
+
   const display = readDisplay(sp);
-  const debug = (Array.isArray(sp?.debug) ? sp.debug[0] : sp?.debug) === "1";
+  const debug = first(sp?.debug) === "1";
 
   const { card, path } = await loadCardById(wanted);
 
@@ -267,33 +271,25 @@ export default async function PokemonCardDetailPage({
     return (
       <section className="space-y-4">
         {debug && (
-          <pre className="text-xs whitespace-pre-wrap rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2 text-yellow-200">
+          <pre className="whitespace-pre-wrap rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2 text-xs text-yellow-200">
             {JSON.stringify(
-              {
-                wanted,
-                normalized: normalizeId(wanted),
-                pathTried: path,
-              },
+              { wanted, normalized: normalizeId(wanted), pathTried: path },
               null,
               2,
             )}
           </pre>
         )}
+
         <h1 className="text-2xl font-bold text-white">Card not found</h1>
-        <p className="text-white/70 text-sm break-all">
+        <p className="break-all text-sm text-white/70">
           Tried ID: <code>{wanted}</code>
         </p>
+
         <div className="flex gap-4">
-          <Link
-            href="/categories/pokemon/cards"
-            className="text-sky-300 hover:underline"
-          >
+          <Link href="/categories/pokemon/cards" className="text-sky-300 hover:underline">
             ← Back to all cards
           </Link>
-          <Link
-            href="/categories/pokemon/sets"
-            className="text-sky-300 hover:underline"
-          >
+          <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">
             ← Browse sets
           </Link>
         </div>
@@ -301,46 +297,7 @@ export default async function PokemonCardDetailPage({
     );
   }
 
-  <section className="grid gap-6 md:grid-cols-[2fr,1fr]">
-  {/* left: existing image + details */}
-  <div>{/* ...existing layout... */}</div>
-
-  {/* right column: CTAs */}
-  <div className="space-y-4">
-    {/* existing collection / wishlist buttons, etc. */}
-
-    {/* Amazon CTA (shows only if URL exists in DB) */}
-    <CardAmazonCTA
-      category="pokemon"
-      cardId={card.id}
-      cardName={card.name}
-    />
-  </div>
-</section>
-
-// after you have `card` loaded and before return JSX:
-const amazonLink = await getAffiliateLinkForCard({
-  category: "pokemon",
-  cardId: card.id,        // or card.card_id if that's your field
-  marketplace: "amazon",
-});
-
-
-  // downstream
-  const ebay = await getLatestEbaySnapshot("pokemon", card.id, "all");
-  const legalities: LegalityRow[] =
-    card.set_id
-      ? (
-          await db.execute<LegalityRow>(sql`
-          SELECT format, legality FROM tcg_sets_legalities
-          WHERE set_id = ${card.set_id}
-          ORDER BY format ASC
-        `)
-        ).rows ?? []
-      : [];
-
   const hero = normalizeImg(bestImg(card));
-
   const setHref = card.set_id
     ? `/categories/pokemon/sets/${encodeURIComponent(String(card.set_id))}`
     : card.set_name
@@ -354,6 +311,38 @@ const amazonLink = await getAffiliateLinkForCard({
 
   const fx = getFx();
 
+  // Auth
+  const { userId } = await auth();
+  const canSave = !!userId;
+
+  // Amazon affiliate link (server)
+  const amazonLink = await getAffiliateLinkForCard({
+    category: "pokemon",
+    cardId: card.id,
+    marketplace: "amazon",
+  });
+
+  // eBay snapshot (server)
+  const ebay = await getLatestEbaySnapshot({
+    category: "pokemon",
+    cardId: card.id,
+    segment: "all",
+  });
+
+  // Legalities (by set)
+  const legalities: LegalityRow[] =
+    card.set_id
+      ? (
+          await db.execute<LegalityRow>(sql`
+            SELECT format, legality
+            FROM tcg_sets_legalities
+            WHERE set_id = ${card.set_id}
+            ORDER BY format ASC
+          `)
+        ).rows ?? []
+      : [];
+
+  // Vendor prices
   const rawVendors = await getVendorPricesForCard("pokemon", card.id, [
     "ebay",
     "amazon",
@@ -362,13 +351,14 @@ const amazonLink = await getAffiliateLinkForCard({
 
   const baseVendors = (rawVendors ?? {}) as Record<VendorKey, VendorPrice>;
 
+  // If vendor eBay is missing, we’ll backfill from snapshot
   const vendors: Record<VendorKey, VendorPrice> =
     !baseVendors.ebay || baseVendors.ebay.value == null
       ? {
           ...baseVendors,
           ebay: {
-            value:
-              ebay?.median_cents != null ? ebay.median_cents / 100 : null,
+            value: ebay?.price_cents != null ? ebay.price_cents / 100 : null,
+
             currency: "USD",
             url: baseVendors.ebay?.url ?? null,
           },
@@ -377,56 +367,31 @@ const amazonLink = await getAffiliateLinkForCard({
 
   if (!vendors.ebay || vendors.ebay.value == null) {
     vendors.ebay = {
-      value: ebay?.median_cents != null ? ebay.median_cents / 100 : null,
+      value: ebay?.price_cents != null ? ebay.price_cents / 100 : null,
+
       currency: "USD",
       url: vendors.ebay?.url ?? null,
     };
   }
 
+  // History existence checks
   const hasTcgHistory =
-    (
-      await db.execute(
-        sql`SELECT 1 FROM tcg_card_prices_tcgplayer WHERE card_id = ${card.id} LIMIT 1`,
-      )
-    ).rows.length > 0;
+    (await db.execute(sql`
+      SELECT 1
+      FROM tcg_card_prices_tcgplayer
+      WHERE card_id = ${card.id}
+      LIMIT 1
+    `)).rows.length > 0;
 
   const hasCmkHistory =
-    (
-      await db.execute(
-        sql`SELECT 1 FROM tcg_card_prices_cardmarket WHERE card_id = ${card.id} LIMIT 1`,
-      )
-    ).rows.length > 0;
+    (await db.execute(sql`
+      SELECT 1
+      FROM tcg_card_prices_cardmarket
+      WHERE card_id = ${card.id}
+      LIMIT 1
+    `)).rows.length > 0;
 
-  const moneyFromUsdCents = (cents?: number | null) => {
-    if (cents == null) return "—";
-    if (display === "EUR" && fx.usdToEur) {
-      const eur = (cents / 100) * fx.usdToEur;
-      return `€${eur.toFixed(2)}`;
-    }
-    return `$${(cents / 100).toFixed(2)}`;
-  };
-
-  const showVendorPrice = (v?: VendorPrice) => {
-    if (!v || v.value == null) return "—";
-    if (display === "EUR") {
-      if (v.currency === "EUR") return `€${v.value.toFixed(2)}`;
-      if (v.currency === "USD" && fx.usdToEur)
-        return `€${(v.value * fx.usdToEur).toFixed(2)}`;
-    }
-    if (display === "USD") {
-      if (v.currency === "USD") return `$${v.value.toFixed(2)}`;
-      if (v.currency === "EUR" && fx.eurToUsd)
-        return `$${(v.value * fx.eurToUsd).toFixed(2)}`;
-    }
-    const sym = v.currency === "EUR" ? "€" : "$";
-    return `${sym}${v.value.toFixed(2)}`;
-  };
-
-  // --- Auth + collection gating: any signed-in user can save items ---
-  const { userId } = await auth();
-  const canSave = !!userId;
-
-  // --- Your holdings (per user + card) ---
+  // Holdings
   let holdingSummary:
     | {
         quantity: number;
@@ -439,10 +404,10 @@ const amazonLink = await getAffiliateLinkForCard({
   if (userId) {
     const res = await db.execute<HoldingRow>(sql`
       SELECT
-        COALESCE(SUM(quantity), 0)::text                            AS total_quantity,
-        COALESCE(SUM(COALESCE(cost_cents, 0) * quantity), 0)::text  AS total_cost_cents,
+        COALESCE(SUM(quantity), 0)::text AS total_quantity,
+        COALESCE(SUM(COALESCE(cost_cents, 0) * quantity), 0)::text AS total_cost_cents,
         COALESCE(SUM(COALESCE(last_value_cents, 0) * quantity), 0)::text AS total_value_cents,
-        MIN(created_at)::text                                       AS first_added_at
+        MIN(created_at)::text AS first_added_at
       FROM user_collection_items
       WHERE user_id = ${userId}
         AND card_id = ${card.id}
@@ -463,20 +428,44 @@ const amazonLink = await getAffiliateLinkForCard({
     holdingSummary != null
       ? holdingSummary.totalValueCents - holdingSummary.totalCostCents
       : null;
+
   const profitPct =
     holdingSummary && holdingSummary.totalCostCents > 0 && profitCents != null
       ? (profitCents / holdingSummary.totalCostCents) * 100
       : null;
 
+  // Money helpers
+  const moneyFromUsdCents = (cents?: number | null) => {
+    if (cents == null) return "—";
+    if (display === "EUR" && fx.usdToEur) {
+      const eur = (cents / 100) * fx.usdToEur;
+      return `€${eur.toFixed(2)}`;
+    }
+    return `$${(cents / 100).toFixed(2)}`;
+  };
+
+  const showVendorPrice = (v?: VendorPrice) => {
+    if (!v || v.value == null) return "—";
+
+    if (display === "EUR") {
+      if (v.currency === "EUR") return `€${v.value.toFixed(2)}`;
+      if (v.currency === "USD" && fx.usdToEur) return `€${(v.value * fx.usdToEur).toFixed(2)}`;
+    }
+
+    if (display === "USD") {
+      if (v.currency === "USD") return `$${v.value.toFixed(2)}`;
+      if (v.currency === "EUR" && fx.eurToUsd) return `$${(v.value * fx.eurToUsd).toFixed(2)}`;
+    }
+
+    const sym = v.currency === "EUR" ? "€" : "$";
+    return `${sym}${v.value.toFixed(2)}`;
+  };
+
   return (
     <section className="space-y-8">
       {debug && (
-        <pre className="text-xs whitespace-pre-wrap rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2 text-yellow-200">
-          {JSON.stringify(
-            { wanted, matchedId: card.id, matchPath: path, hero },
-            null,
-            2,
-          )}
+        <pre className="whitespace-pre-wrap rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2 text-xs text-yellow-200">
+          {JSON.stringify({ wanted, matchedId: card.id, matchPath: path, hero }, null, 2)}
         </pre>
       )}
 
@@ -485,10 +474,7 @@ const amazonLink = await getAffiliateLinkForCard({
         {/* Left: large card image */}
         <div className="lg:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div
-              className="relative mx-auto w-full max-w-md"
-              style={{ aspectRatio: "3 / 4" }}
-            >
+            <div className="relative mx-auto w-full max-w-md" style={{ aspectRatio: "3 / 4" }}>
               {hero ? (
                 <Image
                   src={hero}
@@ -500,9 +486,7 @@ const amazonLink = await getAffiliateLinkForCard({
                   priority
                 />
               ) : (
-                <div className="absolute inset-0 grid place-items-center text-white/70">
-                  No image
-                </div>
+                <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
               )}
             </div>
           </div>
@@ -513,35 +497,20 @@ const amazonLink = await getAffiliateLinkForCard({
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h1 className="text-2xl font-bold text-white">
-                  {card.name ?? card.id}
-                </h1>
+                <h1 className="text-2xl font-bold text-white">{card.name ?? card.id}</h1>
                 <div className="mt-1 text-sm text-white/80">
-                  {card.rarity ? (
-                    <span className="mr-3">Rarity: {card.rarity}</span>
-                  ) : null}
-                  {card.supertype ? (
-                    <span className="mr-3">{card.supertype}</span>
-                  ) : null}
-                  {chipsTypes.length ? (
-                    <span className="mr-3">
-                      {chipsTypes.join(" • ")}
-                    </span>
-                  ) : null}
-                  {chipsSubtypes.length ? (
-                    <span>{chipsSubtypes.join(" • ")}</span>
-                  ) : null}
+                  {card.rarity ? <span className="mr-3">Rarity: {card.rarity}</span> : null}
+                  {card.supertype ? <span className="mr-3">{card.supertype}</span> : null}
+                  {chipsTypes.length ? <span className="mr-3">{chipsTypes.join(" • ")}</span> : null}
+                  {chipsSubtypes.length ? <span>{chipsSubtypes.join(" • ")}</span> : null}
                 </div>
               </div>
 
-              {setHref && (
-                <Link
-                  href={setHref}
-                  className="text-sm text-sky-300 hover:underline"
-                >
+              {setHref ? (
+                <Link href={setHref} className="text-sm text-sky-300 hover:underline">
                   View set →
                 </Link>
-              )}
+              ) : null}
             </div>
 
             {/* Collection + Wishlist actions */}
@@ -560,18 +529,14 @@ const amazonLink = await getAffiliateLinkForCard({
             <div className="mt-3 text-sm text-white/70">
               {[
                 card.series || undefined,
-                card.ptcgo_code
-                  ? `PTCGO: ${card.ptcgo_code}`
-                  : undefined,
-                card.release_date
-                  ? `Released: ${card.release_date}`
-                  : undefined,
+                card.ptcgo_code ? `PTCGO: ${card.ptcgo_code}` : undefined,
+                card.release_date ? `Released: ${card.release_date}` : undefined,
               ]
                 .filter(Boolean)
                 .join(" • ")}
             </div>
 
-            {/* Marketplaces (below text) */}
+            {/* Marketplaces */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <CardEbayCTA
                 card={{
@@ -583,20 +548,17 @@ const amazonLink = await getAffiliateLinkForCard({
                 game="Pokémon TCG"
                 variant="pill"
               />
-              <CardAmazonCTA
-  url={amazonLink?.url}
-  label={card.name}
-/>
 
+              <CardAmazonCTA url={amazonLink?.url} label={card.name ?? card.id} />
             </div>
 
             {/* legality chips */}
-            {legalities.length > 0 && (
+            {legalities.length > 0 ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 {legalities.map((l, i) =>
                   l.format && l.legality ? (
                     <span
-                      key={i}
+                      key={`${l.format}-${i}`}
                       className="rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-[11px] leading-5 text-white/80"
                     >
                       {l.format}: {l.legality}
@@ -604,220 +566,178 @@ const amazonLink = await getAffiliateLinkForCard({
                   ) : null,
                 )}
               </div>
-            )}
+            ) : null}
           </div>
 
           {/* details grid */}
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="grid grid-cols-2 gap-2 text-sm text-white/90">
-              {card.hp && (
+              {card.hp ? (
                 <div>
                   <span className="text-white/70">HP:</span> {card.hp}
                 </div>
-              )}
-              {card.level && (
+              ) : null}
+              {card.level ? (
                 <div>
-                  <span className="text-white/70">Level:</span>{" "}
-                  {card.level}
+                  <span className="text-white/70">Level:</span> {card.level}
                 </div>
-              )}
-              {fmtList(card.retreat_cost) && (
+              ) : null}
+              {fmtList(card.retreat_cost) ? (
                 <div className="col-span-2">
-                  <span className="text-white/70">Retreat Cost:</span>{" "}
-                  {fmtList(card.retreat_cost)}
+                  <span className="text-white/70">Retreat Cost:</span> {fmtList(card.retreat_cost)}
                 </div>
-              )}
-              {card.converted_retreat_cost && (
+              ) : null}
+              {card.converted_retreat_cost ? (
                 <div className="col-span-2">
-                  <span className="text-white/70">
-                    Converted Retreat:
-                  </span>{" "}
+                  <span className="text-white/70">Converted Retreat:</span>{" "}
                   {card.converted_retreat_cost}
                 </div>
-              )}
-              {card.evolves_from && (
+              ) : null}
+              {card.evolves_from ? (
                 <div className="col-span-2">
-                  <span className="text-white/70">Evolves from:</span>{" "}
-                  {card.evolves_from}
+                  <span className="text-white/70">Evolves from:</span> {card.evolves_from}
                 </div>
-              )}
-              {evoTo.length > 0 && (
+              ) : null}
+              {evoTo.length > 0 ? (
                 <div className="col-span-2">
-                  <span className="text-white/70">Evolves to:</span>{" "}
-                  {evoTo.join(", ")}
+                  <span className="text-white/70">Evolves to:</span> {evoTo.join(", ")}
                 </div>
-              )}
+              ) : null}
             </div>
           </div>
 
-          {/* flavor / rules */}
-          {rulesList.length > 0 && (
+          {/* rules */}
+          {rulesList.length > 0 ? (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-              <h2 className="text-lg font-semibold text-white">
-                Rules
-              </h2>
+              <h2 className="text-lg font-semibold text-white">Rules</h2>
               <ul className="mt-2 list-disc pl-5 text-sm text-white/85">
                 {rulesList.map((r, i) => (
                   <li key={i}>{r}</li>
                 ))}
               </ul>
             </section>
-          )}
+          ) : null}
+
+          {/* ancient trait */}
           {card.ancient_trait_name || card.ancient_trait_text ? (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-              <h2 className="text-lg font-semibold text-white">
-                Ancient Trait
-              </h2>
+              <h2 className="text-lg font-semibold text-white">Ancient Trait</h2>
               {card.ancient_trait_name ? (
-                <div className="font-medium">
-                  {card.ancient_trait_name}
-                </div>
+                <div className="font-medium text-white">{card.ancient_trait_name}</div>
               ) : null}
               {card.ancient_trait_text ? (
-                <p className="text-white/80 mt-1">
-                  {card.ancient_trait_text}
-                </p>
+                <p className="mt-1 text-white/80">{card.ancient_trait_text}</p>
               ) : null}
             </section>
           ) : null}
-          {card.flavor_text && (
+
+          {/* flavor */}
+          {card.flavor_text ? (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-              <h2 className="text-lg font-semibold text-white">
-                Flavor
-              </h2>
-              <p className="text-sm text-white/80">
-                {card.flavor_text}
-              </p>
+              <h2 className="text-lg font-semibold text-white">Flavor</h2>
+              <p className="text-sm text-white/80">{card.flavor_text}</p>
             </section>
-          )}
+          ) : null}
         </div>
       </div>
 
       {/* --- Your holdings panel --- */}
-      {userId && (
+      {userId ? (
         <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-lg font-semibold text-white">
-              Your holdings
-            </h2>
-            {holdingSummary?.firstAddedAt && (
+            <h2 className="text-lg font-semibold text-white">Your holdings</h2>
+            {holdingSummary?.firstAddedAt ? (
               <div className="text-xs text-white/60">
-                Since{" "}
-                {new Date(
-                  holdingSummary.firstAddedAt,
-                ).toLocaleDateString()}
+                Since {new Date(holdingSummary.firstAddedAt).toLocaleDateString()}
               </div>
-            )}
+            ) : null}
           </div>
 
           {holdingSummary ? (
-            <div className="mt-3 grid gap-3 sm:grid-cols-3 text-sm text-white/90">
+            <div className="mt-3 grid gap-3 text-sm text-white/90 sm:grid-cols-3">
               <div>
-                <div className="text-xs uppercase tracking-wide text-white/60">
-                  Copies owned
-                </div>
-                <div className="mt-1 text-2xl font-semibold">
-                  {holdingSummary.quantity}
-                </div>
+                <div className="text-xs uppercase tracking-wide text-white/60">Copies owned</div>
+                <div className="mt-1 text-2xl font-semibold">{holdingSummary.quantity}</div>
               </div>
 
               <div>
-                <div className="text-xs uppercase tracking-wide text-white/60">
-                  Cost basis
-                </div>
+                <div className="text-xs uppercase tracking-wide text-white/60">Cost basis</div>
                 <div className="mt-1 text-xl font-semibold">
                   {moneyFromUsdCents(holdingSummary.totalCostCents)}
                 </div>
               </div>
 
               <div>
-                <div className="text-xs uppercase tracking-wide text-white/60">
-                  Est. current value
-                </div>
+                <div className="text-xs uppercase tracking-wide text-white/60">Est. current value</div>
                 <div className="mt-1 text-xl font-semibold">
                   {moneyFromUsdCents(holdingSummary.totalValueCents)}
                 </div>
-                {profitCents != null && (
+
+                {profitCents != null ? (
                   <div
                     className={`mt-1 text-xs ${
-                      profitCents >= 0
-                        ? "text-emerald-300"
-                        : "text-red-300"
+                      profitCents >= 0 ? "text-emerald-300" : "text-red-300"
                     }`}
                   >
-                    {profitCents >= 0 ? "▲" : "▼"}{" "}
-                    {moneyFromUsdCents(Math.abs(profitCents))}
-                    {profitPct != null && (
+                    {profitCents >= 0 ? "▲" : "▼"} {moneyFromUsdCents(Math.abs(profitCents))}
+                    {profitPct != null ? (
                       <span className="ml-1 text-white/60">
-                        (
-                        {profitPct >= 0 ? "+" : ""}
-                        {profitPct.toFixed(1)}
-                        %)
+                        ({profitPct >= 0 ? "+" : ""}
+                        {profitPct.toFixed(1)}%)
                       </span>
-                    )}
+                    ) : null}
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
           ) : (
             <p className="mt-2 text-sm text-white/70">
-              You haven&apos;t added this card to your collection yet.
-              Use <span className="font-medium">Add to Collection</span>{" "}
-              above to start tracking it.
+              You haven&apos;t added this card to your collection yet. Use{" "}
+              <span className="font-medium">Add to Collection</span> above to start tracking it.
             </p>
           )}
         </section>
-      )}
+      ) : null}
 
-      {/* Market prices (unified) */}
+      {/* Market prices (unified tables) */}
       <MarketPrices category="pokemon" cardId={card.id} display={display} />
+{/* eBay Snapshot */}
+{ebay && (ebay.price_cents ?? null) != null ? (
+  <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+    <div className="mb-2 flex items-center justify-between">
+      <h2 className="text-lg font-semibold text-white">eBay Snapshot</h2>
+      <div className="text-xs text-white/60">
+        {"as_of_date" in ebay && ebay.as_of_date
+          ? `As of ${String(ebay.as_of_date)}`
+          : ""}
+      </div>
+    </div>
 
-      {/* eBay Snapshot */}
-      {ebay && ebay.median_cents != null && (
-        <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">
-              eBay Snapshot
-            </h2>
-            <div className="text-xs text-white/60">
-              {ebay.created_at
-                ? new Date(ebay.created_at).toLocaleDateString()
-                : ""}
-            </div>
-          </div>
-          <div className="text-white/90">
-            <div>
-              Median:{" "}
-              <span className="font-semibold">
-                {moneyFromUsdCents(ebay.median_cents)}
-              </span>{" "}
-              {ebay.sample_count ? (
-                <span className="text-white/60">
-                  • n={ebay.sample_count}
-                </span>
-              ) : null}
-            </div>
-            <div className="text-sm text-white/80">
-              IQR: {moneyFromUsdCents(ebay.p25_cents)} –{" "}
-              {moneyFromUsdCents(ebay.p75_cents)}
-            </div>
-            <div className="text-xs text-white/60 mt-1">
-              Source: eBay Browse API (US, USD; outliers pruned)
-            </div>
-          </div>
-        </div>
-      )}
+    <div className="text-white/90">
+      <div>
+        Price:{" "}
+        <span className="font-semibold">
+          {moneyFromUsdCents(ebay.price_cents)}
+        </span>{" "}
+        {"sample_size" in ebay && ebay.sample_size != null ? (
+          <span className="text-white/60">• n={Number(ebay.sample_size)}</span>
+        ) : null}
+      </div>
+
+      <div className="mt-1 text-xs text-white/60">
+        Source: eBay (snapshot)
+      </div>
+    </div>
+  </div>
+) : null}
 
       {/* Other Marketplaces */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">
-            Other Marketplaces
-          </h2>
-          <div className="text-xs text-white/60">
-            Converted values are approximate
-          </div>
+          <h2 className="text-lg font-semibold text-white">Other Marketplaces</h2>
+          <div className="text-xs text-white/60">Converted values are approximate</div>
         </div>
+
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           {(["ebay", "amazon", "coolstuffinc"] as const).map((key) => {
             const v = vendors[key];
@@ -825,23 +745,20 @@ const amazonLink = await getAffiliateLinkForCard({
               key === "coolstuffinc"
                 ? "CoolStuffInc"
                 : key.charAt(0).toUpperCase() + key.slice(1);
-            const price = showVendorPrice(v as VendorPrice | undefined);
+
             return (
-              <div
-                key={key}
-                className="rounded-xl border border-white/10 bg-white/5 p-3"
-              >
-                <div className="text-sm font-medium text-white">
-                  {label}
-                </div>
+              <div key={key} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                <div className="text-sm font-medium text-white">{label}</div>
                 <div className="text-white/80">Price</div>
                 <div className="mt-1 text-lg font-semibold text-white">
-                  {price}
+                  {showVendorPrice(v)}
                 </div>
+
                 {v?.url ? (
                   <a
                     href={v.url}
                     target="_blank"
+                    rel="noopener noreferrer"
                     className="text-xs text-sky-300 hover:underline"
                   >
                     View listing →
@@ -853,10 +770,10 @@ const amazonLink = await getAffiliateLinkForCard({
         </div>
       </div>
 
-      {/* mini trend glances */}
+      {/* Mini trend glances */}
       {hasTcgHistory || hasCmkHistory ? (
         <section className="grid gap-3 md:grid-cols-2">
-          {hasTcgHistory && (
+          {hasTcgHistory ? (
             <PriceSparkline
               category="pokemon"
               cardId={card.id}
@@ -866,8 +783,9 @@ const amazonLink = await getAffiliateLinkForCard({
               display={display}
               label="TCGplayer • Normal (30d)"
             />
-          )}
-          {hasCmkHistory && (
+          ) : null}
+
+          {hasCmkHistory ? (
             <PriceSparkline
               category="pokemon"
               cardId={card.id}
@@ -877,7 +795,7 @@ const amazonLink = await getAffiliateLinkForCard({
               display={display}
               label="Cardmarket • Trend (30d)"
             />
-          )}
+          ) : null}
         </section>
       ) : (
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white/70">
@@ -886,50 +804,37 @@ const amazonLink = await getAffiliateLinkForCard({
       )}
 
       {/* FX note if converting */}
-      {display !== "NATIVE" &&
-        (fx.usdToEur != null || fx.eurToUsd != null) && (
-          <div className="flex flex-wrap items-center gap-3 text-xs text-white/60">
-            <span>
-              Converted to {display} using env FX (
-              {[
-                fx.usdToEur != null
-                  ? `USD→EUR=${fx.usdToEur.toFixed(4)}`
-                  : null,
-                fx.eurToUsd != null
-                  ? `EUR→USD=${fx.eurToUsd.toFixed(4)}`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join(", ")}
-              )
-            </span>
-          </div>
-        )}
+      {display !== "NATIVE" && (fx.usdToEur != null || fx.eurToUsd != null) ? (
+        <div className="flex flex-wrap items-center gap-3 text-xs text-white/60">
+          <span>
+            Converted to {display} using env FX (
+            {[
+              fx.usdToEur != null ? `USD→EUR=${fx.usdToEur.toFixed(4)}` : null,
+              fx.eurToUsd != null ? `EUR→USD=${fx.eurToUsd.toFixed(4)}` : null,
+            ]
+              .filter(Boolean)
+              .join(", ")}
+            )
+          </span>
+        </div>
+      ) : null}
 
       {/* Footer nav */}
       <div className="flex flex-wrap gap-4 text-sm">
-        <Link
-          href="/categories/pokemon/cards"
-          className="text-sky-300 hover:underline"
-        >
+        <Link href="/categories/pokemon/cards" className="text-sky-300 hover:underline">
           ← Back to cards
         </Link>
-        {setHref && (
+
+        {setHref ? (
           <>
-            <Link
-              href={setHref}
-              className="text-sky-300 hover:underline"
-            >
+            <Link href={setHref} className="text-sky-300 hover:underline">
               ← Back to set
             </Link>
-            <Link
-              href={`${setHref}/prices`}
-              className="text-sky-300 hover:underline"
-            >
+            <Link href={`${setHref}/prices`} className="text-sky-300 hover:underline">
               View set price overview →
             </Link>
           </>
-        )}
+        ) : null}
       </div>
     </section>
   );

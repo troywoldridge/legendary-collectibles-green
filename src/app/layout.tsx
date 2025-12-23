@@ -1,7 +1,6 @@
 // src/app/layout.tsx
-import type { Metadata } from "next";
 import "./globals.css";
-
+import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import Image from "next/image";
 import Header from "@/components/Header";

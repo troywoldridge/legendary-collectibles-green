@@ -179,10 +179,7 @@ export default async function PokemonCardPricesPage({
   const cardParam = decodeURIComponent(rawId ?? "").trim();
   const cardId = (await resolveCardId(cardParam)) ?? cardParam;
 
-  const [core, hist] = await Promise.all([
-    loadCore(cardId),
-    loadHistory(cardId),
-  ]);
+  const [core, hist] = await Promise.all([loadCore(cardId), loadHistory(cardId)]);
 
   if (!core) {
     return (
@@ -290,8 +287,7 @@ export default async function PokemonCardPricesPage({
   addCmMetric("Trend", "trend_price");
   addCmMetric("Average", "average_sell_price");
 
-  const noHistory =
-    metrics.length === 0 || metrics.every((m) => !m.latest);
+  const noHistory = metrics.length === 0 || metrics.every((m) => !m.latest);
 
   /* -----------------------------------------------
      RENDER
@@ -350,6 +346,7 @@ export default async function PokemonCardPricesPage({
 
       {/* ----------------------------------------------------
           MARKET PRICES (Free+)
+          Uses NEW market_* tables (no ebay_price_snapshots)
       ---------------------------------------------------- */}
       <MarketPrices category="pokemon" cardId={core.id} display={display} />
 
@@ -421,14 +418,8 @@ export default async function PokemonCardPricesPage({
                   <PcRow label="Loose" value={row.loose_price_cents} />
                   <PcRow label="Graded 9" value={row.graded_price_cents} />
                   <PcRow label="PSA 10" value={row.manual_only_price_cents} />
-                  <PcRow
-                    label="CGC 10"
-                    value={row.condition_17_price_cents}
-                  />
-                  <PcRow
-                    label="SGC 10"
-                    value={row.condition_18_price_cents}
-                  />
+                  <PcRow label="CGC 10" value={row.condition_17_price_cents} />
+                  <PcRow label="SGC 10" value={row.condition_18_price_cents} />
                 </div>
               </div>
             ))}

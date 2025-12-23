@@ -1,53 +1,102 @@
 "use client";
 
-import { ebaySearchLink } from "@/lib/ebay";
+import Link from "next/link";
 
 type CardLike = {
   id: string;
-  name?: string | null;
+  name: string;
   number?: string | null;
-  collector_number?: string | null;
   set_code?: string | null;
   set_name?: string | null;
 };
 
 type Props = {
   card: CardLike;
-  game: "Pokemon" | "Yu-Gi-Oh!" | "Magic The Gathering" | string;
-  className?: string;
-  label?: string;
-  compact?: boolean;
+  /** Display name, e.g. "Pokémon TCG", "Magic: The Gathering", "Yu-Gi-Oh!" */
+  game?: string | null;
+
+  /** Optional UI variant */
+  variant?: "pill" | "card";
 };
 
+/**
+ * eBay CTA that does NOT depend on "@/lib/ebay".
+ * This prevents build breaks when the server-side ebay module changes.
+ */
 export default function CardEbayCTA({
   card,
   game,
-  className,
-  label,
-  compact = false,
+  variant = "pill",
 }: Props) {
-  const num = card.number ?? card.collector_number ?? null;
-  const set = card.set_code ?? card.set_name ?? null;
+  const q = buildQuery(card, game);
+  const href = ebaySearchLink(q);
 
-  const q = [card.name, set, num, game, "card"].filter(Boolean).join(" ");
-  const href = ebaySearchLink({ q });
+  if (variant === "card") {
+    return (
+      <div className="rounded-xl border border-sky-400/30 bg-sky-400/5 p-4 shadow-lg shadow-sky-500/10">
+        <div className="text-xs uppercase tracking-wide text-sky-200/80">
+          eBay
+        </div>
+        <div className="mt-1 text-sm text-white/90">
+          Search for <span className="font-semibold">{card.name}</span> on eBay.
+        </div>
+        <div className="mt-3">
+          <Link
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 rounded-lg bg-sky-400 px-4 py-2 text-sm font-semibold text-black hover:bg-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
+          >
+            View on eBay <span aria-hidden="true">↗</span>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
-  const base =
-    "inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium hover:opacity-90";
-  const compactClasses = compact ? "px-2 py-1 text-[11px]" : "";
-  const classes = [base, compactClasses, className].filter(Boolean).join(" ");
-
+  // pill
   return (
-    <a
+    <Link
       href={href}
       target="_blank"
-      rel="nofollow sponsored noopener"
-      className={classes}
-      aria-label={`Search eBay for ${q}`}
-      title={`Search eBay for ${q}`}
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-2 rounded-full border border-sky-300/30 bg-sky-300/10 px-3 py-1.5 text-sm font-semibold text-sky-100 hover:bg-sky-300/15 hover:border-sky-300/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
+      title="Search on eBay"
     >
-      <span aria-hidden>🧾</span>
-      <span>{label ?? "See on eBay"}</span>
-    </a>
+      eBay <span aria-hidden="true">↗</span>
+    </Link>
   );
+}
+
+/** Builds a good eBay search query for cards */
+function buildQuery(card: CardLike, game?: string | null) {
+  const bits: string[] = [];
+
+  if (card.name) bits.push(card.name);
+
+  // Prefer set name, fall back to set code
+  if (card.set_name) bits.push(card.set_name);
+  else if (card.set_code) bits.push(card.set_code);
+
+  // Card number helps a lot for Pokémon/MTG
+  if (card.number) bits.push(card.number);
+
+  if (game) bits.push(game);
+
+  // Remove empty, join
+  return bits
+    .map((s) => String(s).trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+/**
+ * eBay search link builder.
+ * Keeps it simple + stable.
+ */
+function ebaySearchLink(q: string) {
+  const query = encodeURIComponent(q);
+  // _nkw = keywords
+  // _sacat = all categories
+  return `https://www.ebay.com/sch/i.html?_nkw=${query}&_sacat=0`;
 }
