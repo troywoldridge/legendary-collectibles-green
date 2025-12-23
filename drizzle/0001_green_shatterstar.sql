@@ -1,0 +1,3 @@
+-- This file intentionally left blank.
+-- It previously contained index-only normalization statements generated during schema refactor.
+-- Drizzle migration journal expects this file to exist to preserve the chain.
