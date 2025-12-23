@@ -31,24 +31,23 @@ export async function GET() {
       return NextResponse.json({ cartId, items: [], subtotalCents: 0 }, { status: 200 });
     }
 
-    // Pull cart lines
+    // ✅ Shop lines: pull product_uuid via raw SQL since drizzle schema doesn't expose it yet
     const lines = await db
       .select({
         lineId: cartLines.id,
         qty: cartLines.qty,
-        listingId: cartLines.listingId,
+        productId: sql<string>`product_uuid`,
         updatedAt: cartLines.updatedAt,
       })
       .from(cartLines)
-      .where(and(eq(cartLines.cartId, cartId), sql`${cartLines.listingId} is not null`));
+      .where(and(eq(cartLines.cartId, cartId), sql`product_uuid is not null`));
 
-    const listingIds = lines.map((l) => l.listingId).filter(Boolean) as string[];
+    const productIds = lines.map((l) => l.productId).filter(Boolean) as string[];
 
-    if (listingIds.length === 0) {
+    if (productIds.length === 0) {
       return NextResponse.json({ cartId, items: [], subtotalCents: 0 }, { status: 200 });
     }
 
-    // Fetch products for those listing ids
     const prows = await db
       .select({
         id: products.id,
@@ -66,11 +65,10 @@ export async function GET() {
         quantity: products.quantity,
       })
       .from(products)
-      .where(inArray(products.id, listingIds));
+      .where(inArray(products.id, productIds));
 
     const productById = new Map(prows.map((p) => [p.id, p]));
 
-    // Primary images (lowest sort)
     const imgs = await db
       .select({
         productId: productImages.productId,
@@ -79,7 +77,7 @@ export async function GET() {
         sort: productImages.sort,
       })
       .from(productImages)
-      .where(inArray(productImages.productId, listingIds))
+      .where(inArray(productImages.productId, productIds))
       .orderBy(asc(productImages.productId), asc(productImages.sort));
 
     const imageByProductId = new Map<string, { url: string; alt: string | null }>();
@@ -89,10 +87,9 @@ export async function GET() {
       }
     }
 
-    // Build cart items
     const items = lines
       .map((l) => {
-        const p = l.listingId ? productById.get(l.listingId) : null;
+        const p = l.productId ? productById.get(l.productId) : null;
         if (!p) return null;
 
         const unit = Number(p.priceCents ?? 0);
@@ -108,14 +105,12 @@ export async function GET() {
           lineTotalCents: unit * qty,
           compareAtCents: p.compareAtCents ?? null,
 
-          // useful display bits
           sealed: p.sealed,
           isGraded: p.isGraded,
           grader: p.grader,
           gradeX10: p.gradeX10,
           condition: p.condition,
 
-          // inventory visibility
           inventoryType: p.inventoryType,
           availableQty: p.quantity,
 
@@ -126,14 +121,7 @@ export async function GET() {
 
     const subtotalCents = items.reduce((sum, it) => sum + it.lineTotalCents, 0);
 
-    return NextResponse.json(
-      {
-        cartId,
-        items,
-        subtotalCents,
-      },
-      { status: 200 }
-    );
+    return NextResponse.json({ cartId, items, subtotalCents }, { status: 200 });
   } catch (err) {
     console.error("[api/cart] error", err);
     return NextResponse.json({ error: "Failed to load cart" }, { status: 500 });
