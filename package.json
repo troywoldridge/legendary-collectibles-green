@@ -40,7 +40,11 @@
     "prices:ebay:pokemon": "node scripts/cron/fetchPkmnEbayPrices.mjs --all --limit=0 --batch=800 --concurrency=4",
     "prices:ebay:ygo": "node scripts/cron/fetchYgoEbayPrices.mjs --all --limit=0 --batch=800 --concurrency=4",
     "prices:all": "node scripts/cron/runAllPrices.mjs",
-    "cron:ygo:snapshot-history": "node scripts/cron/ygoPricesSnapshotHistory.mjs"
+    "cron:ygo:snapshot-history": "node scripts/cron/ygoPricesSnapshotHistory.mjs",
+    "db:pull": "drizzle-kit pull",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:check": "drizzle-kit check"
   },
   "dependencies": {
     "@clerk/nextjs": "^6.34.5",
