@@ -156,9 +156,11 @@ async function getCard(param: string): Promise<{
 export default async function YugiohCardDetailPage({
   params,
 }: {
+  // Next 15/16 server components commonly type params as Promise<...>
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+
   const { card, images, prices, banlist, sets } = await getCard(id);
 
   if (!card) {
@@ -242,7 +244,7 @@ export default async function YugiohCardDetailPage({
               </div>
             </div>
 
-            {/* CTAs (below meta text) */}
+            {/* CTAs */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <CardEbayCTA
                 card={{ id: card.id, name: card.name, set_name: firstSet ?? null }}
@@ -262,9 +264,7 @@ export default async function YugiohCardDetailPage({
               </div>
 
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                <div className="text-xs uppercase tracking-wide text-white/60">
-                  Level / Scale / Link
-                </div>
+                <div className="text-xs uppercase tracking-wide text-white/60">Level / Scale / Link</div>
                 <div className="mt-1 text-lg font-semibold text-white">
                   {card.level ?? 0} / {card.scale ?? 0} / {card.linkval ?? 0}
                 </div>

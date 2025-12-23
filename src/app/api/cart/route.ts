@@ -1,69 +1,141 @@
 // src/app/api/cart/route.ts
 import { NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
-import { sql } from "drizzle-orm";
-import { db } from "@/lib/db";
+import { cookies } from "next/headers";
+import { db } from "@/lib/db/index";
+import { carts, cartLines } from "@/lib/db/schema/cart";
+import { products, productImages } from "@/lib/db/schema/shop";
+import { and, eq, inArray, sql, asc } from "drizzle-orm";
+
+const CART_COOKIE = "lc_cart_id";
+
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
 
 export async function GET() {
-  const { userId } = await auth();
+  try {
+    const jar = await cookies();
+    const cartId = jar.get(CART_COOKIE)?.value;
 
+    if (!cartId || !isUuid(cartId)) {
+      return NextResponse.json({ cartId: null, items: [], subtotalCents: 0 }, { status: 200 });
+    }
 
-  const cartRes = await db.execute<{ cart_id: string }>(sql`
-    SELECT cart_id
-    FROM public.cart_users
-    WHERE user_id = ${userId}
-    LIMIT 1
-  `);
+    const cart = await db
+      .select({ id: carts.id, status: carts.status })
+      .from(carts)
+      .where(eq(carts.id, cartId))
+      .limit(1);
 
-  const cartId = cartRes.rows?.[0]?.cart_id ?? null;
-  if (!cartId) {
-    return NextResponse.json({ cartId: null, lines: [], subtotal_cents: 0, currency: "USD" });
+    if (!cart.length) {
+      return NextResponse.json({ cartId, items: [], subtotalCents: 0 }, { status: 200 });
+    }
+
+    // Pull cart lines
+    const lines = await db
+      .select({
+        lineId: cartLines.id,
+        qty: cartLines.qty,
+        listingId: cartLines.listingId,
+        updatedAt: cartLines.updatedAt,
+      })
+      .from(cartLines)
+      .where(and(eq(cartLines.cartId, cartId), sql`${cartLines.listingId} is not null`));
+
+    const listingIds = lines.map((l) => l.listingId).filter(Boolean) as string[];
+
+    if (listingIds.length === 0) {
+      return NextResponse.json({ cartId, items: [], subtotalCents: 0 }, { status: 200 });
+    }
+
+    // Fetch products for those listing ids
+    const prows = await db
+      .select({
+        id: products.id,
+        title: products.title,
+        slug: products.slug,
+        priceCents: products.priceCents,
+        compareAtCents: products.compareAtCents,
+        status: products.status,
+        sealed: products.sealed,
+        isGraded: products.isGraded,
+        grader: products.grader,
+        gradeX10: products.gradeX10,
+        condition: products.condition,
+        inventoryType: products.inventoryType,
+        quantity: products.quantity,
+      })
+      .from(products)
+      .where(inArray(products.id, listingIds));
+
+    const productById = new Map(prows.map((p) => [p.id, p]));
+
+    // Primary images (lowest sort)
+    const imgs = await db
+      .select({
+        productId: productImages.productId,
+        url: productImages.url,
+        alt: productImages.alt,
+        sort: productImages.sort,
+      })
+      .from(productImages)
+      .where(inArray(productImages.productId, listingIds))
+      .orderBy(asc(productImages.productId), asc(productImages.sort));
+
+    const imageByProductId = new Map<string, { url: string; alt: string | null }>();
+    for (const img of imgs) {
+      if (!imageByProductId.has(img.productId)) {
+        imageByProductId.set(img.productId, { url: img.url, alt: img.alt ?? null });
+      }
+    }
+
+    // Build cart items
+    const items = lines
+      .map((l) => {
+        const p = l.listingId ? productById.get(l.listingId) : null;
+        if (!p) return null;
+
+        const unit = Number(p.priceCents ?? 0);
+        const qty = Number(l.qty ?? 0);
+
+        return {
+          lineId: l.lineId,
+          productId: p.id,
+          slug: p.slug,
+          title: p.title,
+          qty,
+          unitPriceCents: unit,
+          lineTotalCents: unit * qty,
+          compareAtCents: p.compareAtCents ?? null,
+
+          // useful display bits
+          sealed: p.sealed,
+          isGraded: p.isGraded,
+          grader: p.grader,
+          gradeX10: p.gradeX10,
+          condition: p.condition,
+
+          // inventory visibility
+          inventoryType: p.inventoryType,
+          availableQty: p.quantity,
+
+          image: imageByProductId.get(p.id) ?? null,
+        };
+      })
+      .filter(Boolean) as any[];
+
+    const subtotalCents = items.reduce((sum, it) => sum + it.lineTotalCents, 0);
+
+    return NextResponse.json(
+      {
+        cartId,
+        items,
+        subtotalCents,
+      },
+      { status: 200 }
+    );
+  } catch (err) {
+    console.error("[api/cart] error", err);
+    return NextResponse.json({ error: "Failed to load cart" }, { status: 500 });
   }
-
-  const linesRes = await db.execute<{
-    line_id: number;
-    qty: number;
-    listing_id: string | null;
-    product_id: number | null;
-
-    title: string | null;
-    primary_image_url: string | null;
-    price_cents: number | null;
-    currency: string | null;
-    status: string | null;
-  }>(sql`
-    SELECT
-      cl.id AS line_id,
-      cl.qty,
-      cl.listing_id,
-      cl.product_id,
-
-      sl.title,
-      sl.primary_image_url,
-      sl.price_cents,
-      sl.currency,
-      sl.status
-    FROM public.cart_lines cl
-    LEFT JOIN public.store_listings sl
-      ON sl.id = cl.listing_id
-    WHERE cl.cart_id = ${cartId}::uuid
-    ORDER BY cl.id ASC
-  `);
-
-  const lines = (linesRes.rows ?? []).map((r) => ({
-    id: r.line_id,
-    qty: r.qty,
-    listingId: r.listing_id,
-    title: r.title,
-    imageUrl: r.primary_image_url,
-    price_cents: r.price_cents ?? 0,
-    currency: (r.currency ?? "USD").toUpperCase(),
-    status: r.status ?? "active",
-    line_total_cents: (r.price_cents ?? 0) * r.qty,
-  }));
-
-  const subtotal_cents = lines.reduce((sum, l) => sum + l.line_total_cents, 0);
-  const currency = (lines[0]?.currency ?? "USD").toUpperCase();
-
-  return NextResponse.json({ cartId, lines, subtotal_cents, currency });
 }

@@ -31,9 +31,9 @@ type Listing = {
 export default async function ListingDetailPage({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }) {
-  const id = params.id;
+  const { id } = await params;
 
   const res = await db.execute<Listing>(sql`
     SELECT
