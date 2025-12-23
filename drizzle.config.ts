@@ -12,7 +12,8 @@ export default defineConfig({
 
   // This is the schema *input* for generate (your app schema files)
   // We'll point it to the pulled schema after we generate it the first time.
-  schema: "./drizzle/schema.ts",
+  schema: "./src/lib/db/schema/schema.ts",
+
 
   dbCredentials: {
     // put your real env var name here (see below)
