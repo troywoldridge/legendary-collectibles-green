@@ -8,6 +8,20 @@
       "when": 1766457914094,
       "tag": "0000_past_iron_man",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1766458272657,
+      "tag": "0001_green_shatterstar",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1766458889829,
+      "tag": "0002_big_namor",
+      "breakpoints": true
     }
   ]
 }

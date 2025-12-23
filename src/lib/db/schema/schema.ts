@@ -836,3 +836,7 @@ export const pricechartingPricesRaw = pgTable("pricecharting_prices_raw", {
 	index("idx_pc_raw_name").using("btree", table.game.asc().nullsLast().op("text_ops"), table.productName.asc().nullsLast().op("text_ops")),
 	primaryKey({ columns: [table.game, table.pricechartingId, table.sourceDate], name: "pricecharting_prices_raw_pkey"}),
 ]);
+
+
+// src/lib/db/schema/schema.ts
+export * from "./store";
