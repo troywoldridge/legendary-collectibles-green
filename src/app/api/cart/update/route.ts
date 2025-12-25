@@ -2,11 +2,12 @@ import "server-only";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
-import { sql } from "drizzle-orm";
-
-const CART_COOKIE = "lc_cart_id";
+import { cartLines } from "@/lib/db/schema/cart";
+import { and, eq, sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
+
+const CART_COOKIE = "lc_cart_id";
 
 function json(data: any, status = 200) {
   return NextResponse.json(data, { status });
@@ -30,28 +31,23 @@ export async function POST(req: Request) {
     if (!Number.isFinite(lineId) || lineId < 1) return json({ error: "Invalid lineId" }, 400);
     if (!Number.isFinite(qty) || qty < 0) return json({ error: "Invalid qty" }, 400);
 
-    // qty=0 means remove
     if (qty === 0) {
-      await db.execute(sql`
-        delete from cart_lines
-        where id = ${lineId} and cart_id = ${cartId}::uuid
-      `);
+      await db.delete(cartLines).where(and(eq(cartLines.id, lineId), eq(cartLines.cartId, cartId)));
       return json({ ok: true, removed: true });
     }
 
-    const res = await db.execute(sql`
-      update cart_lines
-      set qty = ${qty}, updated_at = now()
-      where id = ${lineId} and cart_id = ${cartId}::uuid
-      returning id, qty
-    `);
+    // ✅ Drizzle in your repo: returning() takes NO args
+    const updated = await db
+      .update(cartLines)
+      .set({ qty, updatedAt: sql`now()` })
+      .where(and(eq(cartLines.id, lineId), eq(cartLines.cartId, cartId)))
+      .returning();
 
-    const rows = (res as any)?.rows ?? [];
-    if (!rows.length) return json({ error: "Line not found" }, 404);
+    if (!updated.length) return json({ error: "Line not found" }, 404);
 
-    return json({ ok: true, lineId, qty: rows[0].qty });
+    return json({ ok: true, lineId, qty: (updated as any)[0].qty });
   } catch (err) {
-    console.error("[cart/update] failed", err);
+    console.error("[api/cart/update] failed", err);
     return json({ error: "Failed to update cart" }, 500);
   }
 }

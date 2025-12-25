@@ -254,3 +254,100 @@ body::after {
   .shopLayout { grid-template-columns: 1fr; }
   .productGrid { grid-template-columns: 1fr; }
 }
+
+/* Admin Token Gate */
+.adminGate {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.adminGate__title {
+  margin: 0 0 8px;
+}
+
+.adminGate__muted {
+  opacity: 0.85;
+  line-height: 1.4;
+  margin: 0 0 14px;
+}
+
+.adminGate__panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(0,0,0,0.25);
+}
+
+.adminGate__label {
+  display: grid;
+  gap: 6px;
+}
+
+.adminGate__labelText {
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+.adminGate__input {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.25);
+  color: inherit;
+  outline: none;
+}
+
+.adminGate__actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.adminGate__btn {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.25);
+  color: inherit;
+  cursor: pointer;
+}
+
+.adminGate__btn--primary {
+  background: rgba(120,120,255,0.25);
+}
+
+.adminGate__btn--danger {
+  background: rgba(255,120,120,0.15);
+}
+
+.adminGate__msg {
+  opacity: 0.9;
+}
+
+.adminGate__details {
+  opacity: 0.9;
+}
+
+.adminGate__summary {
+  cursor: pointer;
+}
+
+.adminGate__help {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+  line-height: 1.4;
+}
+
+.adminGate__code {
+  white-space: pre-wrap;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.25);
+  overflow: auto;
+}
+

@@ -5,11 +5,13 @@
 export * from "./billing";      // <-- exposes plans, userPlans, billingCustomers
 export * from "./mtg";          // (example) your MTG tables
 export * from "./pricecharting";
-export * from "@/lib/db/schema/pro";
-export * from "@/lib/db/schema/collectionAnalytics";
+export * from "./pro";
+export * from "./collectionAnalytics";
+
 export * from "./priceAlertLogs";
 export * from "./priceAlerts";
 export * from "./orders";
 export * from "./store";
+export * from "./inventory";
 
 

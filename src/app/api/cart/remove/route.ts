@@ -2,10 +2,12 @@ import "server-only";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
-import { sql } from "drizzle-orm";
+import { cartLines } from "@/lib/db/schema/cart";
+import { and, eq } from "drizzle-orm";
+
+export const dynamic = "force-dynamic";
 
 const CART_COOKIE = "lc_cart_id";
-export const dynamic = "force-dynamic";
 
 function json(data: any, status = 200) {
   return NextResponse.json(data, { status });
@@ -27,14 +29,11 @@ export async function POST(req: Request) {
 
     if (!Number.isFinite(lineId) || lineId < 1) return json({ error: "Invalid lineId" }, 400);
 
-    await db.execute(sql`
-      delete from cart_lines
-      where id = ${lineId} and cart_id = ${cartId}::uuid
-    `);
+    await db.delete(cartLines).where(and(eq(cartLines.id, lineId), eq(cartLines.cartId, cartId)));
 
     return json({ ok: true });
   } catch (err) {
-    console.error("[cart/remove] failed", err);
+    console.error("[api/cart/remove] failed", err);
     return json({ error: "Failed to remove from cart" }, 500);
   }
 }

@@ -1,10 +1,12 @@
-// src/app/api/cart/route.ts
+import "server-only";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { db } from "@/lib/db/index";
+import { db } from "@/lib/db";
 import { carts, cartLines } from "@/lib/db/schema/cart";
 import { products, productImages } from "@/lib/db/schema/shop";
-import { and, eq, inArray, sql, asc } from "drizzle-orm";
+import { and, eq, inArray, asc, sql } from "drizzle-orm";
+
+export const dynamic = "force-dynamic";
 
 const CART_COOKIE = "lc_cart_id";
 
@@ -21,30 +23,23 @@ export async function GET() {
       return NextResponse.json({ cartId: null, items: [], subtotalCents: 0 }, { status: 200 });
     }
 
-    const cart = await db
-      .select({ id: carts.id, status: carts.status })
-      .from(carts)
-      .where(eq(carts.id, cartId))
-      .limit(1);
-
+    const cart = await db.select({ id: carts.id }).from(carts).where(eq(carts.id, cartId)).limit(1);
     if (!cart.length) {
       return NextResponse.json({ cartId, items: [], subtotalCents: 0 }, { status: 200 });
     }
 
-    // ✅ Shop lines: pull product_uuid via raw SQL since drizzle schema doesn't expose it yet
     const lines = await db
       .select({
         lineId: cartLines.id,
         qty: cartLines.qty,
-        productId: sql<string>`product_uuid`,
+        listingId: cartLines.listingId,
         updatedAt: cartLines.updatedAt,
       })
       .from(cartLines)
-      .where(and(eq(cartLines.cartId, cartId), sql`product_uuid is not null`));
+      .where(and(eq(cartLines.cartId, cartId), sql`${cartLines.listingId} is not null`));
 
-    const productIds = lines.map((l) => l.productId).filter(Boolean) as string[];
-
-    if (productIds.length === 0) {
+    const productIds = lines.map((l) => l.listingId).filter(Boolean) as string[];
+    if (!productIds.length) {
       return NextResponse.json({ cartId, items: [], subtotalCents: 0 }, { status: 200 });
     }
 
@@ -89,7 +84,7 @@ export async function GET() {
 
     const items = lines
       .map((l) => {
-        const p = l.productId ? productById.get(l.productId) : null;
+        const p = l.listingId ? productById.get(l.listingId) : null;
         if (!p) return null;
 
         const unit = Number(p.priceCents ?? 0);
@@ -104,16 +99,13 @@ export async function GET() {
           unitPriceCents: unit,
           lineTotalCents: unit * qty,
           compareAtCents: p.compareAtCents ?? null,
-
           sealed: p.sealed,
           isGraded: p.isGraded,
           grader: p.grader,
           gradeX10: p.gradeX10,
           condition: p.condition,
-
           inventoryType: p.inventoryType,
           availableQty: p.quantity,
-
           image: imageByProductId.get(p.id) ?? null,
         };
       })
