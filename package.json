@@ -44,7 +44,9 @@
     "db:pull": "drizzle-kit pull",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:check": "drizzle-kit check"
+    "db:check": "drizzle-kit check",
+    "daily": "bash ./scripts/run-daily.sh",
+    "daily:chmod": "chmod +x ./scripts/run-daily.sh"
   },
   "dependencies": {
     "@clerk/nextjs": "^6.34.5",

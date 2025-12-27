@@ -7,15 +7,43 @@ import { sql } from "drizzle-orm";
 export type GameId = "pokemon" | "yugioh" | "mtg";
 
 export type LivePrice = {
-  amount: number;       // e.g. 3.25
-  currency: "USD";      // everything we pick is effectively USD right now
+  amount: number;       // ALWAYS dollars (e.g. 3.25)
+  currency: "USD";
   source: string;       // debug label: which vendor/field we used
 };
 
+/**
+ * Parse numeric-ish DB values robustly.
+ */
 function num(v: string | number | null | undefined): number | null {
   if (v == null || v === "") return null;
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Normalize "unknown unit" numeric values into USD dollars.
+ *
+ * Why:
+ * - Some tables store dollars as decimals: 5.86
+ * - Some tables store cents as integers: 586
+ * - If we ever read cents and render as dollars, you get 100x prices.
+ *
+ * Heuristic:
+ * - If it's an integer >= 100, we treat it as cents (586 -> 5.86)
+ * - Otherwise treat it as dollars
+ *
+ * Notes:
+ * - This is intentionally conservative to prevent 100x inflation.
+ */
+function usd(v: string | number | null | undefined): number | null {
+  const n = num(v);
+  if (n == null) return null;
+
+  // Treat large integers as cents
+  if (Number.isInteger(n) && n >= 100) return n / 100;
+
+  return n;
 }
 
 /* ---------------- Pokemon: tcg_card_prices_tcgplayer ---------------- */
@@ -46,13 +74,14 @@ async function getPokemonPrice(cardId: string): Promise<LivePrice | null> {
 
   if (!row) return null;
 
+  // IMPORTANT: use usd() not num()
   const candidates: Array<{ v: number | null; label: string }> = [
-    { v: num(row.market_normal), label: "tcgplayer.market_normal" },
-    { v: num(row.market_holofoil), label: "tcgplayer.market_holofoil" },
-    { v: num(row.market_reverse_holofoil), label: "tcgplayer.market_reverse_holofoil" },
-    { v: num(row.normal), label: "tcgplayer.normal" },
-    { v: num(row.holofoil), label: "tcgplayer.holofoil" },
-    { v: num(row.reverse_holofoil), label: "tcgplayer.reverse_holofoil" },
+    { v: usd(row.market_normal), label: "tcgplayer.market_normal" },
+    { v: usd(row.market_holofoil), label: "tcgplayer.market_holofoil" },
+    { v: usd(row.market_reverse_holofoil), label: "tcgplayer.market_reverse_holofoil" },
+    { v: usd(row.normal), label: "tcgplayer.normal" },
+    { v: usd(row.holofoil), label: "tcgplayer.holofoil" },
+    { v: usd(row.reverse_holofoil), label: "tcgplayer.reverse_holofoil" },
   ];
 
   const best = candidates.find((c) => c.v != null);
@@ -87,12 +116,13 @@ async function getYgoPrice(cardId: string): Promise<LivePrice | null> {
 
   if (!row) return null;
 
+  // Also hardened: if any YGO source ever stores cents, we won't blow up UI.
   const candidates: Array<{ v: number | null; label: string }> = [
-    { v: num(row.tcgplayer_price), label: "ygo.tcgplayer_price" },
-    { v: num(row.cardmarket_price), label: "ygo.cardmarket_price" },
-    { v: num(row.ebay_price), label: "ygo.ebay_price" },
-    { v: num(row.amazon_price), label: "ygo.amazon_price" },
-    { v: num(row.coolstuffinc_price), label: "ygo.coolstuffinc_price" },
+    { v: usd(row.tcgplayer_price), label: "ygo.tcgplayer_price" },
+    { v: usd(row.cardmarket_price), label: "ygo.cardmarket_price" },
+    { v: usd(row.ebay_price), label: "ygo.ebay_price" },
+    { v: usd(row.amazon_price), label: "ygo.amazon_price" },
+    { v: usd(row.coolstuffinc_price), label: "ygo.coolstuffinc_price" },
   ];
 
   const best = candidates.find((c) => c.v != null);
@@ -114,7 +144,7 @@ async function getMtgPrice(cardId: string): Promise<LivePrice | null> {
       `)
     ).rows?.[0] ?? null;
 
-  const v = num(row?.effective_usd ?? null);
+  const v = usd(row?.effective_usd ?? null);
   if (v == null) return null;
 
   return { amount: v, currency: "USD", source: "mtg.effective_usd" };

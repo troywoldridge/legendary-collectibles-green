@@ -4,6 +4,9 @@ import "server-only";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
+const PRICECHARTING_ENABLED = process.env.ENABLE_PRICECHARTING === "true";
+
+
 /* =============================
    TYPES
    ============================= */
@@ -146,6 +149,9 @@ export async function getLatestPricechartingSnapshotsForCards(opts: {
 
   for (const cardId of cardIds) {
     if (!cardId) continue;
+
+    if (!PRICECHARTING_ENABLED) return null;
+
 
     // 1) Grab the "best" snapshot for this card:
     //    - prefer rows with any price field filled

@@ -1,64 +1,30 @@
 #!/usr/bin/env node
 /**
- * Scryfall Cards (Script #3)
+ * Scryfall Cards (Script #3) — FIXED
  * Location: scripts/scryfall/scryfall_cards.js
  *
  * What it does:
- * - Implements all Card endpoints from your docs (sections 2–13).
- * - For JSON Card responses (single or list), UPSERTS into DB table: scryfall_cards_raw
- * - Optionally also writes JSONL/JSON output files.
+ * - Implements core card endpoints.
+ * - For Card responses (single or list), UPSERTS into DB: public.scryfall_cards_raw
+ * - Optionally writes JSON / JSONL outputs
  *
- * DB requirement (we'll formalize later, but for now this script expects):
- *   scryfall_cards_raw(
- *     id uuid primary key,
- *     oracle_id uuid null,
- *     lang text not null,
- *     name text not null,
- *     set_code text null,
- *     collector_number text null,
- *     released_at date null,
- *     arena_id int null,
- *     mtgo_id int null,
- *     mtgo_foil_id int null,
- *     tcgplayer_id int null,
- *     tcgplayer_etched_id int null,
- *     cardmarket_id int null,
- *     payload jsonb not null,
- *     fetched_at timestamptz not null default now(),
- *     updated_at timestamptz not null default now()
- *   )
- *
- * Env:
- *   DATABASE_URL=postgres://...
- *
- * Examples:
- *   # Search cards (paginated list, upsert each)
- *   node scripts/scryfall/scryfall_cards.js search --q "c:white mv=1" --unique cards --order name --dir auto
- *
- *   # Named (fuzzy)
- *   node scripts/scryfall/scryfall_cards.js named --fuzzy "aust com"
- *
- *   # Autocomplete (prints results; optionally save to file)
- *   node scripts/scryfall/scryfall_cards.js autocomplete --q "smugg"
- *
- *   # Random
- *   node scripts/scryfall/scryfall_cards.js random
- *   node scripts/scryfall/scryfall_cards.js random --q "t:legendary c:blue"
- *
- *   # Collection (POST up to 75 identifiers; provide JSON file)
- *   node scripts/scryfall/scryfall_cards.js collection --identifiers ./out/identifiers.json
- *
- *   # Get by set/number/lang
- *   node scripts/scryfall/scryfall_cards.js get-set-number --code mh2 --number 1 --lang en
- *
- *   # Get by IDs
- *   node scripts/scryfall/scryfall_cards.js get-id --id 2ec77b94-6d47-4891-a480-5d0b4e5c9372  (NOTE: that's a set UUID, example only)
+ * Requires:
+ *   env DATABASE_URL=postgres://...
+ *   or pass --db-url "postgres://..."
  */
 
 const fs = require("fs");
 const path = require("path");
 
-let pg; // lazy require so script still runs for non-DB actions
+let pg; // lazy require
+
+function applyDbUrlArg(args) {
+  // allow CLI arg to set DB url without needing export
+  if (args["db-url"] && String(args["db-url"]).trim()) {
+    process.env.DATABASE_URL = String(args["db-url"]).trim();
+  }
+}
+
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -97,25 +63,25 @@ Commands:
       --include_extras true|false
       --include_multilingual true|false
       --include_variations true|false
-      --page <int> (starting page; default 1)
-      --delay <ms> (between pages; default 120)
-      --out <path.jsonl> (optional JSONL output)
-      --meta <path.json>  (optional run meta output)
-      --no-db (disable DB upserts)
+      --page <int>   (starting page; default 1)
+      --delay <ms>   (between pages; default 120)
+      --out <path.jsonl>
+      --meta <path.json>
+      --no-db
+      --db-url "<postgres url>"
 
   named
     GET /cards/named
-    Required:
-      --exact "<name>"  OR  --fuzzy "<name>"
+    Required: --exact "<name>" OR --fuzzy "<name>"
     Optional:
       --set "<setCode>"
       --out <path.json>
       --no-db
+      --db-url "<postgres url>"
 
   autocomplete
     GET /cards/autocomplete
-    Required:
-      --q "<string>"
+    Required: --q "<string>"
     Optional:
       --include_extras true|false
       --out <path.json>
@@ -126,15 +92,17 @@ Commands:
       --q "<query>"
       --out <path.json>
       --no-db
+      --db-url "<postgres url>"
 
   collection
-    POST /cards/collection
+    POST /cards/collection (max 75 identifiers)
     Required:
-      --identifiers <path.json>   (JSON file with { "identifiers": [ ... ] } OR just [ ... ])
+      --identifiers <path.json>   (either { "identifiers":[...] } or just [ ... ])
     Optional:
-      --out <path.jsonl> (writes returned cards to JSONL)
+      --out <path.jsonl>
       --meta <path.json>
       --no-db
+      --db-url "<postgres url>"
 
   get-set-number
     GET /cards/:code/:number(/:lang)
@@ -145,35 +113,17 @@ Commands:
       --lang "<lang>"
       --out <path.json>
       --no-db
+      --db-url "<postgres url>"
 
-  get-multiverse
-    GET /cards/multiverse/:id
-    Required: --id <int>
-
-  get-mtgo
-    GET /cards/mtgo/:id
-    Required: --id <int>
-
-  get-arena
-    GET /cards/arena/:id
-    Required: --id <int>
-
-  get-tcgplayer
-    GET /cards/tcgplayer/:id
-    Required: --id <int>
-
-  get-cardmarket
-    GET /cards/cardmarket/:id
-    Required: --id <int>
-
-  get-id
-    GET /cards/:id
-    Required: --id <uuid>
+  get-multiverse   --id <int>
+  get-mtgo         --id <int>
+  get-arena        --id <int>
+  get-tcgplayer    --id <int>
+  get-cardmarket   --id <int>
+  get-id           --id <uuid>
 
 Notes:
-- For all "get-*" commands: optional --out and --no-db apply.
-- This script only upserts when the response is a Card object or List of Card objects.
-
+- DB upserts only happen when response is a Card object or a List of Card objects.
 `.trim());
 }
 
@@ -204,33 +154,62 @@ function isUuidLike(s) {
   );
 }
 
-async function fetchJson(url, { method = "GET", bodyJson } = {}) {
+/**
+ * Fetch JSON with retry/backoff for rate limits and transient failures.
+ */
+async function fetchJson(url, { method = "GET", bodyJson, maxRetries = 6 } = {}) {
   const headers = {
     Accept: "application/json",
-    "User-Agent": "scryfall-cards-script/1.0 (contact: local-script)",
+    "User-Agent": "legendary-collectibles-scryfall-cards/1.1 (local-script)",
   };
+
   let body;
   if (bodyJson != null) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(bodyJson);
   }
 
-  const res = await fetch(url, { method, headers, body });
-  const text = await res.text();
+  let attempt = 0;
+  while (true) {
+    attempt++;
 
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`Failed to parse JSON from ${url}. HTTP ${res.status}. Body: ${text.slice(0, 400)}`);
-  }
+    const res = await fetch(url, { method, headers, body });
+    const text = await res.text();
 
-  if (!res.ok) {
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // If it's a transient error page/body, retry a bit
+      if (!res.ok && attempt <= maxRetries) {
+        const wait = Math.min(2000 * attempt, 10000);
+        console.warn(`[Scryfall] Non-JSON error body (HTTP ${res.status}). Retry in ${wait}ms...`);
+        await sleep(wait);
+        continue;
+      }
+      throw new Error(
+        `Failed to parse JSON from ${url}. HTTP ${res.status}. Body: ${text.slice(0, 400)}`
+      );
+    }
+
+    if (res.ok) return json;
+
+    const status = res.status;
     const details = json && json.details ? json.details : text.slice(0, 400);
-    throw new Error(`HTTP ${res.status} from ${url}: ${details}`);
-  }
 
-  return json;
+    // Retry on 429 and 5xx
+    if ((status === 429 || status >= 500) && attempt <= maxRetries) {
+      const retryAfter = Number(res.headers.get("retry-after") || "");
+      const wait = Number.isFinite(retryAfter)
+        ? retryAfter * 1000
+        : Math.min(1500 * attempt, 10000);
+      console.warn(`[Scryfall] HTTP ${status}. ${details} — retry in ${wait}ms (attempt ${attempt}/${maxRetries})`);
+      await sleep(wait);
+      continue;
+    }
+
+    throw new Error(`HTTP ${status} from ${url}: ${details}`);
+  }
 }
 
 function isCardObject(o) {
@@ -241,24 +220,33 @@ function isListOfCards(o) {
   return o && o.object === "list" && Array.isArray(o.data) && (o.data.length === 0 || o.data.every(isCardObject));
 }
 
-async function getDbClient() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error(`DATABASE_URL is not set (needed for upsert). Set --no-db to run without DB.`);
+/* ---------------- DB ---------------- */
+
+function getDbUrl(args) {
+  return args["db-url"] || process.env.DATABASE_URL || null;
+}
+
+async function getDbClient(args) {
+  const url = getDbUrl(args);
+  if (!url) {
+    throw new Error(`DATABASE_URL is not set (needed for upsert). Set --no-db to run without DB, or pass --db-url.`);
   }
   if (!pg) pg = require("pg");
-  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  const client = new pg.Client({ connectionString: url });
   await client.connect();
   return client;
 }
 
 function pickIndexColumns(card) {
-  // Keep this light: raw-first, but helpful for querying and joining later.
   return {
     id: card.id,
     oracle_id: card.oracle_id || null,
     lang: card.lang || "en",
     name: card.name || "",
-    set_code: card.set || null,
+    layout: card.layout || null,          // ✅ table column exists
+
+    set_code: card.set || null,           // Scryfall uses `set` for set code
+    set_id: card.set_id || null,          // ✅ uuid, links to scryfall_sets.id
     collector_number: card.collector_number || null,
     released_at: card.released_at || null,
 
@@ -271,24 +259,28 @@ function pickIndexColumns(card) {
   };
 }
 
+
 async function upsertCards(client, cards) {
-  // One-by-one upsert keeps logic simple; you can batch later if you want.
-  const sql = `
-    INSERT INTO scryfall_cards_raw (
-      id, oracle_id, lang, name, set_code, collector_number, released_at,
+  const sqlText = `
+    INSERT INTO public.scryfall_cards_raw (
+      id, oracle_id, lang, name, layout,
+      set_code, set_id, collector_number, released_at,
       arena_id, mtgo_id, mtgo_foil_id, tcgplayer_id, tcgplayer_etched_id, cardmarket_id,
       payload, fetched_at, updated_at
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,
-      $8,$9,$10,$11,$12,$13,
-      $14, NOW(), NOW()
+      $1,$2,$3,$4,$5,
+      $6,$7,$8,$9,
+      $10,$11,$12,$13,$14,$15,
+      $16, NOW(), NOW()
     )
     ON CONFLICT (id) DO UPDATE SET
       oracle_id = EXCLUDED.oracle_id,
       lang = EXCLUDED.lang,
       name = EXCLUDED.name,
+      layout = EXCLUDED.layout,
       set_code = EXCLUDED.set_code,
+      set_id = EXCLUDED.set_id,
       collector_number = EXCLUDED.collector_number,
       released_at = EXCLUDED.released_at,
       arena_id = EXCLUDED.arena_id,
@@ -304,29 +296,36 @@ async function upsertCards(client, cards) {
   let ok = 0;
   for (const card of cards) {
     const idx = pickIndexColumns(card);
+
     const params = [
       idx.id,
       idx.oracle_id,
       idx.lang,
       idx.name,
+      idx.layout,
+
       idx.set_code,
+      idx.set_id,
       idx.collector_number,
       idx.released_at,
+
       idx.arena_id,
       idx.mtgo_id,
       idx.mtgo_foil_id,
       idx.tcgplayer_id,
       idx.tcgplayer_etched_id,
       idx.cardmarket_id,
-      card, // pg will JSON-encode to jsonb
+
+      JSON.stringify(card), // jsonb
     ];
-    await client.query(sql, params);
+
+    await client.query(sqlText, params);
     ok++;
   }
   return ok;
 }
 
-async function handleCardOrList({ json, out, meta, noDb }) {
+async function handleCardOrList({ args, json, out, meta, noDb }) {
   const nowIso = new Date().toISOString();
 
   // optional output
@@ -335,7 +334,6 @@ async function handleCardOrList({ json, out, meta, noDb }) {
     if (isCardObject(json)) {
       writeJson(out, { fetched_at: nowIso, card: json });
     } else if (isListOfCards(json)) {
-      // JSONL for lists
       const s = fs.createWriteStream(out, { flags: "w" });
       for (const c of json.data) s.write(JSON.stringify(c) + "\n");
       s.end();
@@ -345,7 +343,7 @@ async function handleCardOrList({ json, out, meta, noDb }) {
   }
 
   if (meta) {
-    const metaObj = {
+    writeJson(meta, {
       fetched_at: nowIso,
       object: json && json.object ? json.object : null,
       has_more: json && typeof json.has_more === "boolean" ? json.has_more : null,
@@ -353,36 +351,26 @@ async function handleCardOrList({ json, out, meta, noDb }) {
       total_cards: json && typeof json.total_cards === "number" ? json.total_cards : null,
       warnings: Array.isArray(json && json.warnings) ? json.warnings : null,
       out: out || null,
-    };
-    writeJson(meta, metaObj);
+    });
   }
 
   // DB upsert
   if (!noDb) {
-    if (isCardObject(json)) {
-      const client = await getDbClient();
+    if (isCardObject(json) || isListOfCards(json)) {
+      const cards = isCardObject(json) ? [json] : json.data;
+      const client = await getDbClient(args);
       try {
-        const n = await upsertCards(client, [json]);
-        console.log(`🗄️  Upserted ${n} card`);
+        const n = await upsertCards(client, cards);
+        console.log(`🗄️  Upserted ${n} card${n === 1 ? "" : "s"}`);
       } finally {
         await client.end();
       }
-    } else if (isListOfCards(json)) {
-      const client = await getDbClient();
-      try {
-        const n = await upsertCards(client, json.data);
-        console.log(`🗄️  Upserted ${n} cards`);
-      } finally {
-        await client.end();
-      }
-    } else {
-      // not a card payload; do nothing
     }
   }
 }
 
 /* ============================
-   Commands (Sections 2–13)
+   Commands
    ============================ */
 
 async function cmdSearch(args) {
@@ -404,7 +392,6 @@ async function cmdSearch(args) {
   const meta = args.meta || null;
   const noDb = !!args["no-db"];
 
-  // If outputting list, use JSONL. If not provided, just DB-upsert.
   let pageUrl =
     `https://api.scryfall.com/cards/search?` +
     new URLSearchParams({
@@ -421,7 +408,7 @@ async function cmdSearch(args) {
   const warnings = [];
   let pages = 0;
   let total = null;
-  let streamed = 0;
+  let processed = 0;
 
   let outStream = null;
   if (out) {
@@ -431,9 +418,8 @@ async function cmdSearch(args) {
 
   const startedAt = new Date().toISOString();
 
-  // Keep one DB connection for the whole pagination run if using DB.
   let client = null;
-  if (!noDb) client = await getDbClient();
+  if (!noDb) client = await getDbClient(args);
 
   try {
     while (pageUrl) {
@@ -453,13 +439,13 @@ async function cmdSearch(args) {
 
       if (!noDb && client) {
         const n = await upsertCards(client, list.data);
-        streamed += n;
+        processed += n;
       } else {
-        streamed += list.data.length;
+        processed += list.data.length;
       }
 
       console.log(
-        `[Scryfall] search page ${pages}: +${list.data.length} (processed ${streamed}` +
+        `[Scryfall] search page ${pages}: +${list.data.length} (processed ${processed}` +
           (typeof total === "number" ? ` / total_cards ${total}` : "") +
           `)`
       );
@@ -485,7 +471,7 @@ async function cmdSearch(args) {
       started_at: startedAt,
       finished_at: finishedAt,
       pages_fetched: pages,
-      cards_processed: streamed,
+      cards_processed: processed,
       total_cards: total,
       warnings: warnings.length ? warnings : null,
       out: out || null,
@@ -513,7 +499,7 @@ async function cmdNamed(args) {
   const json = await fetchJson(url);
   if (!isCardObject(json)) throw new Error(`named returned non-card object:${json && json.object}`);
 
-  await handleCardOrList({ json, out, meta: null, noDb });
+  await handleCardOrList({ args, json, out, meta: null, noDb });
 }
 
 async function cmdAutocomplete(args) {
@@ -532,10 +518,8 @@ async function cmdAutocomplete(args) {
   const url = `https://api.scryfall.com/cards/autocomplete?${qs.toString()}`;
   const json = await fetchJson(url);
 
-  // Catalog object: { object:"catalog", data:[names...] }
   if (out) writeJson(out, { fetched_at: new Date().toISOString(), requested_url: url, catalog: json });
 
-  // Print useful output
   const names = Array.isArray(json && json.data) ? json.data : [];
   console.log(names.join("\n"));
 }
@@ -554,7 +538,7 @@ async function cmdRandom(args) {
   const json = await fetchJson(url);
   if (!isCardObject(json)) throw new Error(`random returned non-card object:${json && json.object}`);
 
-  await handleCardOrList({ json, out, meta: null, noDb });
+  await handleCardOrList({ args, json, out, meta: null, noDb });
 }
 
 async function cmdCollection(args) {
@@ -589,8 +573,7 @@ async function cmdCollection(args) {
 
   if (!isListOfCards(json)) throw new Error(`collection returned non-list-of-cards object:${json && json.object}`);
 
-  // Optional outputs + DB upsert
-  await handleCardOrList({ json, out, meta, noDb });
+  await handleCardOrList({ args, json, out, meta, noDb });
 }
 
 async function cmdGetSetNumber(args) {
@@ -609,7 +592,7 @@ async function cmdGetSetNumber(args) {
   const json = await fetchJson(url);
   if (!isCardObject(json)) throw new Error(`get-set-number returned non-card object:${json && json.object}`);
 
-  await handleCardOrList({ json, out, meta: null, noDb });
+  await handleCardOrList({ args, json, out, meta: null, noDb });
 }
 
 async function cmdGetByPath(args, pathPart) {
@@ -618,7 +601,7 @@ async function cmdGetByPath(args, pathPart) {
   const url = `https://api.scryfall.com/${pathPart}`;
   const json = await fetchJson(url);
   if (!isCardObject(json)) throw new Error(`returned non-card object:${json && json.object}`);
-  await handleCardOrList({ json, out, meta: null, noDb });
+  await handleCardOrList({ args, json, out, meta: null, noDb });
 }
 
 async function cmdGetMultiverse(args) {
@@ -659,6 +642,10 @@ async function cmdGetId(args) {
 
 (async function main() {
   const args = parseArgs(process.argv);
+
+  // IMPORTANT: apply --db-url before any command might connect
+  applyDbUrlArg(args);
+
   const cmd = args._[0];
 
   if (!cmd) {

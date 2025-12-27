@@ -63,6 +63,11 @@ const isPublicRoute = createRouteMatcher([
   "/sign-up(.*)",
   "/admin(.*)",
 
+   // ✅ allow SEO routes
+  "/sitemap.xml",
+  "/robots.txt",
+  "/sitemap(.*)",
+
   // Public APIs
   "/api/dev/(.*)",
   "/api/webhooks/stripe",

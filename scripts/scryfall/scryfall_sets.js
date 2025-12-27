@@ -5,22 +5,24 @@
  * Location: scripts/scryfall/scryfall_sets.js
  *
  * Commands:
- *   1) List all sets (GET /sets -> List object)
- *      node scripts/scryfall/scryfall_sets.js list --out ./out/sets.jsonl --meta ./out/sets.meta.json
+ *   list
+ *     node scripts/scryfall/scryfall_sets.js list --out ./out/sets.jsonl --meta ./out/sets.meta.json
  *
- *   2) Get set by code (GET /sets/:code)  (code OR mtgo_code)
- *      node scripts/scryfall/scryfall_sets.js get-code aer --out ./out/aer.set.json
+ *   get-code <code>
+ *     node scripts/scryfall/scryfall_sets.js get-code aer --out ./out/aer.set.json
  *
- *   3) Get set by tcgplayer id (GET /sets/tcgplayer/:id)
- *      node scripts/scryfall/scryfall_sets.js get-tcgplayer 1909 --out ./out/tcgplayer_1909.set.json
+ *   get-tcgplayer <id>
+ *     node scripts/scryfall/scryfall_sets.js get-tcgplayer 1909 --out ./out/tcgplayer_1909.set.json
  *
- *   4) Get set by scryfall UUID (GET /sets/:id)
- *      node scripts/scryfall/scryfall_sets.js get-id 2ec77b94-6d47-4891-a480-5d0b4e5c9372 --out ./out/uma.set.json
+ *   get-id <uuid>
+ *     node scripts/scryfall/scryfall_sets.js get-id 2ec77b94-6d47-4891-a480-5d0b4e5c9372 --out ./out/uma.set.json
+ *
+ *   sync-db
+ *     node scripts/scryfall/scryfall_sets.js sync-db --db-url "$DATABASE_URL"
  *
  * Notes:
- * - Uses JSONL for list endpoints (streaming, scalable).
- * - Records list-level warnings if present.
- * - Validates that returned objects are of type "set" (or "list" for list).
+ * - /sets is not paginated today (Scryfall returns all), but we keep the loop just in case.
+ * - sync-db upserts into public.scryfall_sets matching your current schema.
  */
 
 const fs = require("fs");
@@ -53,11 +55,13 @@ Commands:
     Options:
       --out  <path>   JSON output (default: ./out/<uuid>.set.json)
 
-Examples:
-  node scripts/scryfall/scryfall_sets.js list
-  node scripts/scryfall/scryfall_sets.js get-code mmq
-  node scripts/scryfall/scryfall_sets.js get-tcgplayer 1909
-  node scripts/scryfall/scryfall_sets.js get-id 2ec77b94-6d47-4891-a480-5d0b4e5c9372
+  sync-db
+    Upsert all sets into Postgres (public.scryfall_sets)
+    Required:
+      --db-url <url>  Postgres connection string (DATABASE_URL)
+
+    Optional:
+      --delay <ms>    Delay between requests (default: 0)
 `.trim());
 }
 
@@ -90,7 +94,7 @@ async function fetchJson(url) {
     method: "GET",
     headers: {
       Accept: "application/json",
-      "User-Agent": "scryfall-sets-script/1.0 (contact: local-script)",
+      "User-Agent": "legendary-scryfall-sets/1.0 (local-script)",
     },
   });
 
@@ -139,6 +143,65 @@ function validateSetObject(setObj) {
   }
 }
 
+/** Normalize Scryfall set to match your DB schema exactly. */
+function normalizeSetForDb(s) {
+  // Required NOT NULL in your table:
+  // id(uuid), code(text), name(text), set_type(text), card_count(int),
+  // digital(bool), foil_only(bool), nonfoil_only(bool),
+  // scryfall_uri(text), uri(text), search_uri(text), payload(jsonb)
+  //
+  // Many of these are always present from Scryfall. We still guard & coerce.
+  const id = s.id || null;
+  const code = s.code || null;
+  const name = s.name || null;
+  const set_type = s.set_type || null;
+
+  // card_count is required in your schema
+  const card_count =
+    typeof s.card_count === "number" && Number.isFinite(s.card_count)
+      ? s.card_count
+      : 0;
+
+  // required booleans with defaults in table, but we always send explicit values
+  const digital = !!s.digital;
+  const foil_only = !!s.foil_only;
+  const nonfoil_only = !!s.nonfoil_only;
+
+  const scryfall_uri = s.scryfall_uri || null;
+  const uri = s.uri || null;
+  const search_uri = s.search_uri || null;
+
+  return {
+    id,
+    code,
+    mtgo_code: s.mtgo_code || null,
+    arena_code: s.arena_code || null,
+    tcgplayer_id:
+      typeof s.tcgplayer_id === "number" && Number.isFinite(s.tcgplayer_id)
+        ? s.tcgplayer_id
+        : null,
+    name,
+    set_type,
+    released_at: s.released_at || null, // YYYY-MM-DD
+    block_code: s.block_code || null,
+    block: s.block || null,
+    parent_set_code: s.parent_set_code || null,
+    card_count,
+    printed_size:
+      typeof s.printed_size === "number" && Number.isFinite(s.printed_size)
+        ? s.printed_size
+        : null,
+    digital,
+    foil_only,
+    nonfoil_only,
+    scryfall_uri,
+    uri,
+    icon_svg_uri: s.icon_svg_uri || null,
+    search_uri,
+    payload: s,
+  };
+}
+
 async function listAllSetsToJsonl({ outPath, metaPath, delayMs }) {
   const url = "https://api.scryfall.com/sets";
   ensureDirForFile(outPath);
@@ -172,7 +235,6 @@ async function listAllSetsToJsonl({ outPath, metaPath, delayMs }) {
     if (Array.isArray(page.warnings)) warnings.push(...page.warnings);
 
     for (const setObj of page.data) {
-      // Each item here should be a Set object
       if (setObj && setObj.object !== "set") {
         outStream.end();
         throw new Error(
@@ -216,9 +278,7 @@ async function listAllSetsToJsonl({ outPath, metaPath, delayMs }) {
     pages_fetched: pages,
     sets_streamed: setsCount,
     warnings: warnings.length ? warnings : null,
-    outputs: {
-      jsonl: outPath,
-    },
+    outputs: { jsonl: outPath },
   };
 
   writeJson(metaPath, meta);
@@ -261,9 +321,7 @@ async function getSetByTcgplayerId(id, outPath) {
 }
 
 async function getSetById(uuid, outPath) {
-  if (!isUuidLike(uuid)) {
-    throw new Error(`get-id expects a UUID, got: ${uuid}`);
-  }
+  if (!isUuidLike(uuid)) throw new Error(`get-id expects a UUID, got: ${uuid}`);
   const url = `https://api.scryfall.com/sets/${encodeURIComponent(uuid)}`;
   const obj = await fetchJson(url);
   validateSetObject(obj);
@@ -277,7 +335,127 @@ async function getSetById(uuid, outPath) {
   console.log(`✅ Wrote ${outPath}`);
 }
 
-// --- main ---
+/* ---------------- sync-db ---------------- */
+
+async function syncDb({ dbUrl, delayMs }) {
+  if (!dbUrl) throw new Error(`sync-db requires --db-url`);
+
+  let Client;
+  try {
+    ({ Client } = require("pg"));
+  } catch {
+    throw new Error(`Missing dependency "pg". Install with: pnpm add -D pg (or npm i pg)`);
+  }
+
+  const client = new Client({ connectionString: dbUrl });
+  await client.connect();
+
+  try {
+    const url = "https://api.scryfall.com/sets";
+    const page = await fetchJson(url);
+
+    if (page.object !== "list" || !Array.isArray(page.data)) {
+      throw new Error(`Unexpected response from /sets: ${JSON.stringify({ object: page.object }, null, 2)}`);
+    }
+
+    const sets = page.data;
+    console.log(`[sync-db] fetched ${sets.length} sets from Scryfall`);
+
+    let upserted = 0;
+    let skipped = 0;
+
+    // Use a transaction for speed + safety
+    await client.query("BEGIN");
+
+    const upsertSql = `
+      INSERT INTO public.scryfall_sets (
+        id, code, mtgo_code, arena_code, tcgplayer_id, name, set_type, released_at,
+        block_code, block, parent_set_code, card_count, printed_size, digital, foil_only, nonfoil_only,
+        scryfall_uri, uri, icon_svg_uri, search_uri, payload, fetched_at, updated_at, created_at
+      ) VALUES (
+        $1::uuid, $2, $3, $4, $5::int, $6, $7, $8::date,
+        $9, $10, $11, $12::int, $13::int, $14::boolean, $15::boolean, $16::boolean,
+        $17, $18, $19, $20, $21::jsonb, now(), now(), now()
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        code            = EXCLUDED.code,
+        mtgo_code        = EXCLUDED.mtgo_code,
+        arena_code       = EXCLUDED.arena_code,
+        tcgplayer_id     = EXCLUDED.tcgplayer_id,
+        name             = EXCLUDED.name,
+        set_type         = EXCLUDED.set_type,
+        released_at      = EXCLUDED.released_at,
+        block_code       = EXCLUDED.block_code,
+        block            = EXCLUDED.block,
+        parent_set_code  = EXCLUDED.parent_set_code,
+        card_count       = EXCLUDED.card_count,
+        printed_size     = EXCLUDED.printed_size,
+        digital          = EXCLUDED.digital,
+        foil_only        = EXCLUDED.foil_only,
+        nonfoil_only     = EXCLUDED.nonfoil_only,
+        scryfall_uri     = EXCLUDED.scryfall_uri,
+        uri              = EXCLUDED.uri,
+        icon_svg_uri     = EXCLUDED.icon_svg_uri,
+        search_uri       = EXCLUDED.search_uri,
+        payload          = EXCLUDED.payload,
+        fetched_at       = now(),
+        updated_at       = now()
+    `;
+
+    for (const s of sets) {
+      const row = normalizeSetForDb(s);
+
+      // Hard guard: your table requires these.
+      if (!row.id || !row.code || !row.name || !row.set_type || !row.scryfall_uri || !row.uri || !row.search_uri) {
+        skipped++;
+        continue;
+      }
+
+      await client.query(upsertSql, [
+        row.id,
+        row.code,
+        row.mtgo_code,
+        row.arena_code,
+        row.tcgplayer_id,
+        row.name,
+        row.set_type,
+        row.released_at,
+        row.block_code,
+        row.block,
+        row.parent_set_code,
+        row.card_count,
+        row.printed_size,
+        row.digital,
+        row.foil_only,
+        row.nonfoil_only,
+        row.scryfall_uri,
+        row.uri,
+        row.icon_svg_uri,
+        row.search_uri,
+        JSON.stringify(row.payload),
+      ]);
+
+      upserted++;
+
+      if (delayMs > 0) await sleep(delayMs);
+      if (upserted % 200 === 0) console.log(`[sync-db] upserted ${upserted}/${sets.length}...`);
+    }
+
+    await client.query("COMMIT");
+
+    console.log(`✅ sync-db complete`);
+    console.log(`   upserted: ${upserted}`);
+    console.log(`   skipped:  ${skipped}`);
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch {}
+    throw err;
+  } finally {
+    await client.end();
+  }
+}
+
+/* ---------------- main ---------------- */
+
 (async function main() {
   const args = parseArgs(process.argv);
   const cmd = args._[0];
@@ -317,6 +495,13 @@ async function getSetById(uuid, outPath) {
       if (!uuid) throw new Error(`Missing <uuid> for get-id`);
       const outPath = args.out || `./out/${uuid}.set.json`;
       await getSetById(uuid, outPath);
+      return;
+    }
+
+    if (cmd === "sync-db") {
+      const dbUrl = args["db-url"] || args.dbUrl || process.env.DATABASE_URL;
+      const delayMs = Number.isFinite(Number(args.delay)) ? Number(args.delay) : 0;
+      await syncDb({ dbUrl, delayMs });
       return;
     }
 

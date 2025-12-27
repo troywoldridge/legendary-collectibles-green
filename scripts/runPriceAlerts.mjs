@@ -319,13 +319,15 @@ async function runOnce() {
 
     for (const alert of alerts) {
       const {
-        id: alertId,
-        user_id: userId,
-        game,
-        target_card_id: cardId,
-        rule_type: ruleType,
-        threshold,
-      } = alert;
+  id: alertId,
+  user_id: userId,
+  game,
+  target_card_id: cardId,
+  source,                 // <-- add this
+  rule_type: ruleType,
+  threshold,
+} = alert;
+
 
       try {
         const price = await getBestPrice(client, game, cardId);

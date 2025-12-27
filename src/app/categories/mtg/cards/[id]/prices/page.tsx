@@ -213,7 +213,9 @@ export default async function MtgCardPricesPage({
     cardIds: [core.id],
   });
 
-  const pc = pcSnapshots[core.id] ?? null;
+  const pcSnapshotsById = pcSnapshots ?? {};
+  const pc = pcSnapshotsById[core.id] ?? null;
+
 
   const pcTop = await getTopPricechartingCardPrices({
     category: "mtg",

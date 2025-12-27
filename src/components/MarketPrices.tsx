@@ -19,12 +19,6 @@ type CurrentPriceRow = {
   as_of_date: string;
 };
 
-/**
- * Resolve canonical market_item_id for a given (game, external_id).
- * Note: category maps to market_items.game.
- *
- * We prefer an eBay mapping if multiple exist, but will fallback to any.
- */
 async function resolveMarketItemId(category: string, cardId: string) {
   const res = await db.execute<{ id: string }>(sql`
     SELECT id
@@ -66,7 +60,6 @@ async function loadCurrentMarketPrice(
   return res.rows?.[0] ?? null;
 }
 
-
 export default async function MarketPrices({ category, cardId, display }: Props) {
   const marketItemId = await resolveMarketItemId(category, cardId);
 
@@ -94,17 +87,21 @@ export default async function MarketPrices({ category, cardId, display }: Props)
     );
   }
 
-  const native = (price.currency || "USD").toUpperCase() as "USD" | "EUR";
+  const native = (price.currency ?? "USD").toUpperCase() === "EUR" ? "EUR" : "USD";
 
-  const converted =
-    display === "NATIVE"
-      ? price.price_cents
-      : convert(price.price_cents, native, display) ?? price.price_cents;
+  // cents -> dollars
+  const nativeDollars = (price.price_cents ?? 0) / 100;
 
-  const formatted =
+  // convert() can return null; fallback to nativeDollars
+  const convertedDollars =
     display === "NATIVE"
-      ? formatMoney(price.price_cents, native)
-      : formatMoney(converted, display);
+      ? nativeDollars
+      : (convert(nativeDollars, native, display) ?? nativeDollars);
+
+  const shown =
+    display === "NATIVE"
+      ? formatMoney(nativeDollars, native)
+      : formatMoney(convertedDollars, display);
 
   return (
     <div className="rounded-xl border border-white/15 bg-white/5 p-5 text-white">
@@ -113,7 +110,7 @@ export default async function MarketPrices({ category, cardId, display }: Props)
         <div className="text-xs text-white/60">As of {price.as_of_date}</div>
       </div>
 
-      <div className="text-2xl font-bold">{formatted}</div>
+      <div className="text-2xl font-bold">{shown}</div>
 
       <div className="mt-2 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
         <Meta label="Source" value={price.source} />

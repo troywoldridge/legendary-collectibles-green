@@ -9,6 +9,8 @@ import { cfUrl, CF_ACCOUNT_HASH, type Variant } from "@/lib/cf";
 import { FEATURES } from "@/config/flags";
 import { SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
 
+const GA_ID = "G-X503QBJDZ7";
+
 const LOGO_CF_ID = "f7b75c90-dccb-4c37-e603-2bc749caaa00";
 
 /**
@@ -51,6 +53,33 @@ const logoCandidates = useMemo(() => {
 
   return (
   <header className="site-header-glass sticky top-0 z-50">
+
+<head>
+  {/* Remix Icons */}
+  <link
+    href="https://cdn.jsdelivr.net/npm/remixicon/fonts/remixicon.css"
+    rel="stylesheet"
+  />
+
+ <head>
+  <link
+    href="https://cdn.jsdelivr.net/npm/remixicon/fonts/remixicon.css"
+    rel="stylesheet"
+  />
+
+  <script async src={`https://www.googletagmanager.com/gtag/js?id=${GA_ID}`} />
+  <script
+    dangerouslySetInnerHTML={{
+      __html: `
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){dataLayer.push(arguments);}
+        gtag('js', new Date());
+        gtag('config', '${GA_ID}');
+      `,
+    }}
+  />
+</head>
+
     <div className="mx-auto max-w-[1400px] px-3 sm:px-4 lg:px-6">
       {/* Main header row */}
       <div className="flex items-center gap-4 px-3 py-2.5 sm:gap-6 sm:px-4 lg:px-6 lg:py-3">
@@ -180,8 +209,8 @@ const logoCandidates = useMemo(() => {
             </NavDropdown>
 
             <NavDropdown label="Magic: The Gathering">
-              <DropdownLink href="/categories/magic/sets">MTG Sets</DropdownLink>
-              <DropdownLink href="/categories/magic/cards">MTG Cards</DropdownLink>
+              <DropdownLink href="/categories/mtg/sets">MTG Sets</DropdownLink>
+              <DropdownLink href="/categories/mtg/cards">MTG Cards</DropdownLink>
             </NavDropdown>
 
             <NavLink href="/store" active={isActive("/store")}>Shop</NavLink>

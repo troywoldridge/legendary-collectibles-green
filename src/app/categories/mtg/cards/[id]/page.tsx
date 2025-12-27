@@ -1,6 +1,4 @@
-// src/app/categories/magic/cards/[id]/page.tsx
 /* eslint-disable @typescript-eslint/no-explicit-any */
-
 import "server-only";
 
 import Link from "next/link";
@@ -13,12 +11,9 @@ import { auth } from "@clerk/nextjs/server";
 import { getLatestEbaySnapshot } from "@/lib/ebay";
 import EbayFallbackPrice from "@/components/EbayFallbackPrice";
 
-/* Marketplace CTAs */
 import CardAmazonCTA from "@/components/CardAmazonCTA";
 import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
-
-/* New combined actions (collection + wishlist) */
 import CardActions from "@/components/collection/CardActions";
 
 export const runtime = "nodejs";
@@ -36,7 +31,6 @@ type CardRow = {
   type_line: string | null;
   rarity: string | null;
   set_code: string | null;
-  set_name: string | null;
   collector_number: string | null;
   oracle_id: string | null;
   layout: string | null;
@@ -62,13 +56,11 @@ type SetRow = {
 };
 
 /* ---------- Mana helpers ---------- */
-
 function tokenizeMana(cost?: string | null): string[] {
   if (!cost) return [];
   const m = cost.match(/\{[^}]+\}/g) || [];
   return m.map((t) => t.slice(1, -1));
 }
-
 function nl2p(s?: string | null) {
   if (!s) return null;
   return s.split(/\n/g).map((line, i) => (
@@ -77,7 +69,6 @@ function nl2p(s?: string | null) {
     </p>
   ));
 }
-
 function hexFor(sym: string) {
   switch (sym) {
     case "W":
@@ -98,7 +89,6 @@ function hexFor(sym: string) {
       return "#6b7280";
   }
 }
-
 function ManaSymbol({ t }: { t: string }) {
   const up = t.toUpperCase();
 
@@ -117,45 +107,13 @@ function ManaSymbol({ t }: { t: string }) {
     );
   }
 
-  if (/^\d+$/.test(up)) {
-    return (
-      <span className="mana mana--num" title={`Mana: ${up}`}>
-        {up}
-      </span>
-    );
-  }
+  if (/^\d+$/.test(up)) return <span className="mana mana--num" title={`Mana: ${up}`}>{up}</span>;
+  if (up === "X" || up === "Y" || up === "Z") return <span className="mana mana--var" title={`Mana: ${up}`}>{up}</span>;
+  if (up === "T") return <span className="mana mana--sym" title="Tap">↷</span>;
+  if (up === "Q") return <span className="mana mana--sym" title="Untap">↶</span>;
 
-  if (up === "X" || up === "Y" || up === "Z") {
-    return (
-      <span className="mana mana--var" title={`Mana: ${up}`}>
-        {up}
-      </span>
-    );
-  }
-
-  if (up === "T") {
-    return (
-      <span className="mana mana--sym" title="Tap">
-        ↷
-      </span>
-    );
-  }
-
-  if (up === "Q") {
-    return (
-      <span className="mana mana--sym" title="Untap">
-        ↶
-      </span>
-    );
-  }
-
-  return (
-    <span className={`mana mana--${up}`} title={`Mana: ${up}`}>
-      {up}
-    </span>
-  );
+  return <span className={`mana mana--${up}`} title={`Mana: ${up}`}>{up}</span>;
 }
-
 function ManaCost({ cost }: { cost: string | null }) {
   const toks = tokenizeMana(cost);
   if (!toks.length) return null;
@@ -169,18 +127,12 @@ function ManaCost({ cost }: { cost: string | null }) {
 }
 
 /* ---------- ID parsing helpers ---------- */
-
-/** SOI-1, SOI:1, SOI/1 → normalize to set + number */
 function parseSetAndNumber(raw: string): { set: string; num: string } | null {
-  const cleaned = raw
-    .replace(/[–—]/g, "-")
-    .replace(":", "-")
-    .replace("/", "-");
+  const cleaned = raw.replace(/[–—]/g, "-").replace(":", "-").replace("/", "-");
   const m = cleaned.match(/^([A-Za-z0-9]{2,10})-(.+)$/);
   if (!m) return null;
   return { set: m[1], num: decodeURIComponent(m[2]) };
 }
-
 function normalizeNumVariants(n: string) {
   const exact = n;
   const noZeros = n.replace(/^0+/, "");
@@ -188,8 +140,14 @@ function normalizeNumVariants(n: string) {
   return { exact, noZeros, lower };
 }
 
-/* ---------- Page ---------- */
+function money(s?: string | null) {
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n)) return s;
+  return n.toFixed(2);
+}
 
+/* ---------- Page ---------- */
 export default async function MtgCardDetailPage({
   params,
 }: {
@@ -197,36 +155,33 @@ export default async function MtgCardDetailPage({
 }) {
   const { id: rawId } = await params;
   const rawParam = decodeURIComponent(rawId ?? "").trim();
+  if (!rawParam) notFound();
 
   const { userId } = await auth();
   const canSave = !!userId;
 
-  if (!rawParam) {
-    console.error("[MTG detail] notFound: empty param");
-    notFound();
-  }
-
   const idNoDashes = rawParam.replace(/-/g, "");
 
-  // STEP 1: direct probe by id
+  // STEP 1: direct probe by uuid text
   const probe = await db.execute<{ id: string }>(sql`
     SELECT c.id::text AS id
-    FROM public.mtg_cards c
+    FROM public.scryfall_cards_raw c
     WHERE c.id::text = ${rawParam}
       OR REPLACE(c.id::text,'-','') = ${idNoDashes}
     LIMIT 1
   `);
   let foundId = probe.rows?.[0]?.id ?? null;
 
-  // STEP 1b: SET-NUM fallback (SOI-1 style)
+  // STEP 1b: SET-NUM fallback (SOI-1)
   if (!foundId) {
     const parsed = parseSetAndNumber(rawParam);
     if (parsed) {
       const set = parsed.set.toLowerCase();
       const { exact, noZeros, lower } = normalizeNumVariants(parsed.num);
+
       const p2 = await db.execute<{ id: string }>(sql`
         SELECT c.id::text AS id
-        FROM public.mtg_cards c
+        FROM public.scryfall_cards_raw c
         WHERE LOWER(c.set_code) = ${set}
           AND (
             c.collector_number::text = ${exact}
@@ -239,48 +194,51 @@ export default async function MtgCardDetailPage({
     }
   }
 
-  if (!foundId) {
-    try {
-      const meta = await db.execute(sql`SELECT current_database() AS db, current_user AS usr`);
-      console.error("[MTG detail] notFound: no foundId", {
-        rawParam,
-        db: (meta.rows?.[0] as any)?.db,
-        usr: (meta.rows?.[0] as any)?.usr,
-      });
-    } catch {
-      // ignore
-    }
-    notFound();
-  }
+  if (!foundId) notFound();
 
-  // STEP 2: load full card row
-  // NOTE: ebay_* now comes from market tables (NOT ebay_price_snapshots)
+  // STEP 2: load card row (FACE-SAFE fields + correct market tables)
   const rowRes = await db.execute<CardRow>(sql`
     SELECT
-      c.id,
+      c.id::text AS id,
       c.name,
-      c.printed_name,
-      c.mana_cost,
-      c.cmc::text AS cmc,
-      c.colors::text AS colors,
-      c.color_identity::text AS color_identity,
-      c.type_line,
-      c.rarity,
+
+      (c.payload->>'printed_name') AS printed_name,
+
+      -- Face-safe mana / rules text (many cards store these in card_faces[])
+      COALESCE(
+        c.payload->>'mana_cost',
+        c.payload->'card_faces'->0->>'mana_cost',
+        c.payload->'card_faces'->1->>'mana_cost'
+      ) AS mana_cost,
+
+      (c.payload->>'cmc') AS cmc,
+      (c.payload->'colors')::text AS colors,
+      (c.payload->'color_identity')::text AS color_identity,
+      (c.payload->>'type_line') AS type_line,
+      (c.payload->>'rarity') AS rarity,
+
       c.set_code,
-      c.set_name,
       c.collector_number,
       c.oracle_id::text AS oracle_id,
       c.layout,
-      c.oracle_text,
+
       COALESCE(
-        c.image_uris->>'normal',
-        c.image_uris->>'large',
-        c.image_uris->>'small',
-        (c.card_faces_raw->0->'image_uris'->>'normal'),
-        (c.card_faces_raw->0->'image_uris'->>'large'),
-        (c.card_faces_raw->0->'image_uris'->>'small')
+        c.payload->>'oracle_text',
+        c.payload->'card_faces'->0->>'oracle_text',
+        c.payload->'card_faces'->1->>'oracle_text'
+      ) AS oracle_text,
+
+      -- Face-safe image URL
+      COALESCE(
+        (c.payload->'image_uris'->>'normal'),
+        (c.payload->'image_uris'->>'large'),
+        (c.payload->'image_uris'->>'small'),
+        (c.payload->'card_faces'->0->'image_uris'->>'normal'),
+        (c.payload->'card_faces'->0->'image_uris'->>'large'),
+        (c.payload->'card_faces'->0->'image_uris'->>'small')
       ) AS image_url,
 
+      -- Prices: effective first, then scryfall_latest fallback
       COALESCE(e.effective_usd,        s.usd)::text        AS usd,
       COALESCE(e.effective_usd_foil,   s.usd_foil)::text   AS usd_foil,
       COALESCE(e.effective_usd_etched, s.usd_etched)::text AS usd_etched,
@@ -291,12 +249,14 @@ export default async function MtgCardDetailPage({
         TO_CHAR(s.updated_at,'YYYY-MM-DD')
       ) AS price_updated,
 
+      -- eBay price snapshot from your market tables (schema-correct)
       (
         SELECT mpc.price_cents
         FROM public.market_items mi
         JOIN public.market_prices_current mpc ON mpc.market_item_id = mi.id
-        WHERE mi.category = 'mtg'
-          AND mi.card_id = c.id::text
+        WHERE mi.game = 'mtg'
+          AND mi.canonical_source = 'scryfall'
+          AND mi.canonical_id = c.id::text
           AND mpc.source = 'ebay'
         LIMIT 1
       ) AS ebay_usd_cents,
@@ -305,38 +265,25 @@ export default async function MtgCardDetailPage({
         SELECT mei.external_url
         FROM public.market_items mi
         JOIN public.market_item_external_ids mei ON mei.market_item_id = mi.id
-        WHERE mi.category = 'mtg'
-          AND mi.card_id = c.id::text
-          AND mei.marketplace = 'ebay'
-        ORDER BY mei.updated_at DESC NULLS LAST, mei.created_at DESC NULLS LAST
+        WHERE mi.game = 'mtg'
+          AND mi.canonical_source = 'scryfall'
+          AND mi.canonical_id = c.id::text
+          AND mei.source = 'ebay'
+        ORDER BY mei.updated_at DESC NULLS LAST
         LIMIT 1
       ) AS ebay_url
 
-    FROM public.mtg_cards c
-    LEFT JOIN public.mtg_prices_effective e ON e.scryfall_id = c.id
-    LEFT JOIN public.mtg_card_prices     s ON s.scryfall_id  = c.id
+    FROM public.scryfall_cards_raw c
+    LEFT JOIN public.mtg_prices_effective e       ON e.scryfall_id = c.id
+    LEFT JOIN public.mtg_prices_scryfall_latest s ON s.scryfall_id = c.id
     WHERE c.id::text = ${foundId}
     LIMIT 1
   `);
 
   const card = rowRes.rows?.[0] ?? null;
+  if (!card) notFound();
 
-  if (!card) {
-    try {
-      const meta = await db.execute(sql`SELECT current_database() AS db, current_user AS usr`);
-      console.error("[MTG detail] notFound: no card row", {
-        rawParam,
-        foundId,
-        db: (meta.rows?.[0] as any)?.db,
-        usr: (meta.rows?.[0] as any)?.usr,
-      });
-    } catch {
-      // ignore
-    }
-    notFound();
-  }
-
-  // Optional set info
+  // Set info
   const setRow =
     card.set_code
       ? (
@@ -346,57 +293,38 @@ export default async function MtgCardDetailPage({
               set_type,
               block,
               COALESCE(TO_CHAR(released_at,'YYYY-MM-DD'), NULL) AS released_at
-            FROM public.mtg_sets
+            FROM public.scryfall_sets
             WHERE LOWER(code) = LOWER(${card.set_code})
             LIMIT 1
           `)
         ).rows?.[0] ?? null
       : null;
 
-  // Fire-and-forget latest eBay snapshot (now reads market_* tables)
+  // kick off ebay snapshot updater (non-fatal)
   try {
-    await getLatestEbaySnapshot({
-      category: "mtg",
-      cardId: card.id,
-      segment: "all",
-    });
+    await getLatestEbaySnapshot({ category: "mtg", cardId: card.id, segment: "all" });
   } catch (err) {
     console.error("[ebay snapshot failed]", err);
   }
 
   const hero = (card.image_url ?? "").replace(/^http:\/\//, "https://") || null;
-
-  const setHref = card.set_code
-    ? `/categories/magic/sets/${encodeURIComponent(card.set_code)}`
-    : null;
+  const setHref = card.set_code ? `/categories/mtg/sets/${encodeURIComponent(card.set_code)}` : null;
 
   const price = {
-    usd: card.usd,
-    usd_foil: card.usd_foil,
-    usd_etched: card.usd_etched,
-    eur: card.eur,
+    usd: money(card.usd),
+    usd_foil: money(card.usd_foil),
+    usd_etched: money(card.usd_etched),
+    eur: money(card.eur),
     tix: card.tix,
     updated_at: card.price_updated,
   };
 
-  const hasPrimaryPrice =
-    !!price.usd ||
-    !!price.usd_foil ||
-    !!price.usd_etched ||
-    !!price.eur ||
-    !!price.tix;
+  const hasPrimaryPrice = !!price.usd || !!price.usd_foil || !!price.usd_etched || !!price.eur || !!price.tix;
 
-  // market table values
-  const serverEbayPrice =
-    typeof card.ebay_usd_cents === "number" ? card.ebay_usd_cents / 100 : null;
+  const serverEbayPrice = typeof card.ebay_usd_cents === "number" ? card.ebay_usd_cents / 100 : null;
   const serverEbayUrl = card.ebay_url || null;
 
-  const ebayQ = [
-    card.name ?? "",
-    card.set_code || setRow?.name || "",
-    card.collector_number || "",
-    "MTG",
-  ]
+  const ebayQ = [card.name ?? "", card.set_code || setRow?.name || "", card.collector_number || "", "MTG"]
     .filter(Boolean)
     .join(" ");
 
@@ -409,7 +337,7 @@ export default async function MtgCardDetailPage({
   return (
     <section className="space-y-8">
       <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
-        {/* Left: card image */}
+        {/* Image */}
         <div className="md:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="relative mx-auto w-full max-w-md" style={{ aspectRatio: "3 / 4" }}>
@@ -424,15 +352,13 @@ export default async function MtgCardDetailPage({
                   priority
                 />
               ) : (
-                <div className="absolute inset-0 grid place-items-center text-white/70">
-                  No image
-                </div>
+                <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
               )}
             </div>
           </div>
         </div>
 
-        {/* Right: meta + actions + CTAs */}
+        {/* Details */}
         <div className="md:col-span-7 space-y-4">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -441,7 +367,7 @@ export default async function MtgCardDetailPage({
                   <>
                     Set:{" "}
                     <Link href={setHref} className="text-sky-300 hover:underline">
-                      {setRow?.name ?? card.set_name ?? card.set_code}
+                      {setRow?.name ?? card.set_code}
                     </Link>
                   </>
                 ) : null}
@@ -471,7 +397,7 @@ export default async function MtgCardDetailPage({
                 game="mtg"
                 cardId={card.id}
                 cardName={card.name ?? undefined}
-                setName={setRow?.name ?? card.set_name ?? undefined}
+                setName={setRow?.name ?? undefined}
                 imageUrl={hero ?? undefined}
                 canSave={canSave}
               />
@@ -484,80 +410,68 @@ export default async function MtgCardDetailPage({
                   name: card.name ?? "",
                   number: card.collector_number ?? undefined,
                   set_code: card.set_code ?? undefined,
-                  set_name: setRow?.name ?? card.set_name ?? undefined,
+                  set_name: setRow?.name ?? undefined,
                 }}
                 game="Magic: The Gathering"
               />
-
               <CardAmazonCTA url={amazonLink?.url} label={card.name} />
             </div>
           </div>
 
-          {/* Prices card */}
-          {hasPrimaryPrice && (
-            <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-              <div className="mb-2 flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-white">Market Prices</h2>
-                <div className="text-xs text-white/60">Updated {price.updated_at ?? "—"}</div>
-              </div>
+          {/* Market Prices: always render so the page never looks empty */}
+          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-white">
+                Market Prices{!hasPrimaryPrice && serverEbayPrice != null ? " (Scryfall missing — eBay available)" : ""}
+              </h2>
+              <div className="text-xs text-white/60">Updated {price.updated_at ?? "—"}</div>
+            </div>
 
-              <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-                <div>
-                  <div className="text-sm text-white/70">USD</div>
-                  <div className="text-lg font-semibold text-white">{price.usd ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-sm text-white/70">USD Foil</div>
-                  <div className="text-lg font-semibold text-white">{price.usd_foil ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-sm text-white/70">USD Etched</div>
-                  <div className="text-lg font-semibold text-white">{price.usd_etched ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-sm text-white/70">EUR</div>
-                  <div className="text-lg font-semibold text-white">{price.eur ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-sm text-white/70">TIX</div>
-                  <div className="text-lg font-semibold text-white">{price.tix ?? "—"}</div>
-                </div>
-              </div>
-            </section>
-          )}
+            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+              <div><div className="text-sm text-white/70">USD</div><div className="text-lg font-semibold text-white">{price.usd ?? "—"}</div></div>
+              <div><div className="text-sm text-white/70">USD Foil</div><div className="text-lg font-semibold text-white">{price.usd_foil ?? "—"}</div></div>
+              <div><div className="text-sm text-white/70">USD Etched</div><div className="text-lg font-semibold text-white">{price.usd_etched ?? "—"}</div></div>
+              <div><div className="text-sm text-white/70">EUR</div><div className="text-lg font-semibold text-white">{price.eur ?? "—"}</div></div>
+              <div><div className="text-sm text-white/70">TIX</div><div className="text-lg font-semibold text-white">{price.tix ?? "—"}</div></div>
+            </div>
 
-          {/* eBay snapshot fallback if no primary price */}
-          {!hasPrimaryPrice && serverEbayPrice != null && (
-            <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-              <div className="mb-2 flex items-center justify_between">
-                <h2 className="text-lg font-semibold text-white">Market Prices (eBay)</h2>
-                <div className="text-xs text-white/60">Latest market snapshot</div>
-              </div>
-
-              <div className="text-lg font-semibold text-white">
-                ${serverEbayPrice.toFixed(2)}
+            {!hasPrimaryPrice && serverEbayPrice != null ? (
+              <div className="mt-3 text-sm text-white/80">
+                eBay snapshot: <span className="font-semibold text-white">${serverEbayPrice.toFixed(2)}</span>
                 {serverEbayUrl ? (
                   <Link href={serverEbayUrl} className="ml-2 text-sky-300 underline" target="_blank">
                     View on eBay
                   </Link>
                 ) : null}
               </div>
-            </section>
-          )}
+            ) : null}
+          </section>
 
-          {/* Client-side eBay fallback (only when missing primary price) */}
-          <EbayFallbackPrice
-            cardId={card.id}
-            q={ebayQ}
-            showWhen="missing"
-            hasPrimaryPrice={hasPrimaryPrice}
-          />
+          <EbayFallbackPrice cardId={card.id} q={ebayQ} showWhen="missing" hasPrimaryPrice={hasPrimaryPrice} />
 
-          {/* Rules text */}
-          {card.oracle_text && (
+          {/* Always show a details block */}
+          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+            <h2 className="text-lg font-semibold text-white">Card Details</h2>
+            <div className="mt-2 grid gap-2 text-sm text-white/85 sm:grid-cols-2">
+              <div><span className="text-white/60">Layout:</span> {card.layout ?? "—"}</div>
+              <div><span className="text-white/60">Oracle ID:</span> {card.oracle_id ?? "—"}</div>
+              <div><span className="text-white/60">Set Code:</span> {card.set_code ?? "—"}</div>
+              <div><span className="text-white/60">Collector #:</span> {card.collector_number ?? "—"}</div>
+            </div>
+          </section>
+
+          {/* Rules text (face-safe now, so it will appear for most cards) */}
+          {card.oracle_text ? (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
               <h2 className="text-lg font-semibold text-white">Rules Text</h2>
               <div className="mt-2 text-sm text-white/85">{nl2p(card.oracle_text)}</div>
+            </section>
+          ) : (
+            <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+              <h2 className="text-lg font-semibold text-white">Rules Text</h2>
+              <div className="mt-2 text-sm text-white/60">
+                No rules text available for this item (common for art cards, tokens, or special prints).
+              </div>
             </section>
           )}
         </div>

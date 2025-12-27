@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { adminFetch } from "@/components/admin/adminFetch";
+import ImageDropzone from "./ImageDropzone";
+import ImageGrid from "./ImageGrid";
 
 type Item = {
   id: string;
@@ -28,13 +30,13 @@ export default function ItemEditor({ id }: { id: string }) {
   const [item, setItem] = useState<Item | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [imgTick, setImgTick] = useState(0);
 
   const [title, setTitle] = useState("");
   const [game, setGame] = useState("other");
   const [condition, setCondition] = useState("");
   const [price, setPrice] = useState("0.00");
   const [cost, setCost] = useState("0.00");
-  const [imageUrls, setImageUrls] = useState("");
 
   async function load() {
     setMsg("");
@@ -79,25 +81,6 @@ export default function ItemEditor({ id }: { id: string }) {
       const data = text ? JSON.parse(text) : null;
       if (!res.ok) throw new Error(data?.error || `Save failed (HTTP ${res.status})`);
 
-      // optional images add
-      const urls = imageUrls
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      if (urls.length) {
-        const res2 = await adminFetch(`/api/admin/inventory/items/${id}/images`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ urls }),
-        });
-        const t2 = await res2.text();
-        const d2 = t2 ? JSON.parse(t2) : null;
-        if (!res2.ok) throw new Error(d2?.error || `Images failed (HTTP ${res2.status})`);
-
-        setImageUrls("");
-      }
-
       setMsg("Saved ✅");
       await load();
     } catch (e: any) {
@@ -111,7 +94,9 @@ export default function ItemEditor({ id }: { id: string }) {
     setBusy(true);
     setMsg("");
     try {
-      const res = await adminFetch(`/api/admin/inventory/items/${id}/publish`, { method: "POST" });
+      const res = await adminFetch(`/api/admin/inventory/items/${id}/publish`, {
+        method: "POST",
+      });
       const text = await res.text();
       const data = text ? JSON.parse(text) : null;
       if (!res.ok) throw new Error(data?.error || `Publish failed (HTTP ${res.status})`);
@@ -128,60 +113,67 @@ export default function ItemEditor({ id }: { id: string }) {
   if (!item) return <div>Loading… {msg ? `(${msg})` : ""}</div>;
 
   return (
-    <div style={{ display: "grid", gap: 12, maxWidth: 900 }}>
+    <div style={{ display: "grid", gap: 20, maxWidth: 900 }}>
       <div style={{ opacity: 0.85 }}>
-        <b>SKU:</b> {item.sku || "(none)"} &nbsp;•&nbsp; <b>On hand:</b> {item.on_hand} &nbsp;•&nbsp;{" "}
+        <b>SKU:</b> {item.sku || "(none)"} &nbsp;•&nbsp;
+        <b>On hand:</b> {item.on_hand} &nbsp;•&nbsp;
         <b>Status:</b> {item.status}
       </div>
 
-      <label>
-        <div style={{ opacity: 0.85, marginBottom: 6 }}>Title</div>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ padding: "10px 12px", width: "100%" }} />
-      </label>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+      {/* Details */}
+      <section style={{ display: "grid", gap: 12 }}>
         <label>
-          <div style={{ opacity: 0.85, marginBottom: 6 }}>Game</div>
-          <select value={game} onChange={(e) => setGame(e.target.value)} style={{ padding: "10px 12px", width: "100%" }}>
-            <option value="pokemon">pokemon</option>
-            <option value="yugioh">yugioh</option>
-            <option value="mtg">mtg</option>
-            <option value="sports">sports</option>
-            <option value="funko">funko</option>
-            <option value="sealed">sealed</option>
-            <option value="videogames">videogames</option>
-            <option value="supplies">supplies</option>
-            <option value="other">other</option>
-          </select>
+          <div style={{ opacity: 0.85, marginBottom: 6 }}>Title</div>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ padding: "10px 12px", width: "100%" }} />
         </label>
 
-        <label>
-          <div style={{ opacity: 0.85, marginBottom: 6 }}>Condition</div>
-          <input value={condition} onChange={(e) => setCondition(e.target.value)} style={{ padding: "10px 12px", width: "100%" }} />
-        </label>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          <label>
+            <div style={{ opacity: 0.85, marginBottom: 6 }}>Game</div>
+            <select value={game} onChange={(e) => setGame(e.target.value)} style={{ padding: "10px 12px", width: "100%" }}>
+              <option value="pokemon">pokemon</option>
+              <option value="yugioh">yugioh</option>
+              <option value="mtg">mtg</option>
+              <option value="sports">sports</option>
+              <option value="funko">funko</option>
+              <option value="sealed">sealed</option>
+              <option value="videogames">videogames</option>
+              <option value="supplies">supplies</option>
+              <option value="other">other</option>
+            </select>
+          </label>
 
-        <label>
-          <div style={{ opacity: 0.85, marginBottom: 6 }}>Price ($)</div>
-          <input value={price} onChange={(e) => setPrice(e.target.value)} style={{ padding: "10px 12px", width: "100%" }} />
-        </label>
-      </div>
+          <label>
+            <div style={{ opacity: 0.85, marginBottom: 6 }}>Condition</div>
+            <input value={condition} onChange={(e) => setCondition(e.target.value)} style={{ padding: "10px 12px", width: "100%" }} />
+          </label>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <label>
+            <div style={{ opacity: 0.85, marginBottom: 6 }}>Price ($)</div>
+            <input value={price} onChange={(e) => setPrice(e.target.value)} style={{ padding: "10px 12px", width: "100%" }} />
+          </label>
+        </div>
+
         <label>
           <div style={{ opacity: 0.85, marginBottom: 6 }}>Cost basis ($)</div>
           <input value={cost} onChange={(e) => setCost(e.target.value)} style={{ padding: "10px 12px", width: "100%" }} />
         </label>
+      </section>
 
-        <label>
-          <div style={{ opacity: 0.85, marginBottom: 6 }}>Add image URLs (comma separated)</div>
-          <input
-            value={imageUrls}
-            onChange={(e) => setImageUrls(e.target.value)}
-            placeholder="https://...jpg, https://...png"
-            style={{ padding: "10px 12px", width: "100%" }}
-          />
-        </label>
-      </div>
+      {/* Images */}
+      <section style={{ display: "grid", gap: 12 }}>
+        <h3 style={{ fontSize: 18, fontWeight: 800 }}>Images</h3>
+
+        <ImageDropzone
+          itemId={item.id}
+          onUploaded={() => setImgTick((n) => n + 1)}
+        />
+
+        <ImageGrid
+          itemId={item.id}
+          refreshKey={imgTick}
+        />
+      </section>
 
       {msg ? <div style={{ opacity: 0.9 }}>{msg}</div> : null}
 

@@ -16,6 +16,9 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 // Background (Cloudflare Images)
 const HERO_BG_CF_ID = "a4ced899-6410-44b5-df67-11761a85bc00";
 
+// Google Analytics
+const GA_ID = "G-X503QBJDZ7";
+
 // ----- Metadata -----
 const title = `${site.name} — Buy Pokémon, Yu-Gi-Oh!, MTG & Funko Pop`;
 const template = "%s • " + (site.shortName ?? site.name);
@@ -126,6 +129,19 @@ export default function RootLayout({
             href="https://cdn.jsdelivr.net/npm/remixicon/fonts/remixicon.css"
             rel="stylesheet"
           />
+
+          {/* Google tag (gtag.js) — MUST be plain script so Google can detect it */}
+          <script async src={`https://www.googletagmanager.com/gtag/js?id=${GA_ID}`} />
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `
+                window.dataLayer = window.dataLayer || [];
+                function gtag(){dataLayer.push(arguments);}
+                gtag('js', new Date());
+                gtag('config', '${GA_ID}');
+              `,
+            }}
+          />
         </head>
 
         <body className="min-h-screen bg-neutral-50 text-neutral-900 antialiased">
@@ -156,12 +172,10 @@ export default function RootLayout({
           {/* Structured Data */}
           <script
             type="application/ld+json"
-             
             dangerouslySetInnerHTML={{ __html: JSON.stringify(ldOrg) }}
           />
           <script
             type="application/ld+json"
-             
             dangerouslySetInnerHTML={{ __html: JSON.stringify(ldSite) }}
           />
         </body>

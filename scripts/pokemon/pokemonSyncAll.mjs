@@ -1,30 +1,28 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 /**
- * pokemonSyncAll.mjs — tailored to your schema
+ * pokemonSyncAll.mjs — FAST + RESUMABLE + DB LOADER (WORKING)
  *
- * Pulls:
+ * Fetches:
  *  - Meta: types, subtypes, supertypes, rarities
- *  - Sets (with legalities)
- *  - Cards (with all nested fields)
+ *  - Sets (JSONL)
+ *  - Cards (JSONL)
  *
- * Writes JSONL snapshots to ./data/pokemontcg/
- * Optionally loads into Postgres using your provided schema.
+ * Writes snapshots to:
+ *   <project-root>/data/pokemontcg/
  *
- * ENV:
- *   POKEMON_TCG_API_KEY=...           # recommended, improves rate limits
- *   PG_DSN=postgres://... OR DATABASE_URL=postgres://...
- *   LOAD_DB=true                      # enable DB writes
- *   LOAD_HISTORY=true                 # also write to *_history tables (optional)
+ * Then optionally loads into Postgres (your schema):
+ *   LOAD_DB=true
+ *   PG_DSN=postgres://...  (or DATABASE_URL)
  *
- * NEW FLAGS:
- *   --db-only      # skips ALL API fetching, loads DB from existing JSONL files
- *   --skip-fetch   # same as --db-only (alias)
+ * FLAGS:
+ *   --db-only / --skip-fetch   Load DB only (use existing JSON/JSONL files)
+ *   --reset-checkpoint         Start fetching from page 1 again
  *
- * USAGE:
- *   node scripts/pokemonSyncAll.mjs
- *   LOAD_DB=true PG_DSN="postgres://user:pass@host/db" node scripts/pokemonSyncAll.mjs
- *   LOAD_DB=true PG_DSN="$DATABASE_URL" node scripts/pokemonSyncAll.mjs --db-only
+ * Optional tuning ENV:
+ *   PAGE_SIZE=250              (default 250)
+ *   PAGE_DELAY_MS=250          (default 250)
+ *   MAX_RETRIES=10             (default 10)
  */
 
 import fs from "node:fs";
@@ -33,6 +31,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+/* ----------------------------- dotenv ----------------------------- */
 let dotenvLoaded = false;
 try {
   const { config } = await import("dotenv");
@@ -40,12 +39,10 @@ try {
   dotenvLoaded = true;
 } catch {}
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 /* ----------------------------- CLI FLAGS ----------------------------- */
 const DB_ONLY = process.argv.includes("--db-only") || process.argv.includes("--skip-fetch");
 const SKIP_FETCH = DB_ONLY;
+const RESET_CHECKPOINT = process.argv.includes("--reset-checkpoint");
 
 /* ----------------------------- CONFIG ----------------------------- */
 const API_BASE = "https://api.pokemontcg.io/v2";
@@ -54,10 +51,14 @@ const LOAD_DB = String(process.env.LOAD_DB || "").toLowerCase() === "true";
 const LOAD_HISTORY = String(process.env.LOAD_HISTORY || "").toLowerCase() === "true";
 const PG_DSN = process.env.PG_DSN || process.env.DATABASE_URL || "";
 
-const OUT_DIR = path.resolve(__dirname, "..", "data", "pokemontcg");
-const CHECKPOINT = path.join(OUT_DIR, ".checkpoint.json"); // (not used yet; reserved)
-const MAX_PAGE_SIZE = 100;
-const MAX_RETRIES = 8;
+// IMPORTANT: write under project root
+const PROJECT_ROOT = process.cwd();
+const OUT_DIR = path.resolve(PROJECT_ROOT, "data", "pokemontcg");
+const CHECKPOINT_FILE = path.join(OUT_DIR, ".checkpoint.json");
+
+const MAX_PAGE_SIZE = Number(process.env.PAGE_SIZE || 250);
+const PAGE_DELAY_MS = Number(process.env.PAGE_DELAY_MS || 250);
+const MAX_RETRIES = Number(process.env.MAX_RETRIES || 10);
 
 const HEADERS = {
   Accept: "application/json",
@@ -66,20 +67,47 @@ const HEADERS = {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const backoff = (attempt) => {
-  const base = Math.min(32000, 500 * Math.pow(2, attempt));
-  const jitter = Math.floor(Math.random() * 300);
+  const base = Math.min(45000, 800 * Math.pow(2, attempt));
+  const jitter = Math.floor(Math.random() * 500);
   return base + jitter;
 };
+
+async function ensureDir(p) {
+  await fsp.mkdir(p, { recursive: true });
+}
+
+/* ----------------------------- CHECKPOINT ----------------------------- */
+
+async function readCheckpoint() {
+  try {
+    const txt = await fsp.readFile(CHECKPOINT_FILE, "utf8");
+    return JSON.parse(txt);
+  } catch {
+    return {};
+  }
+}
+
+async function writeCheckpoint(cp) {
+  await fsp.writeFile(CHECKPOINT_FILE, JSON.stringify(cp, null, 2), "utf8");
+}
+
+/* ----------------------------- FETCH ----------------------------- */
 
 async function fetchWithRetry(url, opts = {}, label = "") {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(url, { ...opts, headers: { ...HEADERS, ...(opts.headers || {}) } });
+      const res = await fetch(url, {
+        ...opts,
+        headers: { ...HEADERS, ...(opts.headers || {}) },
+      });
 
       if (res.status === 429 || res.status >= 500) {
         const txt = await res.text().catch(() => "");
-        if (attempt === MAX_RETRIES) throw new Error(`HTTP ${res.status} after ${MAX_RETRIES} retries: ${txt}`);
-        const wait = backoff(attempt);
+        if (attempt === MAX_RETRIES) {
+          throw new Error(`HTTP ${res.status} after ${MAX_RETRIES} retries: ${txt}`);
+        }
+        const ra = Number(res.headers.get("retry-after") || "");
+        const wait = Number.isFinite(ra) ? ra * 1000 : backoff(attempt);
         console.warn(`[retry] ${label} -> ${res.status}. Waiting ${wait}ms…`);
         await sleep(wait);
         continue;
@@ -90,26 +118,27 @@ async function fetchWithRetry(url, opts = {}, label = "") {
         throw new Error(`HTTP ${res.status} ${res.statusText}: ${txt}`);
       }
 
-      return await res.json();
+      const json = await res.json();
+
+      // best-effort throttle if headers exist
+      const remaining = Number(res.headers.get("x-ratelimit-remaining") || "");
+      if (Number.isFinite(remaining) && remaining <= 2) {
+        console.warn(`[rate] low remaining (${remaining}). Sleeping 2000ms…`);
+        await sleep(2000);
+      }
+
+      return json;
     } catch (err) {
       if (attempt === MAX_RETRIES) throw err;
       const wait = backoff(attempt);
-      console.warn(`[retry] ${label} network error: ${err?.message || err}. Waiting ${wait}ms…`);
+      console.warn(`[retry] ${label} error: ${err?.message || err}. Waiting ${wait}ms…`);
       await sleep(wait);
     }
   }
   throw new Error("unreachable");
 }
 
-async function ensureDir(p) {
-  await fsp.mkdir(p, { recursive: true });
-}
-
-async function appendJSONL(filePath, items) {
-  if (!items?.length) return;
-  const lines = items.map((o) => JSON.stringify(o)).join("\n") + "\n";
-  await fsp.appendFile(filePath, lines, "utf8");
-}
+/* ----------------------------- META ----------------------------- */
 
 async function fetchMetaLists() {
   const [types, subtypes, supertypes, rarities] = await Promise.all([
@@ -126,28 +155,71 @@ async function fetchMetaLists() {
   };
 }
 
+/**
+ * FAST + RESUMABLE pager:
+ * - Streams JSONL via one WriteStream
+ * - Stores checkpoint after each page
+ */
 async function fetchPaged(endpoint, outFile) {
-  const firstUrl = `${API_BASE}/${endpoint}?page=1&pageSize=${MAX_PAGE_SIZE}`;
-  const first = await fetchWithRetry(firstUrl, {}, `${endpoint} initial`);
-  const totalCount = first.totalCount ?? first.total ?? first.count ?? (first.data ? first.data.length : 0);
+  const cpAll = await readCheckpoint();
+  const cp = cpAll?.[endpoint] || {};
+  const startPage = RESET_CHECKPOINT ? 1 : Number(cp.page || 1);
 
-  await appendJSONL(outFile, first.data || []);
+  const shouldAppend = !RESET_CHECKPOINT && startPage > 1 && fs.existsSync(outFile);
+  const stream = fs.createWriteStream(outFile, { flags: shouldAppend ? "a" : "w" });
 
-  let wrote = first.data?.length || 0;
-  const totalPages = totalCount ? Math.ceil(totalCount / MAX_PAGE_SIZE) : 1;
-  console.log(`[${endpoint}] page 1/${totalPages} (+${wrote})`);
+  try {
+    const firstUrl = `${API_BASE}/${endpoint}?page=${startPage}&pageSize=${MAX_PAGE_SIZE}`;
+    const first = await fetchWithRetry(firstUrl, {}, `${endpoint} page ${startPage}`);
 
-  if (totalPages === 1) return;
+    const totalCount =
+      first.totalCount ?? first.total ?? first.count ?? (first.data ? first.data.length : 0);
+    const totalPages = totalCount ? Math.ceil(totalCount / MAX_PAGE_SIZE) : startPage;
 
-  for (let page = 2; page <= totalPages; page++) {
-    const url = `${API_BASE}/${endpoint}?page=${page}&pageSize=${MAX_PAGE_SIZE}`;
-    const json = await fetchWithRetry(url, {}, `${endpoint} page ${page}`);
-    const batch = json.data || [];
-    await appendJSONL(outFile, batch);
-    wrote += batch.length;
-    console.log(`[${endpoint}] page ${page}/${totalPages} (+${batch.length}) total ${wrote}/${totalCount}`);
-    await sleep(150);
-    if (batch.length === 0) break;
+    const writeBatch = (batch) => {
+      if (!batch?.length) return 0;
+      for (const o of batch) stream.write(JSON.stringify(o) + "\n");
+      return batch.length;
+    };
+
+    let wrote = 0;
+
+    wrote += writeBatch(first.data || []);
+    console.log(`[${endpoint}] page ${startPage}/${totalPages} (+${first.data?.length || 0})`);
+
+    cpAll[endpoint] = {
+      page: startPage + 1,
+      totalPages,
+      totalCount,
+      pageSize: MAX_PAGE_SIZE,
+      updatedAt: new Date().toISOString(),
+    };
+    await writeCheckpoint(cpAll);
+
+    if (totalPages <= startPage) return;
+
+    for (let page = startPage + 1; page <= totalPages; page++) {
+      const url = `${API_BASE}/${endpoint}?page=${page}&pageSize=${MAX_PAGE_SIZE}`;
+      const json = await fetchWithRetry(url, {}, `${endpoint} page ${page}`);
+      const batch = json.data || [];
+      wrote += writeBatch(batch);
+
+      console.log(`[${endpoint}] page ${page}/${totalPages} (+${batch.length}) wrote ${wrote}/${totalCount}`);
+
+      cpAll[endpoint] = {
+        page: page + 1,
+        totalPages,
+        totalCount,
+        pageSize: MAX_PAGE_SIZE,
+        updatedAt: new Date().toISOString(),
+      };
+      await writeCheckpoint(cpAll);
+
+      await sleep(PAGE_DELAY_MS);
+      if (batch.length === 0) break;
+    }
+  } finally {
+    stream.end();
   }
 }
 
@@ -166,7 +238,6 @@ async function withPg(fn) {
 }
 
 const jf = (v) => (v == null ? null : JSON.stringify(v));
-const arr = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
 const toStr = (v) => (v == null ? null : String(v));
 
 const numOrNull = (v) => {
@@ -182,10 +253,9 @@ const safeDateFromYYYYMMDD = (s) => {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
 
-/* ----------------------------- DB Upserts ------------------------------- */
+/* ----------------------------- DB Upserts ----------------------------- */
 
 async function upsertMetaTables(client, { types, subtypes, supertypes, rarities }) {
-  // These tables lack PKs in your snippet, so we'll TRUNCATE and refill.
   await client.query("BEGIN");
   try {
     await client.query("TRUNCATE TABLE tcg_types");
@@ -218,7 +288,8 @@ async function upsertSetsFromFile(client, setsFile) {
     return;
   }
 
-  const rl = (await import("node:readline")).createInterface({
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({
     input: fs.createReadStream(setsFile, "utf8"),
     crlfDelay: Infinity,
   });
@@ -345,7 +416,8 @@ async function upsertCardsFromFile(client, cardsFile) {
     return;
   }
 
-  const rl = (await import("node:readline")).createInterface({
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({
     input: fs.createReadStream(cardsFile, "utf8"),
     crlfDelay: Infinity,
   });
@@ -452,10 +524,14 @@ async function upsertCardsFromFile(client, cardsFile) {
       }
 
       if (Array.isArray(c.weaknesses)) {
-        c.weaknesses.forEach((w, idx) => weaknessesRows.push([c.id, w?.type ?? null, w?.value ?? null, String(idx)]));
+        c.weaknesses.forEach((w, idx) =>
+          weaknessesRows.push([c.id, w?.type ?? null, w?.value ?? null, String(idx)])
+        );
       }
       if (Array.isArray(c.resistances)) {
-        c.resistances.forEach((r, idx) => resistancesRows.push([c.id, r?.type ?? null, r?.value ?? null, String(idx)]));
+        c.resistances.forEach((r, idx) =>
+          resistancesRows.push([c.id, r?.type ?? null, r?.value ?? null, String(idx)])
+        );
       }
 
       if (c.tcgplayer) {
@@ -604,7 +680,10 @@ async function upsertCardsFromFile(client, cardsFile) {
           const b = 4 * k;
           return `($${b + 1},$${b + 2},$${b + 3},$${b + 4})`;
         });
-        await client.query(`INSERT INTO tcg_card_images (card_id, small, large, source) VALUES ${values.join(",")}`, params);
+        await client.query(
+          `INSERT INTO tcg_card_images (card_id, small, large, source) VALUES ${values.join(",")}`,
+          params
+        );
       }
 
       if (cardLegalitiesRows.length) {
@@ -613,7 +692,10 @@ async function upsertCardsFromFile(client, cardsFile) {
           const b = 3 * k;
           return `($${b + 1},$${b + 2},$${b + 3})`;
         });
-        await client.query(`INSERT INTO tcg_card_legalities (card_id, format, legality) VALUES ${values.join(",")}`, params);
+        await client.query(
+          `INSERT INTO tcg_card_legalities (card_id, format, legality) VALUES ${values.join(",")}`,
+          params
+        );
       }
 
       if (abilitiesRows.length) {
@@ -647,7 +729,10 @@ async function upsertCardsFromFile(client, cardsFile) {
           const b = 4 * k;
           return `($${b + 1},$${b + 2},$${b + 3},$${b + 4})`;
         });
-        await client.query(`INSERT INTO tcg_card_weaknesses (card_id, type, value, slot) VALUES ${values.join(",")}`, params);
+        await client.query(
+          `INSERT INTO tcg_card_weaknesses (card_id, type, value, slot) VALUES ${values.join(",")}`,
+          params
+        );
       }
 
       if (resistancesRows.length) {
@@ -656,7 +741,10 @@ async function upsertCardsFromFile(client, cardsFile) {
           const b = 4 * k;
           return `($${b + 1},$${b + 2},$${b + 3},$${b + 4})`;
         });
-        await client.query(`INSERT INTO tcg_card_resistances (card_id, type, value, slot) VALUES ${values.join(",")}`, params);
+        await client.query(
+          `INSERT INTO tcg_card_resistances (card_id, type, value, slot) VALUES ${values.join(",")}`,
+          params
+        );
       }
 
       if (tcgplayerRows.length) {
@@ -735,12 +823,12 @@ async function upsertCardsFromFile(client, cardsFile) {
     if (cardsBatch.length >= BATCH_SIZE) {
       await flush();
       batchCount++;
-      if (batchCount % 10 === 0) console.log(`[db] upserted ${batchCount * BATCH_SIZE} cards so far…`);
+      if (batchCount % 10 === 0) console.log(`[db] upserted ~${batchCount * BATCH_SIZE} cards so far…`);
     }
   }
   await flush();
 
-  console.log("[db] upserted cards + images/legalities/abilities/attacks/weaknesses/resistances/prices (+history if enabled)");
+  console.log("[db] upserted cards + nested tables (+history if enabled)");
 }
 
 /* --------------------------------- Main --------------------------------- */
@@ -760,9 +848,11 @@ async function main() {
   let meta = null;
 
   if (!SKIP_FETCH) {
-    // Fresh snapshots (append JSONL as we go)
-    await fsp.writeFile(files.cards, "");
-    await fsp.writeFile(files.sets, "");
+    console.log(`Fetch mode. pageSize=${MAX_PAGE_SIZE} delay=${PAGE_DELAY_MS}ms retries=${MAX_RETRIES}`);
+    if (RESET_CHECKPOINT) {
+      console.log("Resetting checkpoint…");
+      await fsp.rm(CHECKPOINT_FILE, { force: true });
+    }
 
     console.log("Fetching meta lists…");
     meta = await fetchMetaLists();
@@ -772,18 +862,20 @@ async function main() {
     await fsp.writeFile(files.rarities, JSON.stringify(meta.rarities, null, 2));
     console.log("Saved meta lists.");
 
-    console.log("Fetching sets…");
+    console.log("Fetching sets… (resumable)");
     await fetchPaged("sets", files.sets);
 
-    console.log("Fetching cards… (this is the long one)");
+    console.log("Fetching cards… (long one, resumable)");
     await fetchPaged("cards", files.cards);
   } else {
     console.log("Skipping fetch (--db-only/--skip-fetch). Will load DB from existing JSON/JSONL files.");
+
     const readJsonIfExists = async (p) => {
       if (!fs.existsSync(p)) return [];
       const txt = await fsp.readFile(p, "utf8");
       return JSON.parse(txt);
     };
+
     meta = {
       types: await readJsonIfExists(files.types),
       subtypes: await readJsonIfExists(files.subtypes),
@@ -795,8 +887,7 @@ async function main() {
       throw new Error(
         `--db-only requires existing JSONL files:\n` +
           `  missing? ${!fs.existsSync(files.sets) ? files.sets : ""}\n` +
-          `  missing? ${!fs.existsSync(files.cards) ? files.cards : ""}\n` +
-          `Run without --db-only once to fetch, or confirm OUT_DIR path is correct.`
+          `  missing? ${!fs.existsSync(files.cards) ? files.cards : ""}\n`
       );
     }
   }

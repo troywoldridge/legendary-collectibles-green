@@ -81,7 +81,7 @@ function detailHrefFor(
       return `/categories/yugioh/cards/${encodeURIComponent(cardId)}`;
     case "mtg":
     case "magic":
-      return `/categories/magic/cards/${encodeURIComponent(cardId)}`;
+      return `/categories/mtg/cards/${encodeURIComponent(cardId)}`;
     default:
       return null;
   }
@@ -101,7 +101,7 @@ function priceHistoryHrefFor(
       )}/prices`;
     case "mtg":
     case "magic":
-      return `/categories/magic/cards/${encodeURIComponent(cardId)}/prices`;
+      return `/categories/mtg/cards/${encodeURIComponent(cardId)}/prices`;
     case "ygo":
     case "yugioh":
       return `/categories/yugioh/cards/${encodeURIComponent(cardId)}/prices`;
