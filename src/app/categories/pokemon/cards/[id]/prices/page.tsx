@@ -7,6 +7,13 @@ import { db } from "@/lib/db";
 import MarketPrices from "@/components/MarketPrices";
 import { type DisplayCurrency, convert, formatMoney, getFx } from "@/lib/pricing";
 
+export const metadata = {
+  title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
+  description:
+    "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
+};
+
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 

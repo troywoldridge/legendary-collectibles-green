@@ -4,6 +4,9 @@ import Link from "next/link";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
+import type { Metadata } from "next";
+import { site } from "@/config/site";
+
 
 import MarketPrices from "@/components/MarketPrices";
 
@@ -22,6 +25,9 @@ import {
 
 import { getUserPlan } from "@/lib/plans";
 import PlanGate from "@/components/plan/PlanGate";
+
+
+
 
 /* -----------------------------------------------
    Runtime Config
@@ -92,6 +98,12 @@ function pctChange(from: number | null, to: number | null): string | null {
   return `${p >= 0 ? "+" : ""}${p.toFixed(1)}%`;
 }
 
+function absUrl(path: string) {
+  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+
 /* -----------------------------------------------
    YGO-specific loaders
 ------------------------------------------------ */
@@ -156,6 +168,51 @@ async function loadHistory(cardId: string, days = 90): Promise<YgoHist[]> {
 
   return rows ?? [];
 }
+
+export async function generateMetadata(
+  { params }: { params: { id: string } }
+): Promise<Metadata> {
+  const raw = decodeURIComponent(params.id ?? "").trim();
+  if (!raw) {
+    return {
+      title: `Yu-Gi-Oh! Prices | ${site.name}`,
+      description: `Track Yu-Gi-Oh! card prices, trends, and graded values on ${site.name}.`,
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const resolvedId = await resolveCardId(raw);
+
+  // If we can't resolve it, don't index the junk URL
+  if (!resolvedId) {
+    const canonical = absUrl(`/categories/yugioh/cards/${encodeURIComponent(raw)}/prices`);
+    return {
+      title: `Yu-Gi-Oh! Prices | ${site.name}`,
+      description: `Track Yu-Gi-Oh! card prices, trends, and graded values on ${site.name}.`,
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  // ✅ Canonical is always the clean ID, no query params
+  const canonical = absUrl(
+    `/categories/yugioh/cards/${encodeURIComponent(resolvedId)}/prices`
+  );
+
+  // Optional: pull name for better title/description (cheap query)
+  const core = await loadCore(resolvedId);
+  const name = core?.name ?? resolvedId;
+
+  const title = `Prices: ${name} — Yu-Gi-Oh! Trends & Market | ${site.name}`;
+  const description = `Live Yu-Gi-Oh! market prices + trends for ${name}. Includes PriceCharting graded values (Collector+) and source-level history (TCGplayer, Cardmarket, eBay, Amazon).`;
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+  };
+}
+
 
 /* -----------------------------------------------
    Page Component

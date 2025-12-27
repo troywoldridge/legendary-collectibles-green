@@ -1,14 +1,17 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import "server-only";
 
+import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
+
 import CardActions from "@/components/collection/CardActions";
 import MarketPrices from "@/components/MarketPrices";
 import { type DisplayCurrency } from "@/lib/pricing";
+import { site } from "@/config/site";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,6 +69,121 @@ type CardRow = {
   cardmarket_updated_at: string | null;
 };
 
+/* ------------------------------------------------
+   SEO: Dynamic metadata (per card)
+------------------------------------------------- */
+
+type CardMetaRow = {
+  id: string;
+  name: string | null;
+  rarity: string | null;
+  set_name: string | null;
+  series: string | null;
+  release_date: string | null;
+  small_image: string | null;
+  large_image: string | null;
+};
+
+async function getCardMeta(cardId: string): Promise<CardMetaRow | null> {
+  const row =
+    (
+      await db.execute<CardMetaRow>(sql`
+        SELECT
+          id,
+          name,
+          rarity,
+          set_name,
+          series,
+          release_date,
+          small_image,
+          large_image
+        FROM public.tcg_cards
+        WHERE id = ${cardId}
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null;
+
+  return row;
+}
+
+function absUrl(path: string) {
+  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function absMaybe(urlOrPath: string) {
+  if (!urlOrPath) return absUrl("/og-image.png");
+  // Already absolute?
+  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
+  // Treat as site-relative
+  return absUrl(urlOrPath);
+}
+
+export async function generateMetadata(
+  { params }: { params: { id: string } }
+): Promise<Metadata> {
+  const raw = decodeURIComponent(params.id ?? "").trim();
+  const card = await getCardMeta(raw);
+
+  // If unknown ID, avoid indexing junk URLs (very important)
+  if (!card) {
+    const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(raw)}`);
+    return {
+      title: `Pokémon Card Details | ${site.name}`,
+      description: `Browse Pokémon cards, track prices, manage your collection, and shop on ${site.name}.`,
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const name = card.name ?? card.id;
+  const setPart = card.set_name ? ` (${card.set_name})` : "";
+  const title = `${name}${setPart} — Details, Prices & Collection | ${site.name}`;
+
+  const descriptionParts = [
+    `View ${name} Pokémon card details`,
+    card.rarity ? `rarity: ${card.rarity}` : null,
+    card.set_name ? `set: ${card.set_name}` : null,
+    `market price + trends`,
+    `add to your collection`,
+  ].filter(Boolean);
+
+  const description = `${descriptionParts.join(", ")}.`;
+
+  // ✅ Canonical ALWAYS clean, no query params
+  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card.id)}`);
+
+  // ✅ Always absolute image URLs for OG/Twitter
+  const ogImage = absMaybe(card.large_image || card.small_image || site.ogImage || "/og-image.png");
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+
+    openGraph: {
+      type: "website",
+      url: canonical,
+      title,
+      description,
+      siteName: site.name,
+      images: [{ url: ogImage }],
+    },
+
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [ogImage],
+    },
+  };
+}
+
+
+/* ------------------------------------------------
+   Helpers
+------------------------------------------------- */
+
 function readDisplay(sp: SearchParams): DisplayCurrency {
   const a = (Array.isArray(sp?.display) ? sp.display[0] : sp?.display) ?? "";
   const b = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency) ?? "";
@@ -77,22 +195,11 @@ function bestImage(card: CardRow): string | null {
   return card.large_image || card.small_image || null;
 }
 
-/**
- * Your DB stores some “array-ish” fields as TEXT.
- * Sometimes they come in as:
- *  - "Fire,Water"
- *  - "{Fire,Water}"
- *  - '["Fire","Water"]'
- *  - or plain "Fire"
- *
- * This makes a best-effort to turn that into a string[] for chips.
- */
 function parseTextList(v: string | null): string[] {
   if (!v) return [];
   const s = v.trim();
   if (!s) return [];
 
-  // JSON array?
   if (s.startsWith("[") && s.endsWith("]")) {
     try {
       const arr = JSON.parse(s);
@@ -100,7 +207,6 @@ function parseTextList(v: string | null): string[] {
     } catch {}
   }
 
-  // Postgres array-ish "{a,b}"
   if (s.startsWith("{") && s.endsWith("}")) {
     const inner = s.slice(1, -1).trim();
     if (!inner) return [];
@@ -110,7 +216,6 @@ function parseTextList(v: string | null): string[] {
       .filter(Boolean);
   }
 
-  // Comma separated
   if (s.includes(",")) {
     return s
       .split(",")
@@ -174,12 +279,8 @@ function Field({ label, value }: { label: string; value: string | null }) {
   if (!value) return null;
   return (
     <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-      <div className="text-xs uppercase tracking-wide text-white/60">
-        {label}
-      </div>
-      <div className="mt-1 text-sm font-medium text-white break-words">
-        {value}
-      </div>
+      <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
+      <div className="mt-1 break-words text-sm font-medium text-white">{value}</div>
     </div>
   );
 }
@@ -188,9 +289,7 @@ function Chips({ label, values }: { label: string; values: string[] }) {
   if (!values.length) return null;
   return (
     <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-      <div className="text-xs uppercase tracking-wide text-white/60">
-        {label}
-      </div>
+      <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
       <div className="mt-2 flex flex-wrap gap-2">
         {values.map((v) => (
           <span
@@ -215,6 +314,10 @@ function TextBlock({ title, text }: { title: string; text: string | null }) {
   );
 }
 
+/* ------------------------------------------------
+   Page
+------------------------------------------------- */
+
 export default async function PokemonCardDetailPage({
   params,
   searchParams,
@@ -224,8 +327,9 @@ export default async function PokemonCardDetailPage({
 }) {
   const { id: rawId } = await params;
   const sp = await searchParams;
-const { userId } = await auth();
-const canSave = !!userId;
+
+  const { userId } = await auth();
+  const canSave = !!userId;
 
   const display = readDisplay(sp);
   const id = decodeURIComponent(rawId ?? "").trim();
@@ -261,15 +365,11 @@ const canSave = !!userId;
 
   return (
     <section className="space-y-8">
-      {/* Top: image left, info right */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Left: card image */}
         <div className="lg:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div
-              className="relative mx-auto w-full max-w-md"
-              style={{ aspectRatio: "3 / 4" }}
-            >
+            <div className="relative mx-auto w-full max-w-md" style={{ aspectRatio: "3 / 4" }}>
               {cover ? (
                 <Image
                   src={cover}
@@ -289,23 +389,12 @@ const canSave = !!userId;
 
             <div className="mt-3 flex flex-wrap gap-3 text-xs">
               {card.tcgplayer_url ? (
-                <a
-                  className="text-sky-300 hover:underline"
-                  href={card.tcgplayer_url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
+                <a className="text-sky-300 hover:underline" href={card.tcgplayer_url} target="_blank" rel="noreferrer">
                   TCGplayer →
                 </a>
               ) : null}
-
               {card.cardmarket_url ? (
-                <a
-                  className="text-sky-300 hover:underline"
-                  href={card.cardmarket_url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
+                <a className="text-sky-300 hover:underline" href={card.cardmarket_url} target="_blank" rel="noreferrer">
                   Cardmarket →
                 </a>
               ) : null}
@@ -313,14 +402,12 @@ const canSave = !!userId;
           </div>
         </div>
 
-        {/* Right: title + meta + market price */}
+        {/* Right: title + actions + market price */}
         <div className="lg:col-span-7 space-y-4">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h1 className="text-2xl font-bold text-white">
-                  {card.name ?? card.id}
-                </h1>
+                <h1 className="text-2xl font-bold text-white">{card.name ?? card.id}</h1>
 
                 <div className="mt-1 text-sm text-white/80">
                   <span className="mr-3 text-white/60">ID:</span>
@@ -349,20 +436,17 @@ const canSave = !!userId;
                 </div>
               </div>
 
-              {/* Collection & Wishlist actions */}
-<div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-  <CardActions
-    canSave={canSave}
-    game="pokemon"
-    cardId={card.id}
-    cardName={card.name ?? card.id}
-    setName={card.set_name ?? undefined}
-    imageUrl={cover ?? undefined}
-  />
-</div>
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                {/* Add to collection / wishlist */}
+                <CardActions
+                  canSave={canSave}
+                  game="pokemon"
+                  cardId={card.id}
+                  cardName={card.name ?? card.id}
+                  setName={card.set_name ?? undefined}
+                  imageUrl={cover ?? undefined}
+                />
 
-
-              <div className="flex items-center gap-3 text-sm">
                 <Link href={pricesHref} className="text-sky-300 hover:underline">
                   View prices →
                 </Link>
@@ -374,7 +458,7 @@ const canSave = !!userId;
         </div>
       </div>
 
-      {/* Big details grid */}
+      {/* Details grid */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <h2 className="mb-3 text-lg font-semibold text-white">Card Details</h2>
 
@@ -398,12 +482,10 @@ const canSave = !!userId;
           <Chips label="Types" values={types} />
           <Chips label="Subtypes" values={subtypes} />
           <Chips label="Retreat Cost" values={retreat} />
-
           <Chips label="National Pokédex #" values={pokedexNums} />
         </div>
       </div>
 
-      {/* Rules / traits / flavor */}
       <TextBlock
         title={card.ancient_trait_name ? `Ancient Trait: ${card.ancient_trait_name}` : "Ancient Trait"}
         text={card.ancient_trait_text}
@@ -411,7 +493,6 @@ const canSave = !!userId;
       <TextBlock title="Rules" text={card.rules} />
       <TextBlock title="Flavor Text" text={card.flavor_text} />
 
-      {/* Extra (raw) — useful during rebuilds; keeps parity with “used to” */}
       {card.extra ? (
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
           <div className="mb-2 text-sm font-semibold">Extra</div>
@@ -421,12 +502,8 @@ const canSave = !!userId;
         </div>
       ) : null}
 
-      {/* Footer nav */}
       <div className="flex flex-wrap gap-4 text-sm">
-        <Link
-          href="/categories/pokemon/cards"
-          className="text-sky-300 hover:underline"
-        >
+        <Link href="/categories/pokemon/cards" className="text-sky-300 hover:underline">
           ← Back to cards
         </Link>
         <Link href={pricesHref} className="text-sky-300 hover:underline">

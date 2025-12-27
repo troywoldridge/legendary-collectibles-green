@@ -16,9 +16,182 @@ import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
 import CardActions from "@/components/collection/CardActions";
 
+import type { Metadata } from "next";
+import { site } from "@/config/site";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+
+
+type MtgMetaRow = {
+  id: string;
+  name: string | null;
+  set_code: string | null;
+  collector_number: string | null;
+  image_url: string | null;
+  rarity: string | null;
+  type_line: string | null;
+};
+
+function absUrl(path: string) {
+  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function absMaybe(urlOrPath: string) {
+  if (!urlOrPath) return absUrl("/og-image.png");
+  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
+  return absUrl(urlOrPath);
+}
+
+
+async function getMtgMeta(foundId: string): Promise<MtgMetaRow | null> {
+  const row =
+    (
+      await db.execute<MtgMetaRow>(sql`
+        SELECT
+          c.id::text AS id,
+          c.name,
+          c.set_code,
+          c.collector_number,
+          (c.payload->>'type_line') AS type_line,
+          (c.payload->>'rarity') AS rarity,
+          COALESCE(
+            (c.payload->'image_uris'->>'normal'),
+            (c.payload->'image_uris'->>'large'),
+            (c.payload->'image_uris'->>'small'),
+            (c.payload->'card_faces'->0->'image_uris'->>'normal'),
+            (c.payload->'card_faces'->0->'image_uris'->>'large'),
+            (c.payload->'card_faces'->0->'image_uris'->>'small')
+          ) AS image_url
+        FROM public.scryfall_cards_raw c
+        WHERE c.id::text = ${foundId}
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null;
+
+  return row;
+}
+
+/**
+ * Dynamic metadata for MTG card pages.
+ * Uses the same ID resolution logic as the page so the canonical matches the real card.
+ */
+export async function generateMetadata(
+  { params }: { params: { id: string } }
+): Promise<Metadata> {
+  const rawParam = decodeURIComponent(params.id ?? "").trim();
+
+  if (!rawParam) {
+    return {
+      title: `MTG Card Details | ${site.name}`,
+      description: `Browse Magic: The Gathering cards, prices, and collection tools on ${site.name}.`,
+      robots: { index: false, follow: true },
+    };
+  }
+
+  // ---- resolve to the canonical true Scryfall UUID ----
+  const idNoDashes = rawParam.replace(/-/g, "");
+
+  const probe = await db.execute<{ id: string }>(sql`
+    SELECT c.id::text AS id
+    FROM public.scryfall_cards_raw c
+    WHERE c.id::text = ${rawParam}
+      OR REPLACE(c.id::text,'-','') = ${idNoDashes}
+    LIMIT 1
+  `);
+
+  let foundId = probe.rows?.[0]?.id ?? null;
+
+  if (!foundId) {
+    const parsed = parseSetAndNumber(rawParam);
+    if (parsed) {
+      const set = parsed.set.toLowerCase();
+      const { exact, noZeros, lower } = normalizeNumVariants(parsed.num);
+
+      const p2 = await db.execute<{ id: string }>(sql`
+        SELECT c.id::text AS id
+        FROM public.scryfall_cards_raw c
+        WHERE LOWER(c.set_code) = ${set}
+          AND (
+            c.collector_number::text = ${exact}
+            OR ltrim(c.collector_number::text,'0') = ${noZeros}
+            OR LOWER(c.collector_number::text) = ${lower}
+          )
+        LIMIT 1
+      `);
+      foundId = p2.rows?.[0]?.id ?? null;
+    }
+  }
+
+  // ✅ If not found → noindex
+  if (!foundId) {
+    const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(rawParam)}`);
+    return {
+      title: `MTG Card Details | ${site.name}`,
+      description: `Browse Magic: The Gathering cards, prices, and collection tools on ${site.name}.`,
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  // ✅ Canonical MUST use the resolved UUID (foundId), not rawParam
+  const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(foundId)}`);
+
+  const meta = await getMtgMeta(foundId);
+
+  const name = meta?.name ?? foundId;
+
+  const setPart =
+    meta?.set_code && meta?.collector_number
+      ? ` (${meta.set_code.toUpperCase()} #${meta.collector_number})`
+      : meta?.set_code
+      ? ` (${meta.set_code.toUpperCase()})`
+      : "";
+
+  const title = `${name}${setPart} — MTG Prices & Collection | ${site.name}`;
+
+  const descBits = [
+    meta?.type_line ? meta.type_line : null,
+    meta?.rarity ? `Rarity: ${meta.rarity}` : null,
+    "prices, eBay comps, and add-to-collection",
+  ].filter(Boolean);
+
+  const description = `${descBits.join(" • ")}.`;
+
+  const imgRaw =
+    (meta?.image_url ?? "").replace(/^http:\/\//, "https://") ||
+    site.ogImage ||
+    "/og-image.png";
+
+  const ogImage = absMaybe(imgRaw);
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+
+    openGraph: {
+      type: "website",
+      url: canonical,
+      title,
+      description,
+      siteName: site.name,
+      images: [{ url: ogImage }],
+    },
+
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [ogImage],
+    },
+  };
+}
+
+
 
 type CardRow = {
   id: string;

@@ -1,12 +1,14 @@
 // src/app/shop/[game]/page.tsx
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { site } from "@/config/site";
 
-const GAMES: Record<string, { name: string }> = {
-  pokemon: { name: "Pokémon" },
-  yugioh: { name: "Yu-Gi-Oh!" },
-  mtg: { name: "Magic: The Gathering" },
-  sports: { name: "Sports Cards" },
+const GAMES: Record<string, { name: string; desc: string }> = {
+  pokemon: { name: "Pokémon", desc: "Singles, graded cards, sealed product, and deals." },
+  yugioh: { name: "Yu-Gi-Oh!", desc: "Singles, graded cards, sealed product, and deals." },
+  mtg: { name: "Magic: The Gathering", desc: "Singles, graded cards, sealed product, and deals." },
+  sports: { name: "Sports Cards", desc: "Singles, graded cards, sealed product, and deals." },
 };
 
 const FORMAT_TILES = [
@@ -16,6 +18,36 @@ const FORMAT_TILES = [
   { key: "bundle", title: "Bundles", desc: "ETBs, collections, premium boxes" },
   { key: "lot", title: "Lots", desc: "Bulk, bundles, mystery" },
 ];
+
+export async function generateMetadata({
+  params,
+}: {
+  params: { game: string };
+}): Promise<Metadata> {
+  const game = params.game;
+  const meta = GAMES[game];
+  const canonical = `${site.url}/shop/${encodeURIComponent(game)}`;
+
+  if (!meta) {
+    return {
+      title: `Shop | ${site.name}`,
+      description: "Browse collectibles by game and format.",
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const title = `${meta.name} Shop — Singles, Sealed & Deals | ${site.name}`;
+  const description = `Shop ${meta.name}: ${meta.desc}`;
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    openGraph: { title, description, url: canonical },
+    twitter: { card: "summary_large_image", title, description },
+  };
+}
 
 export default function GameHubPage({ params }: { params: { game: string } }) {
   const game = params.game;

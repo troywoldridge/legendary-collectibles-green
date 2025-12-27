@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+import "server-only";
 
+import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 import { sql } from "drizzle-orm";
@@ -14,6 +16,8 @@ import CardActions from "@/components/collection/CardActions";
 import CardAmazonCTA from "@/components/CardAmazonCTA";
 import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
+
+import { site } from "@/config/site";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,6 +69,11 @@ function bestImage(imgs: ImageRow[]): string | null {
   if (!imgs?.length) return null;
   const first = imgs[0];
   return first.large || first.small || null;
+}
+
+function absUrl(path: string) {
+  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 /* ---------------- Data loaders ---------------- */
@@ -152,11 +161,98 @@ async function getCard(param: string): Promise<{
   return { card, images, prices, banlist, sets };
 }
 
+/* ---------------- SEO: Dynamic Metadata ---------------- */
+export async function generateMetadata(
+  { params }: { params: { id: string } }
+): Promise<Metadata> {
+  const id = decodeURIComponent(params.id ?? "").trim();
+  if (!id) {
+    const canonical = absUrl("/categories/yugioh/cards");
+    return {
+      title: `Yu-Gi-Oh! Cards | ${site.name}`,
+      description: "Browse Yu-Gi-Oh! cards, track prices, and manage your collection.",
+      alternates: { canonical },
+    };
+  }
+
+  // Load minimal card + image for SEO
+  const card =
+    (
+      await db.execute<{ id: string; name: string; type: string | null; race: string | null; attribute: string | null; archetype: string | null }>(sql`
+        SELECT
+          c.card_id AS id,
+          c.name,
+          c.type,
+          c.race,
+          c.attribute,
+          c.archetype
+        FROM ygo_cards c
+        WHERE c.card_id = ${id}
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null;
+
+  const img =
+    (
+      await db.execute<{ large: string | null; small: string | null }>(sql`
+        SELECT i.image_url AS large, i.image_url_small AS small
+        FROM ygo_card_images i
+        WHERE i.card_id = ${id}
+        ORDER BY (CASE WHEN i.image_url IS NOT NULL THEN 0 ELSE 1 END),
+                 i.image_url_small NULLS LAST
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null;
+
+  const canonical = absUrl(`/categories/yugioh/cards/${encodeURIComponent(id)}`);
+
+  // If not found, return a safe non-indexable result (prevents “soft 404” garbage titles)
+  if (!card) {
+    return {
+      title: `Yu-Gi-Oh! Card Not Found | ${site.name}`,
+      description: "We couldn’t find that Yu-Gi-Oh! card. Try searching by name or card ID.",
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const ogImage = (img?.large || img?.small || site.ogImage || "/og-image.png") ?? "/og-image.png";
+  const title = `${card.name} — Yu-Gi-Oh! Prices & Collection | ${site.name}`;
+
+  const descBits = [
+    card.type ? `Type: ${card.type}` : null,
+    card.attribute ? `Attribute: ${card.attribute}` : null,
+    card.race ? `Race: ${card.race}` : null,
+    card.archetype ? `Archetype: ${card.archetype}` : null,
+    "Track prices, add to collection, and shop listings.",
+  ].filter(Boolean);
+
+  const description = descBits.join(" • ");
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    openGraph: {
+      type: "website",
+      url: canonical,
+      title,
+      description,
+      images: [{ url: ogImage }],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [ogImage],
+    },
+  };
+}
+
 /* ---------------- Page ---------------- */
 export default async function YugiohCardDetailPage({
   params,
 }: {
-  // Next 15/16 server components commonly type params as Promise<...>
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;

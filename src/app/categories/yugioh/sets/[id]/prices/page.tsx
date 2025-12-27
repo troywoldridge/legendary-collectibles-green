@@ -3,6 +3,12 @@ import Link from "next/link";
 import Image from "next/image";
 import { CF_ACCOUNT_HASH } from "@/lib/cf";
 
+export const metadata = {
+  title: "Yu-Gi-Oh Card Prices, Collection Tracking & Shop | Legendary Collectibles",
+  description:
+    "Browse Yu-Gi-Oh  cards, track prices, manage your collection, and buy singles and sealed products online.",
+};
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 

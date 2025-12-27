@@ -1,17 +1,44 @@
 // src/app/shop/[game]/[format]/page.tsx
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import ProductGrid from "@/components/shop/ProductGrid";
 import ShopFilters from "@/components/shop/ShopFilters";
+import { site } from "@/config/site";
 
 const ALLOWED_GAMES = new Set(["pokemon", "yugioh", "mtg", "sports"]);
 const ALLOWED_FORMATS = new Set(["single", "pack", "box", "bundle", "lot", "accessory"]);
 
-function qs(searchParams: Record<string, string | string[] | undefined>) {
-  const p = new URLSearchParams();
-  for (const [k, v] of Object.entries(searchParams)) {
-    if (typeof v === "string" && v.length) p.set(k, v);
+function formatLabel(format: string) {
+  switch (format) {
+    case "single":
+      return "Singles";
+    case "pack":
+      return "Packs";
+    case "box":
+      return "Boxes";
+    case "bundle":
+      return "Bundles";
+    case "lot":
+      return "Lots";
+    case "accessory":
+      return "Accessories";
+    default:
+      return format.toUpperCase();
   }
-  return p.toString();
+}
+function gameLabel(game: string) {
+  switch (game) {
+    case "pokemon":
+      return "Pokémon";
+    case "yugioh":
+      return "Yu-Gi-Oh!";
+    case "mtg":
+      return "Magic: The Gathering";
+    case "sports":
+      return "Sports Cards";
+    default:
+      return game.toUpperCase();
+  }
 }
 
 async function fetchProducts(args: {
@@ -25,7 +52,6 @@ async function fetchProducts(args: {
   query.set("game", game);
   query.set("format", format);
 
-  // Pass-through params we support from UI
   const allow = [
     "sealed",
     "graded",
@@ -45,12 +71,44 @@ async function fetchProducts(args: {
     if (typeof v === "string" && v.length) query.set(k, v);
   }
 
-  const base = process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000";
-  const res = await fetch(`${base}/api/shop/products?${query.toString()}`, {
-    cache: "no-store",
-  });
+  // Use site.url server-side so it matches production.
+  const base = (site?.url ?? "http://localhost:3000").replace(/\/$/, "");
+  const res = await fetch(`${base}/api/shop/products?${query.toString()}`, { cache: "no-store" });
+
   if (!res.ok) throw new Error("Failed to load products");
   return res.json() as Promise<{ items: any[]; total: number; page: number; limit: number }>;
+}
+
+export async function generateMetadata({
+  params,
+}: {
+  params: { game: string; format: string };
+}): Promise<Metadata> {
+  const { game, format } = params;
+
+  const canonical = `${site.url}/shop/${encodeURIComponent(game)}/${encodeURIComponent(format)}`;
+
+  if (!ALLOWED_GAMES.has(game) || !ALLOWED_FORMATS.has(format)) {
+    return {
+      title: `Shop | ${site.name}`,
+      description: "Browse collectibles by game and format.",
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const g = gameLabel(game);
+  const f = formatLabel(format);
+  const title = `${g} ${f} — Shop | ${site.name}`;
+  const description = `Shop ${g} ${f}. Filter by graded, sealed, price, and more to find the best deals.`;
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    openGraph: { title, description, url: canonical },
+    twitter: { card: "summary_large_image", title, description },
+  };
 }
 
 export default async function ListingPage({

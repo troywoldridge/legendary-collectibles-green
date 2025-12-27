@@ -6,6 +6,13 @@ import { CF_ACCOUNT_HASH } from "@/lib/cf";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+export const metadata = {
+  title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
+  description:
+    "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
+};
+
+
 type SearchParams = Record<string, string | string[] | undefined>;
 type Currency = "USD" | "EUR";
 type SetRow = { id: string; name: string | null; logo_url: string | null; symbol_url: string | null; };

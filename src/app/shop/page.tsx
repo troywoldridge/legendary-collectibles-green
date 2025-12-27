@@ -1,5 +1,22 @@
 // src/app/shop/page.tsx
+import type { Metadata } from "next";
 import Link from "next/link";
+import { site } from "@/config/site";
+
+export const metadata: Metadata = {
+  title: `Shop Collectibles | ${site.name}`,
+  description:
+    "Shop Pokémon, Yu-Gi-Oh!, MTG and more. Browse singles, slabs, sealed product, and deals.",
+  alternates: {
+    canonical: `${site.url}/shop`,
+  },
+  openGraph: {
+    title: `Shop Collectibles | ${site.name}`,
+    description:
+      "Shop Pokémon, Yu-Gi-Oh!, MTG and more. Browse singles, slabs, sealed product, and deals.",
+    url: `${site.url}/shop`,
+  },
+};
 
 const GAMES = [
   { key: "pokemon", name: "Pokémon", desc: "Singles, slabs, sealed, deals" },
