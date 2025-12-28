@@ -4,13 +4,13 @@ import Link from "next/link";
 import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import PokemonCardsClient from "../../cards/PokemonCardsClient";
 
 export const metadata = {
   title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
   description:
     "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
 };
-
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,7 +65,7 @@ function buildHref(
     perPage?: number;
     rares?: boolean;
     holo?: boolean;
-  }
+  },
 ) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", qs.q);
@@ -86,10 +86,6 @@ function pickHttpUrl(a?: string | null, b?: string | null): string | null {
   if (isHttpUrl(a)) return a.trim();
   if (isHttpUrl(b)) return b.trim();
   return null;
-}
-
-function bestCardImg(c: CardRow) {
-  return pickHttpUrl(c.large_image, c.small_image);
 }
 
 export default async function SetDetailPage({
@@ -179,10 +175,7 @@ export default async function SetDetailPage({
         <p className="text-sm break-all text-white/70">
           Looked up: <code>{setParam}</code>
         </p>
-        <Link
-          href="/categories/pokemon/sets"
-          className="text-sky-300 hover:underline"
-        >
+        <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">
           ← Back to all sets
         </Link>
       </section>
@@ -196,13 +189,13 @@ export default async function SetDetailPage({
 
   if (q) {
     conditions.push(
-      sql`(name ILIKE ${"%" + q + "%"} OR rarity ILIKE ${"%" + q + "%"} OR id ILIKE ${"%" + q + "%"})`
+      sql`(name ILIKE ${"%" + q + "%"} OR rarity ILIKE ${"%" + q + "%"} OR id ILIKE ${"%" + q + "%"})`,
     );
   }
 
   if (raresOnly && holoOnly) {
     conditions.push(
-      sql`(rarity ILIKE '%Rare%' AND (rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%'))`
+      sql`(rarity ILIKE '%Rare%' AND (rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%'))`,
     );
   } else if (raresOnly) {
     conditions.push(sql`(rarity ILIKE '%Rare%')`);
@@ -215,7 +208,7 @@ export default async function SetDetailPage({
   const total =
     (
       await db.execute<{ count: number }>(
-        sql`SELECT COUNT(*)::int AS count FROM tcg_cards WHERE ${whereSql}`
+        sql`SELECT COUNT(*)::int AS count FROM tcg_cards WHERE ${whereSql}`,
       )
     ).rows?.[0]?.count ?? 0;
 
@@ -223,7 +216,7 @@ export default async function SetDetailPage({
   const safePage = Math.min(totalPages, Math.max(1, reqPage));
   const safeOffset = (safePage - 1) * perPage;
 
-  const cards =
+  const cardsRows =
     (
       await db.execute<CardRow>(sql`
         SELECT id, name, rarity, small_image, large_image
@@ -242,18 +235,25 @@ export default async function SetDetailPage({
   const isFirst = safePage <= 1;
   const isLast = safePage >= totalPages;
 
-  // ✅ FIX: only allow real URLs for the banner
+  // Banner
   const banner = pickHttpUrl(setRow.logo_url, setRow.symbol_url);
 
   const subtitleParts = [
     setRow.series ?? undefined,
     setRow.ptcgo_code ? `PTCGO: ${setRow.ptcgo_code}` : undefined,
-    setRow.release_date
-      ? `Released: ${setRow.release_date.replaceAll("/", "-")}`
-      : undefined,
+    setRow.release_date ? `Released: ${setRow.release_date.replaceAll("/", "-")}` : undefined,
   ].filter(Boolean);
 
   const subtitle = subtitleParts.join(" • ");
+
+  // ✅ Adapt set card rows to PokemonCardsClient shape
+  const cards = cardsRows.map((c) => ({
+    cardId: c.id,
+    name: c.name ?? c.id,
+    // here we already know set name; show the set title in the tile meta
+    setName: setRow?.name ?? canonicalSetId,
+    imageUrl: c.large_image || c.small_image || null,
+  }));
 
   return (
     <section className="space-y-6">
@@ -279,9 +279,7 @@ export default async function SetDetailPage({
           </div>
 
           <div>
-            <h1 className="text-2xl font-bold text-white">
-              {setRow.name ?? setParam}
-            </h1>
+            <h1 className="text-2xl font-bold text-white">{setRow.name ?? setParam}</h1>
             {subtitle && <div className="text-sm text-white/80">{subtitle}</div>}
           </div>
         </div>
@@ -293,10 +291,7 @@ export default async function SetDetailPage({
           >
             View price overview →
           </Link>
-          <Link
-            href="/categories/pokemon/sets"
-            className="text-sky-300 hover:underline"
-          >
+          <Link href="/categories/pokemon/sets" className="text-sky-300 hover:underline">
             ← All sets
           </Link>
         </div>
@@ -396,57 +391,13 @@ export default async function SetDetailPage({
         </div>
       </div>
 
-      {/* Cards grid */}
+      {/* ✅ Client grid with add-to-collection */}
       {cards.length === 0 ? (
         <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">
-          {q || raresOnly || holoOnly
-            ? "No cards matched your filters."
-            : "No cards found in this set."}
+          {q || raresOnly || holoOnly ? "No cards matched your filters." : "No cards found in this set."}
         </div>
       ) : (
-        <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-          {cards.map((c) => {
-            const img = bestCardImg(c);
-
-            return (
-              <li
-                key={c.id}
-                className="overflow-hidden rounded-xl border border-white/10 bg-white/5 backdrop-blur-sm transition hover:border-white/20 hover:bg-white/10"
-              >
-                <Link
-                  href={`/categories/pokemon/cards/${encodeURIComponent(c.id)}`}
-                  className="block"
-                >
-                  <div className="relative aspect-[3/4] w-full">
-                    {img ? (
-                      <Image
-                        src={img}
-                        alt={c.name ?? c.id}
-                        fill
-                        unoptimized
-                        className="object-contain"
-                        sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
-                      />
-                    ) : (
-                      <div className="absolute inset-0 grid place-items-center text-white/70">
-                        No image
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="p-3">
-                    <div className="line-clamp-2 text-sm font-medium text-white">
-                      {c.name ?? c.id}
-                    </div>
-                    <div className="mt-1 text-xs text-white/80">
-                      {c.rarity ?? ""}
-                    </div>
-                  </div>
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
+        <PokemonCardsClient cards={cards} />
       )}
 
       {/* Pagination */}

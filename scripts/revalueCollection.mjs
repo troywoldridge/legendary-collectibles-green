@@ -1,5 +1,5 @@
 // scripts/revalueCollection.mjs
- 
+// node --import tsx scripts/revalueJobs.mts 
 // Node 20+
 // Uses DATABASE_URL from your .env
 

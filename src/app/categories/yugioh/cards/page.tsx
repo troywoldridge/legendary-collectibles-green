@@ -1,10 +1,12 @@
 // src/app/categories/yugioh/cards/page.tsx
 import "server-only";
-import Image from "next/image";
+
 import Link from "next/link";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+
 import YgoCardSearch from "@/components/ygo/YgoCardSearch";
+import YgoCardsClient from "./YgoCardsClient";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,6 +19,7 @@ type ListRow = {
   attribute: string | null;
   race: string | null;
   thumb: string | null;
+  set_name: string | null;
 };
 
 type CountRow = { count: string };
@@ -48,6 +51,8 @@ async function fetchCards(opts: { q: string | null; page: number; per: number })
   const { q, page, per } = opts;
   const offset = (page - 1) * per;
 
+  // Pull one "best" set name for each card from ygo_card_sets (if present)
+  // (If a card belongs to many sets, we choose MIN(set_name) deterministically.)
   if (q) {
     const countRes = await db.execute<CountRow>(sql`
       SELECT COUNT(*)::bigint::text AS count
@@ -63,7 +68,8 @@ async function fetchCards(opts: { q: string | null; page: number; per: number })
         c.type,
         c.attribute,
         c.race,
-        img.thumb
+        img.thumb,
+        sets.set_name
       FROM ygo_cards c
       LEFT JOIN LATERAL (
         SELECT i.image_url_small AS thumb
@@ -72,6 +78,11 @@ async function fetchCards(opts: { q: string | null; page: number; per: number })
         ORDER BY (CASE WHEN i.image_url_small IS NOT NULL THEN 0 ELSE 1 END)
         LIMIT 1
       ) img ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT MIN(cs.set_name)::text AS set_name
+        FROM ygo_card_sets cs
+        WHERE cs.card_id = c.card_id
+      ) sets ON TRUE
       WHERE c.card_id = ${q} OR c.name ILIKE '%' || ${q} || '%'
       ORDER BY
         CASE
@@ -98,7 +109,8 @@ async function fetchCards(opts: { q: string | null; page: number; per: number })
       c.type,
       c.attribute,
       c.race,
-      img.thumb
+      img.thumb,
+      sets.set_name
     FROM ygo_cards c
     LEFT JOIN LATERAL (
       SELECT i.image_url_small AS thumb
@@ -107,6 +119,11 @@ async function fetchCards(opts: { q: string | null; page: number; per: number })
       ORDER BY (CASE WHEN i.image_url_small IS NOT NULL THEN 0 ELSE 1 END)
       LIMIT 1
     ) img ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT MIN(cs.set_name)::text AS set_name
+      FROM ygo_card_sets cs
+      WHERE cs.card_id = c.card_id
+    ) sets ON TRUE
     ORDER BY c.name ASC
     LIMIT ${per} OFFSET ${offset}
   `);
@@ -133,6 +150,14 @@ export default async function YugiohCardsIndexPage({
   const showingTo = Math.min(total, page * per);
   const basePath = "/categories/yugioh/cards";
 
+  // ✅ Only pass what YgoCardsClient already expects: { cards }
+  const cardsForClient = rows.map((r) => ({
+    cardId: r.id,
+    name: r.name,
+    setName: r.set_name ?? null,
+    imageUrl: r.thumb ?? null,
+  }));
+
   return (
     <section className="space-y-6">
       {/* Search */}
@@ -148,14 +173,14 @@ export default async function YugiohCardsIndexPage({
 
       {/* Header + meta */}
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <h1 className="text-2xl font-bold text_white">Yu-Gi-Oh! Cards</h1>
+        <h1 className="text-2xl font-bold text-white">Yu-Gi-Oh! Cards</h1>
         <div className="text-sm text-white/70">
           {q ? (
             <>
               Showing <span className="text-white">{showingFrom}</span>–
               <span className="text-white">{showingTo}</span> of{" "}
-              <span className="text-white">{total.toLocaleString()}</span> results
-              for <span className="text-white">&ldquo;{q}&rdquo;</span>
+              <span className="text-white">{total.toLocaleString()}</span>{" "}
+              results for <span className="text-white">“{q}”</span>
             </>
           ) : (
             <>
@@ -174,58 +199,11 @@ export default async function YugiohCardsIndexPage({
         </div>
       ) : (
         <>
-          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6">
-            {rows.map((r) => {
-              const hasThumb = !!r.thumb;
-              return (
-                <li
-                  key={r.id}
-                  className="rounded-xl border border-white/10 bg_white/5 transition hover:border-white/20 hover:bg-white/10"
-                >
-                  <Link
-                    href={`${basePath}/${encodeURIComponent(r.id)}`}
-                    className="group block"
-                  >
-                    <div
-                      className="relative mx-auto w-full"
-                      style={{ aspectRatio: "3 / 4" }}
-                    >
-                      {hasThumb ? (
-                        <Image
-                          src={r.thumb as string}
-                          alt={r.name}
-                          fill
-                          sizes="(max-width: 768px) 50vw, (max-width: 1280px) 25vw, 16vw"
-                          className="object-contain transition-transform group-hover:scale-[1.02]"
-                          unoptimized
-                        />
-                      ) : (
-                        <div className="absolute inset-0 grid place-items-center text-white/60">
-                          No image
-                        </div>
-                      )}
-                    </div>
-                    <div className="p-3">
-                      <div className="line-clamp-2 text-sm font-medium text-white">
-                        {r.name}
-                      </div>
-                      {/* meta line */}
-                      <div className="mt-1 text-xs text-white/70">
-                        {r.id}
-                        {r.type ? ` • ${r.type}` : ""}
-                        {r.attribute ? ` • ${r.attribute}` : ""}
-                        {r.race ? ` • ${r.race}` : ""}
-                      </div>
-                    </div>
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
+          {/* ✅ Client grid adds Add/In-Collection UI */}
+          <YgoCardsClient cards={cardsForClient} />
 
           {/* Pagination */}
-          <nav className="mt-4 flex items-center justify_between gap-2">
-            {/* Prev */}
+          <nav className="mt-4 flex items-center justify-between gap-2">
             <div>
               {page > 1 ? (
                 <Link
@@ -245,13 +223,11 @@ export default async function YugiohCardsIndexPage({
               )}
             </div>
 
-            {/* Page status */}
             <div className="text-sm text-white/70">
               Page <span className="text-white">{page}</span> of{" "}
               <span className="text-white">{pages}</span>
             </div>
 
-            {/* Next */}
             <div>
               {page < pages ? (
                 <Link

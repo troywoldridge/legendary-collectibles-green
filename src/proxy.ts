@@ -54,7 +54,22 @@ function buildCanonicalHttpsUrl(req: NextRequest, canonicalHost: string) {
   return url;
 }
 
-// Public routes that never require auth
+/**
+ * ✅ HARD BYPASS for server-to-server / worker routes.
+ * Do not rely on createRouteMatcher for these.
+ * These should never redirect to /sign-in.
+ */
+function isHardPublicPath(pathname: string) {
+  return (
+    pathname.startsWith("/api/internal") ||
+    pathname.startsWith("/api/collection/revalue") ||
+    pathname.startsWith("/api/dev/collection/revalue") ||
+    pathname === "/api/webhooks/stripe"
+  );
+}
+
+// Public routes that never require auth (pages + a few APIs)
+// NOTE: createRouteMatcher expects patterns like "/foo(.*)" not "/foo/(.*)"
 const isPublicRoute = createRouteMatcher([
   "/",
   "/pricing(.*)",
@@ -63,18 +78,24 @@ const isPublicRoute = createRouteMatcher([
   "/sign-up(.*)",
   "/admin(.*)",
 
-   // ✅ allow SEO routes
+  // ✅ allow SEO routes
   "/sitemap.xml",
   "/robots.txt",
   "/sitemap(.*)",
 
   // Public APIs
-  "/api/dev/(.*)",
+  "/api/dev(.*)",
   "/api/webhooks/stripe",
   "/api/stripe/checkout/sessions(.*)",
   "/api/stripe/checkout/start",
 
-  "/checkout/(.*)",
+  "/checkout(.*)",
+
+  // (keeping these here too, but hard bypass is what actually guarantees it)
+  "/api/collection/revalue(.*)",
+  "/api/collection/revalue/status(.*)",
+  "/api/internal(.*)",
+  "/api/dev/collection/revalue(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, req: NextRequest) => {
@@ -90,6 +111,13 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
       const url = buildCanonicalHttpsUrl(req, canonical);
       return NextResponse.redirect(url, 308);
     }
+  }
+
+  const pathname = req.nextUrl.pathname;
+
+  // ✅ absolute bypass for internal/worker endpoints
+  if (isHardPublicPath(pathname)) {
+    return NextResponse.next();
   }
 
   // Public routes

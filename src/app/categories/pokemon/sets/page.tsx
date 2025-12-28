@@ -1,16 +1,17 @@
+// src/app/categories/pokemon/sets/page.tsx
 import "server-only";
 
 import Link from "next/link";
 import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { auth } from "@clerk/nextjs/server";
 
 export const metadata = {
   title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
   description:
     "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
 };
-
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +25,14 @@ type SetRow = {
   release_date: string | null; // TEXT in DB
   logo_url: string | null;
   symbol_url: string | null;
+
+  // computed
+  total_cards: number | null;
+  owned_distinct: number | null;
+  owned_qty: number | null;
 };
+
+type SearchParams = { q?: string; page?: string; perPage?: string };
 
 const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
 
@@ -40,7 +48,7 @@ function parsePage(v?: string) {
 
 function buildHref(
   base: string,
-  qs: { q?: string | null; page?: number; perPage?: number }
+  qs: { q?: string | null; page?: number; perPage?: number },
 ) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", qs.q);
@@ -51,13 +59,21 @@ function buildHref(
 }
 
 /**
- * tcg_sets.release_date is TEXT, often "YYYY/MM/DD" (PokemonTCG) or "YYYY-MM-DD".
- * We compute a date value for ordering without changing schema.
+ * tcg_sets.release_date is TEXT, often "YYYY/MM/DD" or "YYYY-MM-DD".
+ * These expressions let us sort by date without changing schema.
  */
-const releaseDateOrderSql = sql`
+const releaseDateOrderTcgSets = sql`
   CASE
     WHEN release_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN to_date(release_date, 'YYYY-MM-DD')
     WHEN release_date ~ '^[0-9]{4}/[0-9]{2}/[0-9]{2}$' THEN to_date(release_date, 'YYYY/MM/DD')
+    ELSE NULL
+  END
+`;
+
+const releaseDateOrderBaseSets = sql`
+  CASE
+    WHEN bs.release_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN to_date(bs.release_date, 'YYYY-MM-DD')
+    WHEN bs.release_date ~ '^[0-9]{4}/[0-9]{2}/[0-9]{2}$' THEN to_date(bs.release_date, 'YYYY/MM/DD')
     ELSE NULL
   END
 `;
@@ -71,9 +87,11 @@ function pickHttpUrl(a?: string | null, b?: string | null): string | null {
 export default async function SetsIndex({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; page?: string; perPage?: string }>;
+  searchParams: Promise<SearchParams>;
 }) {
   const sp = await searchParams;
+  const { userId } = await auth(); // optional; page remains public
+  const isLoggedIn = Boolean(userId);
 
   const q = (sp?.q ?? "").trim() || null;
   const perPage = parsePerPage(sp?.perPage);
@@ -92,21 +110,57 @@ export default async function SetsIndex({
       ${where}
     `)).rows?.[0]?.count ?? 0;
 
+  // One query: sets page + total cards per set + (if logged in) owned counts per set
   const sets =
     (
       await db.execute<SetRow>(sql`
+        WITH base_sets AS (
+          SELECT
+            id,
+            name,
+            series,
+            ptcgo_code,
+            release_date,
+            logo_url,
+            symbol_url
+          FROM tcg_sets
+          ${where}
+          ORDER BY ${releaseDateOrderTcgSets} DESC NULLS LAST, name ASC NULLS LAST, id ASC
+          LIMIT ${perPage} OFFSET ${offset}
+        ),
+        card_totals AS (
+          SELECT
+            set_id,
+            COUNT(*)::int AS total_cards
+          FROM tcg_cards
+          GROUP BY set_id
+        ),
+        owned AS (
+          SELECT
+            c.set_id,
+            COUNT(DISTINCT uci.card_id)::int AS owned_distinct,
+            COALESCE(SUM(uci.quantity), 0)::int AS owned_qty
+          FROM user_collection_items uci
+          JOIN tcg_cards c ON c.id = uci.card_id
+          WHERE uci.user_id = ${userId ?? ""}   -- if logged out, matches nothing
+            AND uci.game = 'pokemon'
+          GROUP BY c.set_id
+        )
         SELECT
-          id,
-          name,
-          series,
-          ptcgo_code,
-          release_date,
-          logo_url,
-          symbol_url
-        FROM tcg_sets
-        ${where}
-        ORDER BY ${releaseDateOrderSql} DESC NULLS LAST, name ASC NULLS LAST, id ASC
-        LIMIT ${perPage} OFFSET ${offset}
+          bs.id,
+          bs.name,
+          bs.series,
+          bs.ptcgo_code,
+          bs.release_date,
+          bs.logo_url,
+          bs.symbol_url,
+          COALESCE(ct.total_cards, 0)::int AS total_cards,
+          COALESCE(o.owned_distinct, 0)::int AS owned_distinct,
+          COALESCE(o.owned_qty, 0)::int AS owned_qty
+        FROM base_sets bs
+        LEFT JOIN card_totals ct ON ct.set_id = bs.id
+        LEFT JOIN owned o ON o.set_id = bs.id
+        ORDER BY ${releaseDateOrderBaseSets} DESC NULLS LAST, bs.name ASC NULLS LAST, bs.id ASC
       `)
     ).rows ?? [];
 
@@ -122,11 +176,7 @@ export default async function SetsIndex({
 
         <div className="flex flex-wrap gap-3">
           {/* Per-page */}
-          <form
-            action={baseHref}
-            method="get"
-            className="flex items-center gap-2"
-          >
+          <form action={baseHref} method="get" className="flex items-center gap-2">
             {q ? <input type="hidden" name="q" value={q} /> : null}
             <input type="hidden" name="page" value="1" />
             <label htmlFor="pp" className="sr-only">
@@ -153,11 +203,7 @@ export default async function SetsIndex({
           </form>
 
           {/* Search */}
-          <form
-            action={baseHref}
-            method="get"
-            className="flex items-center gap-2"
-          >
+          <form action={baseHref} method="get" className="flex items-center gap-2">
             <input type="hidden" name="perPage" value={String(perPage)} />
             <input type="hidden" name="page" value="1" />
             <input
@@ -198,11 +244,19 @@ export default async function SetsIndex({
           {sets.map((s) => {
             const img = pickHttpUrl(s.logo_url, s.symbol_url);
 
+            const totalCards = Number(s.total_cards ?? 0);
+            const ownedDistinct = Number(s.owned_distinct ?? 0);
+            const ownedCopies = Number(s.owned_qty ?? 0);
+
+            const pct =
+              totalCards > 0 ? Math.round((ownedDistinct / totalCards) * 100) : 0;
+
             return (
               <li
                 key={s.id}
                 className="overflow-hidden rounded-xl border border-white/10 bg-white/5 backdrop-blur-sm transition hover:border-white/20 hover:bg-white/10"
               >
+                {/* MAIN TILE LINK */}
                 <Link
                   href={`/categories/pokemon/sets/${encodeURIComponent(s.id)}`}
                   className="block"
@@ -222,6 +276,13 @@ export default async function SetsIndex({
                         No image
                       </div>
                     )}
+
+                    {/* % badge */}
+                    {isLoggedIn && totalCards > 0 ? (
+                      <div className="absolute left-2 top-2 rounded-full border border-white/15 bg-black/40 px-2 py-0.5 text-[11px] font-semibold text-white backdrop-blur-sm">
+                        {pct}% • {ownedDistinct}/{totalCards}
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="p-3">
@@ -240,8 +301,50 @@ export default async function SetsIndex({
                         Released: {s.release_date.replaceAll("/", "-")}
                       </div>
                     )}
+
+                    {/* Completion block (NO nested link) */}
+                    {isLoggedIn ? (
+                      <div className="mt-3 space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-white/70">
+                          <span>
+                            {ownedDistinct.toLocaleString()} /{" "}
+                            {totalCards.toLocaleString()} cards
+                          </span>
+                          <span className="text-white/80">
+                            {totalCards > 0 ? `${pct}%` : "—"}
+                          </span>
+                        </div>
+
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                          <div
+                            className="h-full rounded-full bg-white/70"
+                            style={{
+                              width: `${Math.max(0, Math.min(100, pct))}%`,
+                            }}
+                          />
+                        </div>
+
+                        {ownedCopies > 0 ? (
+                          <div className="text-[11px] text-white/60">
+                            {ownedCopies.toLocaleString()} total copies
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 </Link>
+
+                {/* SECONDARY LINK OUTSIDE MAIN TILE LINK */}
+                {isLoggedIn ? (
+                  <div className="px-3 pb-3 pt-0">
+                    <Link
+                      href={`/collection?game=pokemon&set=${encodeURIComponent(s.id)}`}
+                      className="text-[11px] text-sky-300 hover:underline"
+                    >
+                      View in my collection →
+                    </Link>
+                  </div>
+                ) : null}
               </li>
             );
           })}
@@ -251,7 +354,11 @@ export default async function SetsIndex({
       {total > perPage && (
         <nav className="mt-4 flex items-center justify-center gap-2 text-sm">
           <Link
-            href={buildHref(baseHref, { q, perPage, page: Math.max(1, page - 1) })}
+            href={buildHref(baseHref, {
+              q,
+              perPage,
+              page: Math.max(1, page - 1),
+            })}
             aria-disabled={page === 1}
             className={`rounded-md border px-3 py-1 ${
               page === 1

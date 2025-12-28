@@ -204,7 +204,7 @@ export default function Header() {
               </NavLink>
             )}
 
-            <NavLink href="/my-collection" active={isActive("/my-collection")}>
+            <NavLink href="/collection" active={isActive("/collection")}>
               My Collection
             </NavLink>
           </div>

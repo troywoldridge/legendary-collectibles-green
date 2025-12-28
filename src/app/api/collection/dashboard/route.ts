@@ -1,13 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // src/app/api/collection/dashboard/route.ts
+import "server-only";
+
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { db } from "@/lib/db";
-import { sql, and, eq, gte } from "drizzle-orm";
-import {
-  userCollectionDailyValuations,
-  userCollectionItemValuations,
-} from "@/lib/db/schema/collectionAnalytics";
+import { sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,7 +38,7 @@ export async function GET() {
   const today = new Date();
   const todayStr = toDateStr(today);
 
-  // 1) Load all collection items for this user
+  // 1) Load all collection items for this user (for listing widgets)
   const rowsRes = await db.execute<CollectionRow>(sql`
     SELECT
       id,
@@ -60,120 +58,84 @@ export async function GET() {
 
   const items = rowsRes.rows ?? [];
 
-  // 2) Compute aggregates
-  let totalQuantity = 0;
-  const distinctItems = items.length;
-  let totalCostCents = 0;
-  let totalValueCents = 0;
+  // 2) Aggregates (market value is last_value_cents; NULL counts as 0)
+  const summaryRes = await db.execute<{
+    total_quantity: number | string | null;
+    distinct_items: number | string | null;
+    total_cost_cents: number | string | null;
+    total_value_cents: number | string | null;
+  }>(sql`
+    SELECT
+      COALESCE(SUM(COALESCE(quantity, 0)), 0)::int AS total_quantity,
+      COUNT(*)::int AS distinct_items,
+      COALESCE(SUM(COALESCE(cost_cents, 0) * COALESCE(quantity, 0)), 0)::int AS total_cost_cents,
+      COALESCE(SUM(COALESCE(last_value_cents, 0)), 0)::int AS total_value_cents
+    FROM user_collection_items
+    WHERE user_id = ${userId}
+  `);
+
+  const s = summaryRes.rows?.[0] ?? {
+    total_quantity: 0,
+    distinct_items: 0,
+    total_cost_cents: 0,
+    total_value_cents: 0,
+  };
+
+  const totalQuantity = Number(s.total_quantity ?? 0);
+  const distinctItems = Number(s.distinct_items ?? 0);
+  const totalCostCents = Number(s.total_cost_cents ?? 0);
+  const totalValueCents = Number(s.total_value_cents ?? 0);
+
+  // 2b) byGame (market value only)
+  const byGameRes = await db.execute<{
+    game: string | null;
+    quantity: number | string | null;
+    value_cents: number | string | null;
+  }>(sql`
+    SELECT
+      game,
+      COALESCE(SUM(COALESCE(quantity, 0)), 0)::int AS quantity,
+      COALESCE(SUM(COALESCE(last_value_cents, 0)), 0)::int AS value_cents
+    FROM user_collection_items
+    WHERE user_id = ${userId}
+    GROUP BY game
+  `);
 
   const byGame: Record<string, { quantity: number; valueCents: number }> = {};
-
-  for (const row of items) {
-    const qty = row.quantity ?? 0;
-    const costPer = row.cost_cents ?? 0;
-    const valuePer = row.last_value_cents ?? row.cost_cents ?? 0;
-
-    totalQuantity += qty;
-    if (row.cost_cents != null) {
-      totalCostCents += qty * row.cost_cents;
-    }
-    totalValueCents += qty * valuePer;
-
-    const gameKey = row.game || "other";
-    if (!byGame[gameKey]) {
-      byGame[gameKey] = { quantity: 0, valueCents: 0 };
-    }
-    byGame[gameKey].quantity += qty;
-    byGame[gameKey].valueCents += qty * valuePer;
+  for (const r of byGameRes.rows ?? []) {
+    const key = (r.game ?? "other").toLowerCase();
+    byGame[key] = {
+      quantity: Number(r.quantity ?? 0),
+      valueCents: Number(r.value_cents ?? 0),
+    };
   }
 
-  const breakdown = { byGame };
-
-  // 3) Upsert today's portfolio snapshot into user_collection_daily_valuations
-  await db
-    .insert(userCollectionDailyValuations)
-    .values({
-      userId,
-      asOfDate: todayStr,
-      totalQuantity,
-      distinctItems,
-      totalCostCents,
-      totalValueCents,
-      realizedPnlCents: null,
-      unrealizedPnlCents: null,
-      breakdown,
-    })
-    .onConflictDoUpdate({
-      target: [
-        userCollectionDailyValuations.userId,
-        userCollectionDailyValuations.asOfDate,
-      ],
-      set: {
-        totalQuantity,
-        distinctItems,
-        totalCostCents,
-        totalValueCents,
-        breakdown,
-        // createdAt left untouched
-      },
-    });
-
-  // 4) Upsert per-item valuations (for card-level charts)
-  for (const row of items) {
-    const qty = row.quantity ?? 0;
-    const priceCents = row.last_value_cents ?? row.cost_cents ?? null;
-    const totalItemValue =
-      priceCents != null ? priceCents * qty : null;
-
-    await db
-      .insert(userCollectionItemValuations)
-      .values({
-        userId,
-        itemId: row.id,
-        asOfDate: todayStr,
-        game: row.game,
-        quantity: qty,
-        priceCents,
-        totalValueCents: totalItemValue,
-        source: "effective",
-      })
-      .onConflictDoUpdate({
-        target: [
-          userCollectionItemValuations.itemId,
-          userCollectionItemValuations.asOfDate,
-          userCollectionItemValuations.source,
-        ],
-        set: {
-          quantity: qty,
-          priceCents,
-          totalValueCents: totalItemValue,
-        },
-      });
-  }
-
-  // 5) Fetch history for last 60 days for the portfolio chart
+  // 3) Fetch history for last 60 days from user_collection_daily_valuations (READ ONLY)
   const lookbackDays = 60;
   const from = new Date(today);
   from.setDate(from.getDate() - lookbackDays);
   const fromStr = toDateStr(from);
 
-  const historyRows = await db
-    .select({
-      asOfDate: userCollectionDailyValuations.asOfDate,
-      totalValueCents: userCollectionDailyValuations.totalValueCents,
-      totalCostCents: userCollectionDailyValuations.totalCostCents,
-      totalQuantity: userCollectionDailyValuations.totalQuantity,
-    })
-    .from(userCollectionDailyValuations)
-    .where(
-      and(
-        eq(userCollectionDailyValuations.userId, userId),
-        gte(userCollectionDailyValuations.asOfDate, fromStr),
-      ),
-    )
-    .orderBy(userCollectionDailyValuations.asOfDate);
+  const histRes = await db.execute<{
+    as_of_date: string;
+    total_value_cents: number | string | null;
+    total_cost_cents: number | string | null;
+    total_quantity: number | string | null;
+  }>(sql`
+    SELECT
+      as_of_date,
+      total_value_cents,
+      total_cost_cents,
+      total_quantity
+    FROM user_collection_daily_valuations
+    WHERE user_id = ${userId}
+      AND as_of_date >= ${fromStr}::date
+    ORDER BY as_of_date ASC
+  `);
 
-  // 6) Recently added list (for a widget on the collection page)
+  const historyRows = histRes.rows ?? [];
+
+  // 4) Recently added list (for a widget)
   const recentlyAdded = items
     .slice()
     .sort((a, b) => {
@@ -190,11 +152,11 @@ export async function GET() {
       setName: r.set_name,
       imageUrl: r.image_url,
       quantity: r.quantity ?? 0,
-      lastValueCents: r.last_value_cents,
+      lastValueCents: r.last_value_cents ?? 0,
       createdAt: r.created_at,
     }));
 
-  // 7) Return JSON the UI can feed straight into widgets / charts
+  // 5) Return JSON
   return NextResponse.json({
     summary: {
       totalQuantity,
@@ -202,12 +164,13 @@ export async function GET() {
       totalCostCents,
       totalValueCents,
       byGame,
+      asOfDate: todayStr,
     },
     history: historyRows.map((h) => ({
-      date: h.asOfDate,
-      totalValueCents: h.totalValueCents ?? 0,
-      totalCostCents: h.totalCostCents ?? 0,
-      totalQuantity: h.totalQuantity,
+      date: h.as_of_date,
+      totalValueCents: Number(h.total_value_cents ?? 0),
+      totalCostCents: Number(h.total_cost_cents ?? 0),
+      totalQuantity: Number(h.total_quantity ?? 0),
     })),
     recentlyAdded,
   });

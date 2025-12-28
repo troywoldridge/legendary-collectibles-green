@@ -1,12 +1,14 @@
-
 import "server-only";
+
 import Link from "next/link";
 import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { auth } from "@clerk/nextjs/server";
 
 export const metadata = {
-  title: "Yu-Gi-Oh Card Prices, Collection Tracking & Shop | Legendary Collectibles",
+  title:
+    "Yu-Gi-Oh Card Prices, Collection Tracking & Shop | Legendary Collectibles",
   description:
     "Browse Yu-Gi-Oh  cards, track prices, manage your collection, and buy singles and sealed products online.",
 };
@@ -17,10 +19,15 @@ export const dynamic = "force-dynamic";
 type SearchParams = Record<string, string | string[] | undefined>;
 
 type SetItem = {
-  id: string;              // set_name (route id)
-  name: string | null;     // set_name
+  id: string; // set_name (route id)
+  name: string | null; // set_name
   logo_url: string | null; // sample image from any card in the set
   symbol_url: string | null;
+
+  // completion metrics (only meaningful when signed in)
+  total_cards: number | string | null;
+  owned_cards: number | string | null;
+  owned_copies: number | string | null;
 };
 
 const BASE = "/categories/yugioh/sets";
@@ -36,7 +43,10 @@ function parsePage(v?: string | string[]) {
   const n = Number(s ?? 1);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
-function buildHref(base: string, qs: { q?: string | null; page?: number; perPage?: number }) {
+function buildHref(
+  base: string,
+  qs: { q?: string | null; page?: number; perPage?: number },
+) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", qs.q);
   if (qs.page) p.set("page", String(qs.page));
@@ -45,7 +55,21 @@ function buildHref(base: string, qs: { q?: string | null; page?: number; perPage
   return s ? `${base}?${s}` : base;
 }
 
-async function getSets(opts: { q: string | null; offset: number; limit: number }) {
+function toNum(v: unknown): number {
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+async function getSets(opts: {
+  q: string | null;
+  offset: number;
+  limit: number;
+  userId: string | null;
+}) {
   const filters = [sql`1=1`];
   if (opts.q) {
     const like = `%${opts.q}%`;
@@ -57,26 +81,74 @@ async function getSets(opts: { q: string | null; offset: number; limit: number }
     (
       await db.execute<{ count: number }>(sql`
         SELECT COUNT(*)::int AS count
-        FROM (SELECT DISTINCT s.set_name
-              FROM ygo_card_sets s
-              WHERE ${where}) t
+        FROM (
+          SELECT DISTINCT s.set_name
+          FROM ygo_card_sets s
+          WHERE ${where}
+        ) t
       `)
     ).rows?.[0]?.count ?? 0;
+
+  // If signed out, we still return sets but with 0 metrics
+    const userId = opts.userId;
 
   const rows =
     (
       await db.execute<SetItem>(sql`
+        WITH sets_page AS (
+          SELECT
+            s.set_name,
+            MIN(img.image_url_small) AS logo_url,
+            MIN(img.image_url)       AS symbol_url
+          FROM ygo_card_sets s
+          LEFT JOIN ygo_card_images img ON img.card_id = s.card_id
+          WHERE ${where}
+          GROUP BY s.set_name
+          ORDER BY s.set_name ASC NULLS LAST
+          LIMIT ${opts.limit} OFFSET ${opts.offset}
+        )
         SELECT
-          s.set_name AS id,
-          s.set_name AS name,
-          MIN(img.image_url_small) AS logo_url,
-          MIN(img.image_url)       AS symbol_url
-        FROM ygo_card_sets s
-        LEFT JOIN ygo_card_images img ON img.card_id = s.card_id
-        WHERE ${where}
-        GROUP BY s.set_name
-        ORDER BY s.set_name ASC NULLS LAST
-        LIMIT ${opts.limit} OFFSET ${opts.offset}
+          sp.set_name AS id,
+          sp.set_name AS name,
+          sp.logo_url,
+          sp.symbol_url,
+
+          totals.total_cards,
+
+          ${userId
+            ? sql`owned.owned_cards`
+            : sql`0::int`} AS owned_cards,
+
+          ${userId
+            ? sql`owned.owned_copies`
+            : sql`0::int`} AS owned_copies
+
+        FROM sets_page sp
+
+        -- total cards in set (distinct card_id)
+        LEFT JOIN LATERAL (
+          SELECT COUNT(DISTINCT ys.card_id)::int AS total_cards
+          FROM ygo_card_sets ys
+          WHERE ys.set_name = sp.set_name
+        ) totals ON TRUE
+
+        ${userId
+          ? sql`
+        -- owned cards in this set (distinct card_id) + copies
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(DISTINCT uci.card_id)::int AS owned_cards,
+            COALESCE(SUM(uci.quantity), 0)::int AS owned_copies
+          FROM user_collection_items uci
+          WHERE uci.user_id = ${userId}
+            AND uci.game = 'yugioh'
+            AND uci.quantity > 0
+            AND uci.set_name = sp.set_name
+        ) owned ON TRUE
+        `
+          : sql``}
+
+        ORDER BY sp.set_name ASC NULLS LAST
       `)
     ).rows ?? [];
 
@@ -89,12 +161,18 @@ export default async function YugiohSetsIndex({
   searchParams: Promise<SearchParams>;
 }) {
   const sp = await searchParams;
+  const { userId } = await auth();
 
   const q = (Array.isArray(sp?.q) ? sp.q[0] : sp?.q)?.trim() || null;
   const perPage = parsePerPage(sp?.perPage);
   const reqPage = parsePage(sp?.page);
 
-  const { rows, total } = await getSets({ q, offset: (reqPage - 1) * perPage, limit: perPage });
+  const { rows, total } = await getSets({
+    q,
+    offset: (reqPage - 1) * perPage,
+    limit: perPage,
+    userId: userId ?? null,
+  });
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
   const page = Math.min(totalPages, reqPage);
@@ -102,24 +180,47 @@ export default async function YugiohSetsIndex({
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + perPage, total);
 
+  const showCompletion = Boolean(userId);
+
   return (
     <section className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="text-2xl font-bold text-white">Yu-Gi-Oh! Sets</h1>
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold text-white">Yu-Gi-Oh! Sets</h1>
+          {showCompletion ? (
+            <div className="text-xs text-white/70">
+              Completion is based on your{" "}
+              <Link href="/collection" className="text-sky-300 hover:underline">
+                collection
+              </Link>{" "}
+              items for game = yugioh.
+            </div>
+          ) : (
+            <div className="text-xs text-white/70">
+              Sign in to see set completion %.
+            </div>
+          )}
+        </div>
 
         <div className="flex flex-wrap gap-3">
           {/* Per page */}
           <form action={BASE} method="get" className="flex items-center gap-2">
             {q ? <input type="hidden" name="q" value={q} /> : null}
             <input type="hidden" name="page" value="1" />
-            <label htmlFor="pp" className="sr-only">Per page</label>
+            <label htmlFor="pp" className="sr-only">
+              Per page
+            </label>
             <select
               id="pp"
               name="perPage"
               defaultValue={String(perPage)}
               className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white"
             >
-              {PER_PAGE_OPTIONS.map((n) => (<option key={n} value={n}>{n}</option>))}
+              {PER_PAGE_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
             </select>
             <button className="rounded-md border border-white/20 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20">
               Apply
@@ -134,7 +235,7 @@ export default async function YugiohSetsIndex({
               name="q"
               defaultValue={q ?? ""}
               placeholder="Search sets (name or code)…"
-              className="w-60 md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
+              className="w-60 rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50 md:w-[320px]"
             />
             <button className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
               Search
@@ -164,12 +265,23 @@ export default async function YugiohSetsIndex({
         <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
           {rows.map((s) => {
             const img = s.logo_url || s.symbol_url || null;
+
+            const totalCards = toNum(s.total_cards);
+            const ownedCards = toNum(s.owned_cards);
+            const ownedCopies = toNum(s.owned_copies);
+
+            const pct =
+              totalCards > 0 ? Math.min(100, (ownedCards / totalCards) * 100) : 0;
+
             return (
               <li
                 key={s.id}
-                className="rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:bg-white/10 hover:border-white/20 transition"
+                className="overflow-hidden rounded-xl border border-white/10 bg-white/5 transition hover:border-white/20 hover:bg-white/10"
               >
-                <Link href={`/categories/yugioh/sets/${encodeURIComponent(s.id)}`} className="block">
+                <Link
+                  href={`/categories/yugioh/sets/${encodeURIComponent(s.id)}`}
+                  className="block"
+                >
                   <div className="relative w-full" style={{ aspectRatio: "16 / 9" }}>
                     {img ? (
                       <Image
@@ -186,13 +298,54 @@ export default async function YugiohSetsIndex({
                       </div>
                     )}
                   </div>
-                  <div className="p-3">
+
+                  <div className="p-3 space-y-2">
                     <div className="line-clamp-2 text-sm font-medium text-white">
                       {s.name ?? s.id}
                     </div>
+
+                    {/* ✅ Completion */}
+                    {showCompletion && (
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-white/70">
+                          <span>
+                            {ownedCards.toLocaleString()} / {totalCards.toLocaleString()} cards
+                          </span>
+                          <span className="text-white/80">
+                            {totalCards > 0 ? `${pct.toFixed(0)}%` : "—"}
+                          </span>
+                        </div>
+
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                          <div
+                            className="h-full rounded-full bg-white/70"
+                            style={{
+                              width: `${Math.max(0, Math.min(100, pct))}%`,
+                            }}
+                          />
+                        </div>
+
+                        {ownedCopies > 0 && (
+                          <div className="text-[11px] text-white/60">
+                            {ownedCopies.toLocaleString()} total copies
+                          </div>
+                        )}
+
+                        {/* quick link to filtered collection */}
+                        <div className="pt-1">
+                          <Link
+                            href={`/collection?game=yugioh&set=${encodeURIComponent(
+                              s.id,
+                            )}`}
+                            className="text-[11px] text-sky-300 hover:underline"
+                          >
+                            View in my collection →
+                          </Link>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </Link>
-               
               </li>
             );
           })}
@@ -213,7 +366,9 @@ export default async function YugiohSetsIndex({
           >
             ← Prev
           </Link>
-          <span className="px-2 text-white/80">Page {page} of {totalPages}</span>
+          <span className="px-2 text-white/80">
+            Page {page} of {totalPages}
+          </span>
           <Link
             href={buildHref(BASE, { q, perPage, page: page + 1 })}
             aria-disabled={offset + perPage >= total}

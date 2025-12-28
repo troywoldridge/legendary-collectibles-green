@@ -1,82 +1,90 @@
-
+// src/app/categories/yugioh/sets/[id]/page.tsx
 import "server-only";
+
 import Link from "next/link";
-import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
-export const metadata = {
-  title: "Yu-Gi-Oh Card Prices, Collection Tracking & Shop | Legendary Collectibles",
-  description:
-    "Browse Yu-Gi-Oh  cards, track prices, manage your collection, and buy singles and sealed products online.",
-};
+import YgoCardsClient from "../../cards/YgoCardsClient";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type SearchParams = Record<string, string | string[] | undefined>;
-
-type SetHeader = {
+type Row = {
+  card_id: string;
   name: string;
-  any_small: string | null;
-  any_large: string | null;
-  sample_code: string | null;
+  thumb: string | null;
 };
 
-type CardRow = {
-  id: string;
-  name: string | null;
-  rarity: string | null;
-  small: string | null;
-  large: string | null;
-};
+type CountRow = { count: string };
 
-const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
-
-function parsePerPage(v?: string | string[]) {
-  const s = Array.isArray(v) ? v[0] : v;
-  const n = Number(s ?? 30);
-  return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 30;
-}
-function parsePage(v?: string | string[]) {
-  const s = Array.isArray(v) ? v[0] : v;
-  const n = Number(s ?? 1);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
-}
-function parseBool(v?: string | string[]) {
-  const s = (Array.isArray(v) ? v[0] : v)?.toLowerCase();
-  return s === "1" || s === "true" || s === "on" || s === "yes";
-}
-function buildHref(
-  base: string,
-  qs: { q?: string | null; page?: number; perPage?: number; rares?: boolean }
-) {
-  const p = new URLSearchParams();
-  if (qs.q) p.set("q", qs.q);
-  if (qs.page) p.set("page", String(qs.page));
-  if (qs.perPage) p.set("perPage", String(qs.perPage));
-  if (qs.rares) p.set("rares", "1");
-  const s = p.toString();
-  return s ? `${base}?${s}` : base;
-}
-function bestImg(r: { small: string | null; large: string | null }) {
-  return r.large || r.small || null;
+function toInt(v: unknown, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
-async function getHeader(setName: string): Promise<SetHeader | null> {
-  const rs = await db.execute<SetHeader>(sql`
-    SELECT
-      ${setName}::text AS name,
-      MIN(img.image_url_small) AS any_small,
-      MIN(img.image_url) AS any_large,
-      MIN(s.set_code) AS sample_code
-    FROM ygo_card_sets s
-    LEFT JOIN ygo_card_images img ON img.card_id = s.card_id
-    WHERE s.set_name = ${setName}
+function getStr(v: unknown): string | null {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v) && typeof v[0] === "string") return v[0] ?? null;
+  return null;
+}
+
+function qs(next: Record<string, string | number | undefined>) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(next)) {
+    if (v === undefined || v === null || v === "") continue;
+    params.set(k, String(v));
+  }
+  const s = params.toString();
+  return s ? `?${s}` : "";
+}
+
+async function fetchSetCards(opts: {
+  setName: string;
+  q: string | null;
+  page: number;
+  per: number;
+}) {
+  const { setName, q, page, per } = opts;
+  const offset = (page - 1) * per;
+
+  const filters = [sql`cs.set_name = ${setName}`];
+  if (q) {
+    filters.push(
+      sql`(c.card_id = ${q} OR c.name ILIKE '%' || ${q} || '%')`,
+    );
+  }
+  const where = sql.join(filters, sql` AND `);
+
+  const countRes = await db.execute<CountRow>(sql`
+    SELECT COUNT(DISTINCT cs.card_id)::bigint::text AS count
+    FROM ygo_card_sets cs
+    JOIN ygo_cards c ON c.card_id = cs.card_id
+    WHERE ${where}
   `);
-  const row = rs.rows?.[0];
-  if (!row) return null;
-  return row;
+  const total = Number(countRes.rows?.[0]?.count ?? "0");
+
+  const listRes = await db.execute<Row>(sql`
+    SELECT
+      c.card_id,
+      c.name,
+      img.thumb
+    FROM ygo_card_sets cs
+    JOIN ygo_cards c ON c.card_id = cs.card_id
+    LEFT JOIN LATERAL (
+      SELECT i.image_url_small AS thumb
+      FROM ygo_card_images i
+      WHERE i.card_id = c.card_id
+      ORDER BY (CASE WHEN i.image_url_small IS NOT NULL THEN 0 ELSE 1 END)
+      LIMIT 1
+    ) img ON TRUE
+    WHERE ${where}
+    GROUP BY c.card_id, c.name, img.thumb
+    ORDER BY c.name ASC
+    LIMIT ${per} OFFSET ${offset}
+  `);
+
+  return { rows: (listRes.rows ?? []) as Row[], total };
 }
 
 export default async function YugiohSetDetailPage({
@@ -84,253 +92,142 @@ export default async function YugiohSetDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<SearchParams>;
+  searchParams: Promise<Record<string, unknown>>;
 }) {
-  const { id: rawId } = await params;
+  const p = await params;
   const sp = await searchParams;
 
-  const setName = decodeURIComponent(rawId ?? "").trim();
-  const baseHref = `/categories/yugioh/sets/${encodeURIComponent(setName)}`;
+  // route param is encoded set name
+  const setName = decodeURIComponent(p.id ?? "").trim();
 
-  const q = (Array.isArray(sp?.q) ? sp.q[0] : sp?.q)?.trim() || null;
-  const perPage = parsePerPage(sp?.perPage);
-  const reqPage = parsePage(sp?.page);
-  const raresOnly = parseBool(sp?.rares);
+  const qRaw = getStr(sp.q);
+  const q = qRaw ? qRaw.trim() : null;
 
-  const header = await getHeader(setName);
-  if (!header) {
-    return (
-      <section className="space-y-4">
-        <h1 className="text-2xl font-bold text-white">Set not found</h1>
-        <p className="text-white/70 text-sm break-all">Looked up: <code>{setName}</code></p>
-        <Link href="/categories/yugioh/sets" className="text-sky-300 hover:underline">← Back to all sets</Link>
-      </section>
-    );
-  }
+  const per = Math.min(96, toInt(sp.per, 36));
+  const page = Math.max(1, toInt(sp.page, 1));
 
-  const filters = [sql`s.set_name = ${setName}`];
-  if (q) {
-    filters.push(sql`(c.name ILIKE ${"%" + q + "%"} OR c.card_id = ${q})`);
-  }
-  if (raresOnly) {
-    // catch-all for the many YGO rarities
-    filters.push(sql`(s.set_rarity ILIKE '%Rare%')`);
-  }
-  const where = sql.join(filters, sql` AND `);
+  const { rows, total } = await fetchSetCards({ setName, q, page, per });
 
-  const total =
-    (
-      await db.execute<{ count: number }>(sql`
-        SELECT COUNT(*)::int AS count
-        FROM ygo_card_sets s
-        JOIN ygo_cards c ON c.card_id = s.card_id
-        WHERE ${where}
-      `)
-    ).rows?.[0]?.count ?? 0;
+  const pages = Math.max(1, Math.ceil(total / per));
+  const showingFrom = total ? (page - 1) * per + 1 : 0;
+  const showingTo = Math.min(total, page * per);
 
-  const totalPages = Math.max(1, Math.ceil(total / perPage));
-  const page = Math.min(totalPages, reqPage);
-  const offset = (page - 1) * perPage;
+  const basePath = `/categories/yugioh/sets/${encodeURIComponent(setName)}`;
 
-  const rows =
-    (
-      await db.execute<CardRow>(sql`
-        SELECT
-          c.card_id AS id,
-          c.name,
-          s.set_rarity AS rarity,
-          im.image_url_small AS small,
-          im.image_url AS large
-        FROM ygo_card_sets s
-        JOIN ygo_cards c ON c.card_id = s.card_id
-        LEFT JOIN LATERAL (
-          SELECT i.image_url_small, i.image_url
-          FROM ygo_card_images i
-          WHERE i.card_id = c.card_id
-          ORDER BY (CASE WHEN i.image_url IS NOT NULL THEN 0 ELSE 1 END)
-          LIMIT 1
-        ) im ON TRUE
-        WHERE ${where}
-        ORDER BY c.name ASC
-        LIMIT ${perPage} OFFSET ${offset}
-      `)
-    ).rows ?? [];
-
-  const from = total === 0 ? 0 : offset + 1;
-  const to = Math.min(offset + perPage, total);
-
-  const banner = header.any_large || header.any_small || null;
+  // feed client component so it can render AddToCollection + status
+  const cardsForClient = rows.map((r) => ({
+    cardId: r.card_id,
+    name: r.name,
+    setName: setName,
+    imageUrl: r.thumb ?? null,
+  }));
 
   return (
     <section className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-        <div className="flex items-center gap-4">
-          <div className="relative h-20 w-36 shrink-0 rounded-lg bg-white/5 ring-1 ring-white/10 overflow-hidden">
-            {banner ? (
-              <Image
-                src={banner}
-                alt={header.name}
-                fill
-                unoptimized
-                className="object-contain"
-                sizes="144px"
-                priority
-              />
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold text-white">{setName}</h1>
+          <div className="text-sm text-white/70">
+            Yu-Gi-Oh! Set •{" "}
+            {q ? (
+              <>
+                Showing <span className="text-white">{showingFrom}</span>–
+                <span className="text-white">{showingTo}</span> of{" "}
+                <span className="text-white">{total.toLocaleString()}</span>{" "}
+                matches for <span className="text-white">“{q}”</span>
+              </>
             ) : (
-              <div className="absolute inset-0 grid place-items-center text-white/60 text-xs">
-                No image
-              </div>
+              <>
+                Showing <span className="text-white">{showingFrom}</span>–
+                <span className="text-white">{showingTo}</span> of{" "}
+                <span className="text-white">{total.toLocaleString()}</span>{" "}
+                cards
+              </>
             )}
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-white">{header.name}</h1>
-            {header.sample_code && (
-              <div className="text-sm text-white/80">Example code: {header.sample_code}</div>
-            )}
-
-            
-          </div>
         </div>
 
-        <Link href="/categories/yugioh/sets" className="text-sky-300 hover:underline">
-          ← All sets
-        </Link>
+        {/* Search within set */}
+        <form action={basePath} method="get" className="flex items-center gap-2">
+          <input type="hidden" name="per" value={String(per)} />
+          <input type="hidden" name="page" value="1" />
+          <input
+            name="q"
+            defaultValue={q ?? ""}
+            placeholder="Search this set (name/id)…"
+            className="w-64 rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
+          />
+          <button className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
+            Search
+          </button>
+          {q ? (
+            <Link
+              href={`${basePath}${qs({ per, page: 1 })}`}
+              className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
+            >
+              Clear
+            </Link>
+          ) : null}
+        </form>
       </div>
 
-      {/* Toolbar */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-sm text-white/80">
-          Showing {from}-{to} of {total} cards{(q || raresOnly) && " (filtered)"}
-        </div>
-
-        <div className="flex flex-wrap gap-3">
-          {/* Per page */}
-          <form action={baseHref} method="get" className="flex items-center gap-2">
-            {q ? <input type="hidden" name="q" value={q} /> : null}
-            {raresOnly ? <input type="hidden" name="rares" value="1" /> : null}
-            <input type="hidden" name="page" value="1" />
-            <label htmlFor="pp" className="sr-only">Per page</label>
-            <select id="pp" name="perPage" defaultValue={String(perPage)}
-              className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white">
-              {PER_PAGE_OPTIONS.map((n) => (<option key={n} value={n}>{n}</option>))}
-            </select>
-            <button type="submit" className="rounded-md border border-white/20 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20">
-              Apply
-            </button>
-          </form>
-
-          {/* Search within set */}
-          <form action={baseHref} method="get" className="flex items-center gap-2">
-            {raresOnly ? <input type="hidden" name="rares" value="1" /> : null}
-            <input type="hidden" name="perPage" value={String(perPage)} />
-            <input type="hidden" name="page" value="1" />
-            <input
-              name="q"
-              defaultValue={q ?? ""}
-              placeholder="Search cards (name or exact ID)…"
-              className="w-60 md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
-            />
-            <button type="submit" className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
-              Search
-            </button>
-            {q && (
-              <Link
-                href={buildHref(baseHref, { perPage, page: 1, rares: raresOnly })}
-                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
-              >
-                Clear
-              </Link>
-            )}
-          </form>
-
-          {/* Rares toggle */}
-          <form action={baseHref} method="get" className="flex items-center gap-3">
-            {q ? <input type="hidden" name="q" value={q} /> : null}
-            <input type="hidden" name="perPage" value={String(perPage)} />
-            <input type="hidden" name="page" value="1" />
-            <label className="inline-flex items-center gap-2 text-sm text-white/90">
-              <input type="checkbox" name="rares" value="1" defaultChecked={raresOnly} />
-              Rares+
-            </label>
-            <button type="submit" className="rounded-md border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/20">
-              Apply
-            </button>
-          </form>
-        </div>
-      </div>
-
-      {/* Cards grid */}
+      {/* Empty */}
       {rows.length === 0 ? (
-        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">
-          {q || raresOnly ? "No cards matched your filters." : "No cards found in this set."}
+        <div className="rounded-2xl border border-white/15 bg-white/5 p-6 text-white/80">
+          No cards found{q ? <> for “{q}”</> : null}.
         </div>
       ) : (
-        <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-          {rows.map((c) => {
-            const img = bestImg(c);
-            return (
-              <li
-                key={c.id}
-                className="rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:bg-white/10 hover:border-white/20 transition"
-              >
-                <Link href={`/categories/yugioh/cards/${encodeURIComponent(c.id)}`} className="block">
-                  <div className="relative w-full" style={{ aspectRatio: "3 / 4" }}>
-                    {img ? (
-                      <Image
-                        src={img}
-                        alt={c.name ?? c.id}
-                        fill
-                        unoptimized
-                        className="object-contain"
-                        sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
-                      />
-                    ) : (
-                      <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
-                    )}
-                  </div>
-                  <div className="p-3">
-                    <div className="line-clamp-2 text-sm font-medium text-white">
-                      {c.name ?? c.id}
-                    </div>
-                    <div className="mt-1 text-xs text-white/80">{c.rarity ?? ""}</div>
-                  </div>
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      )}
+        <>
+          {/* ✅ Client list with Add to collection */}
+          <YgoCardsClient cards={cardsForClient} />
 
-      {/* Pagination */}
-      {total > perPage && (
-        <nav className="mt-4 flex items-center justify-center gap-2 text-sm">
-          <Link
-            href={buildHref(baseHref, { q, perPage, rares: raresOnly, page: Math.max(1, page - 1) })}
-            aria-disabled={page === 1}
-            className={`rounded-md border px-3 py-1 ${
-              page === 1
-                ? "pointer-events-none border-white/10 text-white/40"
-                : "border-white/20 text-white hover:bg-white/10"
-            }`}
-          >
-            ← Prev
-          </Link>
-          <span className="px-2 text-white/80">
-            Page {page} of {totalPages}
-          </span>
-          <Link
-            href={buildHref(baseHref, { q, perPage, rares: raresOnly, page: page + 1 })}
-            aria-disabled={offset + perPage >= total}
-            className={`rounded-md border px-3 py-1 ${
-              offset + perPage >= total
-                ? "pointer-events-none border-white/10 text-white/40"
-                : "border-white/20 text-white hover:bg-white/10"
-            }`}
-          >
-            Next →
-          </Link>
-        </nav>
+          {/* Pagination */}
+          <nav className="mt-4 flex items-center justify-between gap-2">
+            <div>
+              {page > 1 ? (
+                <Link
+                  href={`${basePath}${qs({
+                    q: q ?? undefined,
+                    page: page - 1,
+                    per,
+                  })}`}
+                  className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-sky-300 hover:border-white/25 hover:bg-white/10"
+                >
+                  ← Prev
+                </Link>
+              ) : (
+                <span className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white/40">
+                  ← Prev
+                </span>
+              )}
+            </div>
+
+            <div className="text-sm text-white/70">
+              Page <span className="text-white">{page}</span> of{" "}
+              <span className="text-white">{pages}</span>
+            </div>
+
+            <div>
+              {page < pages ? (
+                <Link
+                  href={`${basePath}${qs({
+                    q: q ?? undefined,
+                    page: page + 1,
+                    per,
+                  })}`}
+                  className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-sky-300 hover:border-white/25 hover:bg-white/10"
+                >
+                  Next →
+                </Link>
+              ) : (
+                <span className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white/40">
+                  Next →
+                </span>
+              )}
+            </div>
+          </nav>
+        </>
       )}
     </section>
   );

@@ -14,7 +14,7 @@ export default function robots(): MetadataRoute.Robots {
            "/sign-in",
             "/sign-up",
             "/post-auth",
-            "/my-collection",
+            "/collection",
             "/collection",
             "/account",
             "/dashboard",
