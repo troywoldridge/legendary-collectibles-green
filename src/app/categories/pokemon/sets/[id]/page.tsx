@@ -21,17 +21,23 @@ type SetRow = {
   name: string | null;
   series: string | null;
   ptcgo_code: string | null;
-  release_date: string | null; // TEXT in DB
+  release_date: string | null;
   logo_url: string | null;
   symbol_url: string | null;
 };
 
-type CardRow = {
+type CardListRow = {
   id: string;
   name: string | null;
   rarity: string | null;
   small_image: string | null;
   large_image: string | null;
+
+  v_normal: boolean | null;
+  v_reverse: boolean | null;
+  v_holo: boolean | null;
+  v_first_edition: boolean | null;
+  v_w_promo: boolean | null;
 };
 
 type SearchParams = Record<string, string | string[] | undefined>;
@@ -114,14 +120,7 @@ export default async function SetDetailPage({
 
   try {
     const res = await db.execute<SetRow>(sql`
-      SELECT
-        id,
-        name,
-        series,
-        ptcgo_code,
-        release_date,
-        logo_url,
-        symbol_url
+      SELECT id, name, series, ptcgo_code, release_date, logo_url, symbol_url
       FROM v_tcg_sets_images
       WHERE id = ${setParam}
          OR lower(ptcgo_code) = lower(${setParam})
@@ -138,19 +137,12 @@ export default async function SetDetailPage({
     `);
     setRow = res.rows?.[0];
   } catch {
-    // ignore; fallback below
+    // ignore
   }
 
   if (!setRow) {
     const res = await db.execute<SetRow>(sql`
-      SELECT
-        id,
-        name,
-        series,
-        ptcgo_code,
-        release_date,
-        logo_url,
-        symbol_url
+      SELECT id, name, series, ptcgo_code, release_date, logo_url, symbol_url
       FROM tcg_sets
       WHERE id = ${setParam}
          OR lower(ptcgo_code) = lower(${setParam})
@@ -185,47 +177,63 @@ export default async function SetDetailPage({
   const canonicalSetId = setRow.id;
 
   // Card filters
-  const conditions = [sql`set_id = ${canonicalSetId}`];
+  const conditions = [sql`c.set_id = ${canonicalSetId}`];
 
   if (q) {
     conditions.push(
-      sql`(name ILIKE ${"%" + q + "%"} OR rarity ILIKE ${"%" + q + "%"} OR id ILIKE ${"%" + q + "%"})`,
+      sql`(c.name ILIKE ${"%" + q + "%"} OR c.rarity ILIKE ${"%" + q + "%"} OR c.id ILIKE ${"%" + q + "%"})`,
     );
   }
 
   if (raresOnly && holoOnly) {
     conditions.push(
-      sql`(rarity ILIKE '%Rare%' AND (rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%'))`,
+      sql`(c.rarity ILIKE '%Rare%' AND (c.rarity ILIKE '%Holo%' OR c.rarity ILIKE '%Foil%'))`,
     );
   } else if (raresOnly) {
-    conditions.push(sql`(rarity ILIKE '%Rare%')`);
+    conditions.push(sql`(c.rarity ILIKE '%Rare%')`);
   } else if (holoOnly) {
-    conditions.push(sql`(rarity ILIKE '%Holo%' OR rarity ILIKE '%Foil%')`);
+    conditions.push(sql`(c.rarity ILIKE '%Holo%' OR c.rarity ILIKE '%Foil%')`);
   }
 
   const whereSql = sql.join(conditions, sql` AND `);
 
   const total =
     (
-      await db.execute<{ count: number }>(
-        sql`SELECT COUNT(*)::int AS count FROM tcg_cards WHERE ${whereSql}`,
-      )
+      await db.execute<{ count: number }>(sql`
+        SELECT COUNT(*)::int AS count
+        FROM public.tcg_cards c
+        WHERE ${whereSql}
+      `)
     ).rows?.[0]?.count ?? 0;
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
   const safePage = Math.min(totalPages, Math.max(1, reqPage));
   const safeOffset = (safePage - 1) * perPage;
 
-  const cardsRows =
-    (
-      await db.execute<CardRow>(sql`
-        SELECT id, name, rarity, small_image, large_image
-        FROM tcg_cards
-        WHERE ${whereSql}
-        ORDER BY name ASC NULLS LAST, id ASC
-        LIMIT ${perPage} OFFSET ${safeOffset}
-      `)
-    ).rows ?? [];
+  const rowsSql = sql<CardListRow>`
+    SELECT
+      c.id,
+      c.name,
+      c.rarity,
+      c.small_image,
+      c.large_image,
+
+      v.normal        AS v_normal,
+      v.reverse       AS v_reverse,
+      v.holo          AS v_holo,
+      v.first_edition AS v_first_edition,
+      v.w_promo       AS v_w_promo
+
+    FROM public.tcg_cards c
+    LEFT JOIN public.tcg_card_variants v
+      ON v.card_id = c.id
+
+    WHERE ${whereSql}
+    ORDER BY c.name ASC NULLS LAST, c.id ASC
+    LIMIT ${perPage} OFFSET ${safeOffset}
+  `;
+
+  const rows = (await db.execute(rowsSql)).rows as CardListRow[];
 
   const from = total === 0 ? 0 : safeOffset + 1;
   const to = Math.min(safeOffset + perPage, total);
@@ -235,7 +243,6 @@ export default async function SetDetailPage({
   const isFirst = safePage <= 1;
   const isLast = safePage >= totalPages;
 
-  // Banner
   const banner = pickHttpUrl(setRow.logo_url, setRow.symbol_url);
 
   const subtitleParts = [
@@ -246,13 +253,19 @@ export default async function SetDetailPage({
 
   const subtitle = subtitleParts.join(" • ");
 
-  // ✅ Adapt set card rows to PokemonCardsClient shape
-  const cards = cardsRows.map((c) => ({
+  // ✅ Adapt to PokemonCardsClient shape (variants ALWAYS present)
+  const cards = rows.map((c) => ({
     cardId: c.id,
     name: c.name ?? c.id,
-    // here we already know set name; show the set title in the tile meta
     setName: setRow?.name ?? canonicalSetId,
     imageUrl: c.large_image || c.small_image || null,
+    variants: {
+      normal: c.v_normal ?? false,
+      reverse: c.v_reverse ?? false,
+      holo: c.v_holo ?? false,
+      first_edition: c.v_first_edition ?? false,
+      w_promo: c.v_w_promo ?? false,
+    },
   }));
 
   return (
@@ -391,7 +404,6 @@ export default async function SetDetailPage({
         </div>
       </div>
 
-      {/* ✅ Client grid with add-to-collection */}
       {cards.length === 0 ? (
         <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">
           {q || raresOnly || holoOnly ? "No cards matched your filters." : "No cards found in this set."}
@@ -400,17 +412,10 @@ export default async function SetDetailPage({
         <PokemonCardsClient cards={cards} />
       )}
 
-      {/* Pagination */}
       {total > perPage && (
         <nav className="mt-4 flex items-center justify-center gap-2 text-sm">
           <Link
-            href={buildHref(baseHref, {
-              q,
-              perPage,
-              rares: raresOnly,
-              holo: holoOnly,
-              page: prevPage,
-            })}
+            href={buildHref(baseHref, { q, perPage, rares: raresOnly, holo: holoOnly, page: prevPage })}
             aria-disabled={isFirst}
             className={`rounded-md border px-3 py-1 ${
               isFirst
@@ -426,13 +431,7 @@ export default async function SetDetailPage({
           </span>
 
           <Link
-            href={buildHref(baseHref, {
-              q,
-              perPage,
-              rares: raresOnly,
-              holo: holoOnly,
-              page: nextPage,
-            })}
+            href={buildHref(baseHref, { q, perPage, rares: raresOnly, holo: holoOnly, page: nextPage })}
             aria-disabled={isLast}
             className={`rounded-md border px-3 py-1 ${
               isLast

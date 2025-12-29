@@ -1,3 +1,4 @@
+// src/app/categories/pokemon/cards/[id]/page.tsx
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import "server-only";
 
@@ -13,8 +14,12 @@ import MarketPrices from "@/components/MarketPrices";
 import { type DisplayCurrency } from "@/lib/pricing";
 import { site } from "@/config/site";
 
+import type { PokemonVariants } from "@/components/pokemon/VariantChips";
+import VariantPickerAdd from "@/components/pokemon/VariantPickerAdd";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -72,7 +77,6 @@ type CardRow = {
 /* ------------------------------------------------
    SEO: Dynamic metadata (per card)
 ------------------------------------------------- */
-
 type CardMetaRow = {
   id: string;
   name: string | null;
@@ -113,19 +117,14 @@ function absUrl(path: string) {
 
 function absMaybe(urlOrPath: string) {
   if (!urlOrPath) return absUrl("/og-image.png");
-  // Already absolute?
   if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
-  // Treat as site-relative
   return absUrl(urlOrPath);
 }
 
-export async function generateMetadata(
-  { params }: { params: { id: string } }
-): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: { id: string } }): Promise<Metadata> {
   const raw = decodeURIComponent(params.id ?? "").trim();
   const card = await getCardMeta(raw);
 
-  // If unknown ID, avoid indexing junk URLs (very important)
   if (!card) {
     const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(raw)}`);
     return {
@@ -149,18 +148,13 @@ export async function generateMetadata(
   ].filter(Boolean);
 
   const description = `${descriptionParts.join(", ")}.`;
-
-  // ✅ Canonical ALWAYS clean, no query params
   const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card.id)}`);
-
-  // ✅ Always absolute image URLs for OG/Twitter
   const ogImage = absMaybe(card.large_image || card.small_image || site.ogImage || "/og-image.png");
 
   return {
     title,
     description,
     alternates: { canonical },
-
     openGraph: {
       type: "website",
       url: canonical,
@@ -169,7 +163,6 @@ export async function generateMetadata(
       siteName: site.name,
       images: [{ url: ogImage }],
     },
-
     twitter: {
       card: "summary_large_image",
       title,
@@ -179,11 +172,9 @@ export async function generateMetadata(
   };
 }
 
-
 /* ------------------------------------------------
    Helpers
 ------------------------------------------------- */
-
 function readDisplay(sp: SearchParams): DisplayCurrency {
   const a = (Array.isArray(sp?.display) ? sp.display[0] : sp?.display) ?? "";
   const b = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency) ?? "";
@@ -275,6 +266,55 @@ async function getCardById(cardId: string): Promise<CardRow | null> {
   return row;
 }
 
+async function getVariantsByCardId(cardId: string): Promise<PokemonVariants> {
+  const row =
+    (
+      await db.execute<{
+        normal: boolean | null;
+        reverse: boolean | null;
+        holo: boolean | null;
+        first_edition: boolean | null;
+        w_promo: boolean | null;
+      }>(sql`
+        SELECT normal, reverse, holo, first_edition, w_promo
+        FROM public.tcg_card_variants
+        WHERE card_id = ${cardId}
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null;
+
+  // ✅ normalize to strict booleans (avoid null/driver weirdness)
+  return row
+    ? {
+        normal: row.normal === true,
+        reverse: row.reverse === true,
+        holo: row.holo === true,
+        first_edition: row.first_edition === true,
+        w_promo: row.w_promo === true,
+      }
+    : null;
+}
+
+async function getOwnedVariantCounts(userId: string | null, cardId: string) {
+  if (!userId) return {};
+
+  const res = await db.execute<{ variant_type: string | null; qty: number }>(sql`
+    SELECT variant_type, COALESCE(SUM(quantity),0)::int AS qty
+    FROM public.user_collection_items
+    WHERE user_id = ${userId}
+      AND game = 'pokemon'
+      AND card_id = ${cardId}
+    GROUP BY variant_type
+  `);
+
+  const out: Record<string, number> = {};
+  for (const r of res.rows ?? []) {
+    const key = String(r.variant_type ?? "normal").trim() || "normal";
+    out[key] = Number(r.qty) || 0;
+  }
+  return out;
+}
+
 function Field({ label, value }: { label: string; value: string | null }) {
   if (!value) return null;
   return (
@@ -334,7 +374,7 @@ export default async function PokemonCardDetailPage({
   const display = readDisplay(sp);
   const id = decodeURIComponent(rawId ?? "").trim();
 
-  const card = await getCardById(id);
+  const [card, variants] = await Promise.all([getCardById(id), getVariantsByCardId(id)]);
 
   if (!card) {
     return (
@@ -344,10 +384,7 @@ export default async function PokemonCardDetailPage({
           <p className="mt-2 break-all text-sm text-white/70">
             Looked up: <code>{id}</code>
           </p>
-          <Link
-            href="/categories/pokemon/cards"
-            className="mt-4 inline-block text-sky-300 hover:underline"
-          >
+          <Link href="/categories/pokemon/cards" className="mt-4 inline-block text-sky-300 hover:underline">
             ← Back to cards
           </Link>
         </div>
@@ -357,6 +394,7 @@ export default async function PokemonCardDetailPage({
 
   const cover = bestImage(card);
   const pricesHref = `/categories/pokemon/cards/${encodeURIComponent(card.id)}/prices`;
+  const ownedCounts = await getOwnedVariantCounts(userId ?? null, card.id);
 
   const types = parseTextList(card.types);
   const subtypes = parseTextList(card.subtypes);
@@ -366,7 +404,6 @@ export default async function PokemonCardDetailPage({
   return (
     <section className="space-y-8">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* Left: card image */}
         <div className="lg:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="relative mx-auto w-full max-w-md" style={{ aspectRatio: "3 / 4" }}>
@@ -381,9 +418,7 @@ export default async function PokemonCardDetailPage({
                   priority
                 />
               ) : (
-                <div className="absolute inset-0 grid place-items-center text-white/70">
-                  No image
-                </div>
+                <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
               )}
             </div>
 
@@ -399,10 +434,19 @@ export default async function PokemonCardDetailPage({
                 </a>
               ) : null}
             </div>
+
+            <VariantPickerAdd
+              variants={variants}
+              ownedCounts={ownedCounts}
+              canSave={canSave}
+              cardId={card.id}
+              cardName={card.name ?? card.id}
+              setName={card.set_name ?? null}
+              imageUrl={cover ?? null}
+            />
           </div>
         </div>
 
-        {/* Right: title + actions + market price */}
         <div className="lg:col-span-7 space-y-4">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -437,7 +481,6 @@ export default async function PokemonCardDetailPage({
               </div>
 
               <div className="flex flex-wrap items-center gap-3 text-sm">
-                {/* Add to collection / wishlist */}
                 <CardActions
                   canSave={canSave}
                   game="pokemon"
@@ -458,7 +501,6 @@ export default async function PokemonCardDetailPage({
         </div>
       </div>
 
-      {/* Details grid */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <h2 className="mb-3 text-lg font-semibold text-white">Card Details</h2>
 

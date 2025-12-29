@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Props = {
   game: string;
@@ -8,10 +8,41 @@ type Props = {
   cardName?: string | null;
   setName?: string | null;
   imageUrl?: string | null;
+
+  /** Variant identity for Pokémon (normal/holo/etc). */
+  variantType?: string | null;
+
   initialInCollection?: boolean;
   initialQuantity?: number;
   className?: string;
 };
+
+/**
+ * We store canonical values in DB (user_collection_items.variant_type):
+ * - normal
+ * - holofoil
+ * - reverse_holofoil
+ * - first_edition
+ * - promo
+ */
+function normalizeVariantType(input: unknown): string {
+  const s = String(input ?? "").trim().toLowerCase();
+  if (!s) return "normal";
+
+  if (s === "normal") return "normal";
+  if (s === "holo" || s === "holofoil") return "holofoil";
+  if (
+    s === "reverse" ||
+    s === "reverse_holo" ||
+    s === "reverseholo" ||
+    s === "reverse_holofoil"
+  )
+    return "reverse_holofoil";
+  if (s === "first" || s === "firstedition" || s === "first_edition") return "first_edition";
+  if (s === "promo" || s === "wpromo" || s === "w_promo") return "promo";
+
+  return "normal";
+}
 
 export default function AddToCollectionButton({
   game,
@@ -19,6 +50,7 @@ export default function AddToCollectionButton({
   cardName,
   setName,
   imageUrl,
+  variantType = null,
   initialInCollection = false,
   initialQuantity = 0,
   className,
@@ -27,6 +59,15 @@ export default function AddToCollectionButton({
   const [inCollection, setInCollection] = useState(initialInCollection);
   const [qty, setQty] = useState(initialQuantity);
   const [flash, setFlash] = useState<"added" | "error" | null>(null);
+
+  // If the parent changes (e.g. you switch selected variant),
+  // re-sync the local button UI.
+  useEffect(() => {
+    setInCollection(initialInCollection);
+    setQty(initialQuantity);
+  }, [initialInCollection, initialQuantity, cardId, variantType]);
+
+  const variantTypeCanon = useMemo(() => normalizeVariantType(variantType), [variantType]);
 
   async function addOne() {
     if (saving) return;
@@ -44,6 +85,7 @@ export default function AddToCollectionButton({
           setName,
           imageUrl,
           quantity: 1,
+          variantType: variantTypeCanon,
         }),
       });
 
@@ -52,7 +94,6 @@ export default function AddToCollectionButton({
         return;
       }
 
-      // We don’t rely on response shape; just update UI optimistically.
       setInCollection(true);
       setQty((q) => (q || 0) + 1);
       setFlash("added");

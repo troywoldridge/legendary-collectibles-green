@@ -7,11 +7,7 @@ import { auth } from "@clerk/nextjs/server";
 import { db } from "@/lib/db";
 import { sql } from "drizzle-orm";
 import { getUserPlan } from "@/lib/plans";
-import {
-  getLivePriceForCard,
-  normalizeGame,
-  type GameId,
-} from "@/lib/livePrices";
+import { getLivePriceForCard, normalizeGame, type GameId } from "@/lib/livePrices";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +18,8 @@ type Body = {
   cardName?: string;
   setName?: string;
   imageUrl?: string;
+
+  variantType?: string | null;
 
   grading_company?: string;
   grade_label?: string;
@@ -34,17 +32,49 @@ type Body = {
 };
 
 function isPgErrorWithCode(err: unknown, code: string) {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as any).code === code
-  );
+  return typeof err === "object" && err !== null && "code" in err && (err as any).code === code;
 }
 
 // YYYY-MM-DD for DATE columns (as string)
 function todayISODate(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Canonical DB values for user_collection_items.variant_type:
+ * - normal
+ * - holofoil
+ * - reverse_holofoil
+ * - first_edition
+ * - promo
+ */
+function normalizeVariantType(input: unknown): string {
+  const s = String(input ?? "").trim().toLowerCase();
+  if (!s) return "normal";
+
+  if (s === "normal") return "normal";
+  if (s === "holo" || s === "holofoil") return "holofoil";
+  if (s === "reverse" || s === "reverse_holo" || s === "reverseholo" || s === "reverse_holofoil")
+    return "reverse_holofoil";
+  if (s === "first" || s === "firstedition" || s === "first_edition") return "first_edition";
+  if (s === "promo" || s === "wpromo" || s === "w_promo") return "promo";
+
+  return "normal";
+}
+
+function variantLabel(v: string): string {
+  switch (v) {
+    case "holofoil":
+      return "Holo";
+    case "reverse_holofoil":
+      return "Reverse";
+    case "first_edition":
+      return "1st Ed";
+    case "promo":
+      return "Promo";
+    default:
+      return "Normal";
+  }
 }
 
 export async function POST(req: Request) {
@@ -68,14 +98,18 @@ export async function POST(req: Request) {
 
   const gradingCompany = (body.grading_company ?? "UNGR").trim().toUpperCase();
   const gradeLabel = (body.grade_label ?? "Ungraded").trim();
-  const certNumber = body.cert_number?.trim() || null;
+
+  // IMPORTANT:
+  // Your DB currently has cert_number NOT NULL (based on your error),
+  // so we must never send null. Use empty string when absent.
+  const certNumber = (body.cert_number ?? "").toString().trim(); // "" allowed
   const purchaseDate = body.purchase_date ?? null;
+
+  const variantType = normalizeVariantType(body.variantType);
 
   const qtyRaw = body.quantity ?? 1;
   const quantity =
-    Number.isFinite(qtyRaw) && (qtyRaw as number) > 0
-      ? Math.floor(qtyRaw as number)
-      : 1;
+    Number.isFinite(qtyRaw) && (qtyRaw as number) > 0 ? Math.floor(qtyRaw as number) : 1;
 
   const folder = (body.folder ?? "Unsorted")?.trim() || "Unsorted";
   const normalizedFolderKey = folder || "__default__";
@@ -86,44 +120,40 @@ export async function POST(req: Request) {
       : null;
 
   if (!gameRaw || !cardId) {
-    return NextResponse.json(
-      { error: "Missing required fields game/cardId" },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: "Missing required fields game/cardId" }, { status: 400 });
   }
 
-  // Normalize game id for pricing + storage consistency
   const gameNorm = normalizeGame(gameRaw) ?? gameRaw;
 
-  // ---- Plan-based limits (Free/Collector) ----
+  // ---- Plan-based limits ----
   const plan = await getUserPlan(userId);
   const isPro = plan.id === "pro";
   const isCollector = plan.id === "collector";
   const isFree = !isPro && !isCollector;
 
-  // Determine whether this add will INSERT a new row or just UPDATE an existing one.
+  // Determine whether this add will INSERT a new row or UPDATE an existing one.
+  // MUST include variant_type + folder + grading identity fields.
   let existingId: string | null = null;
 
   try {
     const existingRes = await db.execute<{ id: string }>(sql`
       SELECT id
-      FROM user_collection_items
+      FROM public.user_collection_items
       WHERE user_id = ${userId}
         AND game = ${gameNorm}
         AND card_id = ${cardId}
-        AND grading_company = ${gradingCompany}
-        AND grade_label = ${gradeLabel}
+        AND variant_type = ${variantType}
+        AND COALESCE(grading_company,'') = COALESCE(${gradingCompany},'')
+        AND COALESCE(grade_label,'') = COALESCE(${gradeLabel},'')
         AND COALESCE(cert_number,'') = COALESCE(${certNumber},'')
+        AND COALESCE(folder,'__default__') = ${normalizedFolderKey}
       LIMIT 1
     `);
 
     existingId = existingRes.rows?.[0]?.id ?? null;
   } catch (err) {
     console.error("collection/add failed during existing lookup", err);
-    return NextResponse.json(
-      { error: "Database error looking up existing item" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Database error looking up existing item" }, { status: 500 });
   }
 
   if (!isPro) {
@@ -135,7 +165,7 @@ export async function POST(req: Request) {
         SELECT
           COUNT(*)::int AS total_items,
           COUNT(DISTINCT COALESCE(folder,'__default__'))::int AS collections
-        FROM user_collection_items
+        FROM public.user_collection_items
         WHERE user_id = ${userId}
       `);
 
@@ -145,7 +175,7 @@ export async function POST(req: Request) {
 
       const hasFolderRes = await db.execute<{ exists: number }>(sql`
         SELECT 1 AS exists
-        FROM user_collection_items
+        FROM public.user_collection_items
         WHERE user_id = ${userId}
           AND COALESCE(folder, '__default__') = ${normalizedFolderKey}
         LIMIT 1
@@ -176,21 +206,14 @@ export async function POST(req: Request) {
         const planName = isFree ? "Free" : isCollector ? "Collector" : plan.id;
 
         const errorParts: string[] = [];
-        if (hitItems && maxItems != null) {
-          errorParts.push(`item limit reached (${currentItems}/${maxItems})`);
-        }
-        if (hitCollections && maxCollections != null) {
-          errorParts.push(
-            `collection limit reached (${currentCollections}/${maxCollections})`,
-          );
-        }
+        if (hitItems && maxItems != null) errorParts.push(`item limit reached (${currentItems}/${maxItems})`);
+        if (hitCollections && maxCollections != null)
+          errorParts.push(`collection limit reached (${currentCollections}/${maxCollections})`);
 
         return NextResponse.json(
           {
             error: "Plan limit reached",
-            message: `Your ${planName} plan has reached its limit: ${errorParts.join(
-              " and ",
-            )}.`,
+            message: `Your ${planName} plan has reached its limit: ${errorParts.join(" and ")}.`,
             plan: planName,
             current: { items: currentItems, collections: currentCollections },
             projected: { items: projectedItems, collections: projectedCollections },
@@ -202,20 +225,18 @@ export async function POST(req: Request) {
       }
     } catch (err) {
       console.error("collection/add failed during plan usage check", err);
-      return NextResponse.json(
-        { error: "Database error checking plan limits" },
-        { status: 500 },
-      );
+      return NextResponse.json({ error: "Database error checking plan limits" }, { status: 500 });
     }
   }
 
-  // ---- Price once (only for this add) ----
-  // If pricing fails, we still insert/update the item.
+  // ---- Price lookup (best-effort, never blocks add) ----
   let unitPriceCents: number | null = null;
   let priceSource: string | null = null;
   let priceConfidence: string | null = null;
 
   try {
+    // NOTE: your current getLivePriceForCard is still using an old schema (market_normal etc),
+    // so it may throw. We catch and continue.
     const livePrice = await getLivePriceForCard(gameNorm as GameId, cardId);
     if (livePrice) {
       unitPriceCents = Math.round(livePrice.amount * 100);
@@ -228,15 +249,13 @@ export async function POST(req: Request) {
 
   const asOfDate = todayISODate();
 
-  // ---- Write (UPDATE existing or INSERT new) + update last_value_cents ----
+  // ---- Write (UPDATE existing or INSERT new) ----
   try {
     if (existingId) {
-      // Update quantity first; get the new quantity back
       const updatedRes = await db.execute<{ quantity: number }>(sql`
-        UPDATE user_collection_items
+        UPDATE public.user_collection_items
         SET
           quantity = quantity + ${quantity},
-          folder = COALESCE(${folder}, folder),
           cost_cents = COALESCE(${costCents}, cost_cents),
           updated_at = NOW()
         WHERE id = ${existingId}
@@ -245,30 +264,29 @@ export async function POST(req: Request) {
 
       const newQty = Number(updatedRes.rows?.[0]?.quantity ?? 1);
 
-      // Only update value if we got a price
       let newLastValueCents: number | null = null;
 
       if (unitPriceCents != null) {
         newLastValueCents = unitPriceCents * newQty;
 
         await db.execute(sql`
-          UPDATE user_collection_items
+          UPDATE public.user_collection_items
           SET
             last_value_cents = ${newLastValueCents},
             updated_at = NOW()
           WHERE id = ${existingId}
         `);
 
-        // Snapshot valuation (upsert) - IMPORTANT: use existingId + newLastValueCents
         const metaJson = JSON.stringify({
           unit_price_cents: unitPriceCents,
           quantity: newQty,
           card_id: cardId,
+          variant_type: variantType,
         });
 
         try {
           await db.execute(sql`
-            INSERT INTO user_collection_item_valuations (
+            INSERT INTO public.user_collection_item_valuations (
               user_id,
               item_id,
               as_of_date,
@@ -300,7 +318,6 @@ export async function POST(req: Request) {
               updated_at  = NOW()
           `);
         } catch (err) {
-          // don't block adding cards if the snapshot table hiccups
           console.warn("valuation snapshot failed (continuing)", err);
         }
       }
@@ -310,25 +327,26 @@ export async function POST(req: Request) {
         updated: true,
         itemId: existingId,
         quantity: newQty,
+        variant_type: variantType,
+        variant_label: variantLabel(variantType),
         unit_price_cents: unitPriceCents,
-        last_value_cents: newLastValueCents, // null if we couldn't price
+        last_value_cents: newLastValueCents,
         priced: unitPriceCents != null,
         source: priceSource,
       });
     }
 
-    // INSERT path
-    const insertedLastValueCents =
-      unitPriceCents != null ? unitPriceCents * quantity : 0;
+    const insertedLastValueCents = unitPriceCents != null ? unitPriceCents * quantity : 0;
 
     const insertRes = await db.execute<{ id: string }>(sql`
-      INSERT INTO user_collection_items (
+      INSERT INTO public.user_collection_items (
         user_id,
         game,
         card_id,
         card_name,
         set_name,
         image_url,
+        variant_type,
         grading_company,
         grade_label,
         cert_number,
@@ -346,6 +364,7 @@ export async function POST(req: Request) {
         ${cardName},
         ${setName},
         ${imageUrl},
+        ${variantType},
         ${gradingCompany},
         ${gradeLabel},
         ${certNumber},
@@ -361,17 +380,17 @@ export async function POST(req: Request) {
 
     const newItemId = insertRes.rows?.[0]?.id ?? null;
 
-    // Snapshot valuation if we got a price and we got an id
     if (newItemId && unitPriceCents != null) {
       const metaJson = JSON.stringify({
         unit_price_cents: unitPriceCents,
         quantity,
         card_id: cardId,
+        variant_type: variantType,
       });
 
       try {
         await db.execute(sql`
-          INSERT INTO user_collection_item_valuations (
+          INSERT INTO public.user_collection_item_valuations (
             user_id,
             item_id,
             as_of_date,
@@ -412,6 +431,8 @@ export async function POST(req: Request) {
       inserted: true,
       itemId: newItemId,
       quantity,
+      variant_type: variantType,
+      variant_label: variantLabel(variantType),
       unit_price_cents: unitPriceCents,
       last_value_cents: insertedLastValueCents,
       priced: unitPriceCents != null,
@@ -424,9 +445,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Duplicate collection item" }, { status: 409 });
     }
 
-    return NextResponse.json(
-      { error: "Database error inserting collection item" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Database error inserting collection item" }, { status: 500 });
   }
 }
