@@ -1,19 +1,22 @@
+// src/app/categories/yugioh/sets/page.tsx
 import "server-only";
 
 import Link from "next/link";
 import Image from "next/image";
+import Script from "next/script";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
 import type { Metadata } from "next";
 import { site } from "@/config/site";
 
-
 export const metadata: Metadata = {
   title: "Yu-Gi-Oh! Sets | Legendary Collectibles",
-  description: "Browse Yu-Gi-Oh! sets and their cards.",
+  description:
+    "Browse Yu-Gi-Oh! sets and jump into card galleries. Track set completion when signed in.",
   alternates: { canonical: `${site.url}/categories/yugioh/sets` },
 };
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -65,6 +68,14 @@ function toNum(v: unknown): number {
   return 0;
 }
 
+function absUrl(path: string) {
+  return `${site.url}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function setHref(setName: string) {
+  return `${BASE}/${encodeURIComponent(setName)}`;
+}
+
 async function getSets(opts: {
   q: string | null;
   offset: number;
@@ -90,8 +101,7 @@ async function getSets(opts: {
       `)
     ).rows?.[0]?.count ?? 0;
 
-  // If signed out, we still return sets but with 0 metrics
-    const userId = opts.userId;
+  const userId = opts.userId;
 
   const rows =
     (
@@ -116,17 +126,11 @@ async function getSets(opts: {
 
           totals.total_cards,
 
-          ${userId
-            ? sql`owned.owned_cards`
-            : sql`0::int`} AS owned_cards,
-
-          ${userId
-            ? sql`owned.owned_copies`
-            : sql`0::int`} AS owned_copies
+          ${userId ? sql`owned.owned_cards` : sql`0::int`} AS owned_cards,
+          ${userId ? sql`owned.owned_copies` : sql`0::int`} AS owned_copies
 
         FROM sets_page sp
 
-        -- total cards in set (distinct card_id)
         LEFT JOIN LATERAL (
           SELECT COUNT(DISTINCT ys.card_id)::int AS total_cards
           FROM ygo_card_sets ys
@@ -135,7 +139,6 @@ async function getSets(opts: {
 
         ${userId
           ? sql`
-        -- owned cards in this set (distinct card_id) + copies
         LEFT JOIN LATERAL (
           SELECT
             COUNT(DISTINCT uci.card_id)::int AS owned_cards,
@@ -183,24 +186,53 @@ export default async function YugiohSetsIndex({
 
   const showCompletion = Boolean(userId);
 
+  // ---- JSON-LD (SEO) ----
+  const itemList = rows.slice(0, 24).map((s, i) => {
+    const img = s.logo_url || s.symbol_url || undefined;
+    return {
+      "@type": "ListItem",
+      position: i + 1,
+      url: absUrl(setHref(s.id)),
+      name: s.name ?? s.id,
+      ...(img ? { image: img } : {}),
+    };
+  });
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: "Yu-Gi-Oh! Sets",
+    description:
+      "Browse Yu-Gi-Oh! sets and open any set to view cards and prices. Track set completion when signed in.",
+    url: `${site.url}${BASE}`,
+    isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: site.url },
+    mainEntity: {
+      "@type": "ItemList",
+      itemListOrder: "https://schema.org/ItemListOrderAscending",
+      numberOfItems: total,
+      itemListElement: itemList,
+    },
+  };
+
   return (
     <section className="space-y-6">
+      <Script
+        id="ld-json-yugioh-sets"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
+
+      <div className="space-y-2">
+        <h1 className="text-2xl font-bold text-white">Yu-Gi-Oh! Sets</h1>
+        <p className="text-sm text-white/80">
+          Browse sets and jump into card galleries. Search by set name or code.
+          {showCompletion ? " Completion is based on your collection items for game = yugioh." : " Sign in to see set completion %."}
+        </p>
+      </div>
+
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-bold text-white">Yu-Gi-Oh! Sets</h1>
-          {showCompletion ? (
-            <div className="text-xs text-white/70">
-              Completion is based on your{" "}
-              <Link href="/collection" className="text-sky-300 hover:underline">
-                collection
-              </Link>{" "}
-              items for game = yugioh.
-            </div>
-          ) : (
-            <div className="text-xs text-white/70">
-              Sign in to see set completion %.
-            </div>
-          )}
+        <div className="text-sm text-white/80">
+          Showing {from}-{to} of {total} sets{q ? " (filtered)" : ""}
         </div>
 
         <div className="flex flex-wrap gap-3">
@@ -253,14 +285,10 @@ export default async function YugiohSetsIndex({
         </div>
       </div>
 
-      <div className="text-sm text-white/80">
-        Showing {from}-{to} of {total} sets{q ? " (filtered)" : ""}
-      </div>
-
       {/* Grid */}
       {rows.length === 0 ? (
         <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">
-          No sets yet — run the YGO sync first.
+          No sets found.
         </div>
       ) : (
         <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
@@ -279,10 +307,7 @@ export default async function YugiohSetsIndex({
                 key={s.id}
                 className="overflow-hidden rounded-xl border border-white/10 bg-white/5 transition hover:border-white/20 hover:bg-white/10"
               >
-                <Link
-                  href={`/categories/yugioh/sets/${encodeURIComponent(s.id)}`}
-                  className="block"
-                >
+                <Link href={setHref(s.id)} className="block">
                   <div className="relative w-full" style={{ aspectRatio: "16 / 9" }}>
                     {img ? (
                       <Image
@@ -305,7 +330,6 @@ export default async function YugiohSetsIndex({
                       {s.name ?? s.id}
                     </div>
 
-                    {/* ✅ Completion */}
                     {showCompletion && (
                       <div className="space-y-1">
                         <div className="flex items-center justify-between text-[11px] text-white/70">
@@ -320,24 +344,19 @@ export default async function YugiohSetsIndex({
                         <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
                           <div
                             className="h-full rounded-full bg-white/70"
-                            style={{
-                              width: `${Math.max(0, Math.min(100, pct))}%`,
-                            }}
+                            style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
                           />
                         </div>
 
-                        {ownedCopies > 0 && (
+                        {ownedCopies > 0 ? (
                           <div className="text-[11px] text-white/60">
                             {ownedCopies.toLocaleString()} total copies
                           </div>
-                        )}
+                        ) : null}
 
-                        {/* quick link to filtered collection */}
                         <div className="pt-1">
                           <Link
-                            href={`/collection?game=yugioh&set=${encodeURIComponent(
-                              s.id,
-                            )}`}
+                            href={`/collection?game=yugioh&set=${encodeURIComponent(s.id)}`}
                             className="text-[11px] text-sky-300 hover:underline"
                           >
                             View in my collection →

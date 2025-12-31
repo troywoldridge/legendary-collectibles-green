@@ -1,6 +1,10 @@
 import "server-only";
-import { redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 
-export default function Page() {
-  redirect("/categories/funko/sets");
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+export default function FunkoCategoryPage() {
+  notFound();
 }

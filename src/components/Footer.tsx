@@ -38,7 +38,6 @@ export default function Footer() {
               <li><Link href="/categories/pokemon/sets" className="hover:text-white">Pokémon</Link></li>
               <li><Link href="/categories/yu-gi-oh" className="hover:text-white">Yu-Gi-Oh!</Link></li>
               <li><Link href="/categories/mtg" className="hover:text-white">Magic: The Gathering</Link></li>
-              <li><Link href="/categories/funko" className="hover:text-white">Funko Pop</Link></li>
               <li><Link href="/search" className="hover:text-white">All Products</Link></li>
               {/* ★ Temporary Amazon link */}
               <li>

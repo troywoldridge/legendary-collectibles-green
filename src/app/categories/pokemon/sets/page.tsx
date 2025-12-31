@@ -3,6 +3,7 @@ import "server-only";
 
 import Link from "next/link";
 import Image from "next/image";
+import Script from "next/script";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
@@ -10,18 +11,14 @@ import { auth } from "@clerk/nextjs/server";
 import type { Metadata } from "next";
 import { site } from "@/config/site";
 
-const BASE =
-  process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
-  "https://legendary-collectibles.com";
-
 export const metadata: Metadata = {
   title: "Pokémon Sets | Legendary Collectibles",
-  description: "Browse all Pokémon TCG sets. View cards, prices, and manage your collection.",
+  description:
+    "Browse Pokémon TCG sets by series and release date. Open any set to view cards, pricing, and track collection progress.",
   alternates: {
-    canonical: `${BASE}/categories/pokemon/sets`,
+    canonical: `${site.url}/categories/pokemon/sets`,
   },
 };
-
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,7 +33,6 @@ type SetRow = {
   logo_url: string | null;
   symbol_url: string | null;
 
-  // computed
   total_cards: number | null;
   owned_distinct: number | null;
   owned_qty: number | null;
@@ -56,10 +52,7 @@ function parsePage(v?: string) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
-function buildHref(
-  base: string,
-  qs: { q?: string | null; page?: number; perPage?: number },
-) {
+function buildHref(base: string, qs: { q?: string | null; page?: number; perPage?: number }) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", qs.q);
   if (qs.page) p.set("page", String(qs.page));
@@ -94,6 +87,14 @@ function pickHttpUrl(a?: string | null, b?: string | null): string | null {
   return /^https?:\/\//i.test(raw) ? raw : null;
 }
 
+function toSetPath(setId: string) {
+  return `/categories/pokemon/sets/${encodeURIComponent(setId)}`;
+}
+
+function toAbs(urlPath: string) {
+  return `${site.url}${urlPath}`;
+}
+
 export default async function SetsIndex({
   searchParams,
 }: {
@@ -120,7 +121,6 @@ export default async function SetsIndex({
       ${where}
     `)).rows?.[0]?.count ?? 0;
 
-  // One query: sets page + total cards per set + (if logged in) owned counts per set
   const sets =
     (
       await db.execute<SetRow>(sql`
@@ -179,10 +179,56 @@ export default async function SetsIndex({
   const to = Math.min(offset + perPage, total);
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
+  // ---------- JSON-LD (SEO) ----------
+  const itemList = sets.slice(0, 24).map((s, i) => {
+    const path = toSetPath(s.id);
+    const img = pickHttpUrl(s.logo_url, s.symbol_url);
+    return {
+      "@type": "ListItem",
+      position: i + 1,
+      url: toAbs(path),
+      name: s.name ?? s.id,
+      ...(img ? { image: img } : {}),
+    };
+  });
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: "Pokémon Sets",
+    description:
+      "Browse Pokémon TCG sets. Open any set to view cards, pricing, and collection progress.",
+    url: `${site.url}${baseHref}`,
+    isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: site.url },
+    mainEntity: {
+      "@type": "ItemList",
+      itemListOrder: "https://schema.org/ItemListOrderDescending",
+      numberOfItems: total,
+      itemListElement: itemList,
+    },
+  };
+
   return (
     <section className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <Script
+        id="ld-json-pokemon-sets"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
+
+      {/* SEO intro copy (indexable) */}
+      <header className="space-y-2">
         <h1 className="text-2xl font-bold text-white">Pokémon Sets</h1>
+        <p className="text-sm text-white/80">
+          Browse sets by release date and series. Open any set to view cards, pricing, and (if you’re
+          logged in) track completion.
+        </p>
+      </header>
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-sm text-white/80">
+          Showing {from}-{to} of {total} sets {q && "(filtered)"}
+        </div>
 
         <div className="flex flex-wrap gap-3">
           {/* Per-page */}
@@ -229,20 +275,16 @@ export default async function SetsIndex({
               Search
             </button>
 
-            {q && (
+            {q ? (
               <Link
                 href={buildHref(baseHref, { perPage, page: 1 })}
                 className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
               >
                 Clear
               </Link>
-            )}
+            ) : null}
           </form>
         </div>
-      </div>
-
-      <div className="text-sm text-white/80">
-        Showing {from}-{to} of {total} sets {q && "(filtered)"}
       </div>
 
       {sets.length === 0 ? (
@@ -258,19 +300,14 @@ export default async function SetsIndex({
             const ownedDistinct = Number(s.owned_distinct ?? 0);
             const ownedCopies = Number(s.owned_qty ?? 0);
 
-            const pct =
-              totalCards > 0 ? Math.round((ownedDistinct / totalCards) * 100) : 0;
+            const pct = totalCards > 0 ? Math.round((ownedDistinct / totalCards) * 100) : 0;
 
             return (
               <li
                 key={s.id}
                 className="overflow-hidden rounded-xl border border-white/10 bg-white/5 backdrop-blur-sm transition hover:border-white/20 hover:bg-white/10"
               >
-                {/* MAIN TILE LINK */}
-                <Link
-                  href={`/categories/pokemon/sets/${encodeURIComponent(s.id)}`}
-                  className="block"
-                >
+                <Link href={toSetPath(s.id)} className="block">
                   <div className="relative aspect-video w-full">
                     {img ? (
                       <Image
@@ -287,7 +324,6 @@ export default async function SetsIndex({
                       </div>
                     )}
 
-                    {/* % badge */}
                     {isLoggedIn && totalCards > 0 ? (
                       <div className="absolute left-2 top-2 rounded-full border border-white/15 bg-black/40 px-2 py-0.5 text-[11px] font-semibold text-white backdrop-blur-sm">
                         {pct}% • {ownedDistinct}/{totalCards}
@@ -306,19 +342,17 @@ export default async function SetsIndex({
                       {s.ptcgo_code ?? ""}
                     </div>
 
-                    {s.release_date && (
+                    {s.release_date ? (
                       <div className="mt-0.5 text-[11px] text-white/70">
                         Released: {s.release_date.replaceAll("/", "-")}
                       </div>
-                    )}
+                    ) : null}
 
-                    {/* Completion block (NO nested link) */}
                     {isLoggedIn ? (
                       <div className="mt-3 space-y-1">
                         <div className="flex items-center justify-between text-[11px] text-white/70">
                           <span>
-                            {ownedDistinct.toLocaleString()} /{" "}
-                            {totalCards.toLocaleString()} cards
+                            {ownedDistinct.toLocaleString()} / {totalCards.toLocaleString()} cards
                           </span>
                           <span className="text-white/80">
                             {totalCards > 0 ? `${pct}%` : "—"}
@@ -328,9 +362,7 @@ export default async function SetsIndex({
                         <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
                           <div
                             className="h-full rounded-full bg-white/70"
-                            style={{
-                              width: `${Math.max(0, Math.min(100, pct))}%`,
-                            }}
+                            style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
                           />
                         </div>
 
@@ -344,7 +376,6 @@ export default async function SetsIndex({
                   </div>
                 </Link>
 
-                {/* SECONDARY LINK OUTSIDE MAIN TILE LINK */}
                 {isLoggedIn ? (
                   <div className="px-3 pb-3 pt-0">
                     <Link
@@ -361,14 +392,10 @@ export default async function SetsIndex({
         </ul>
       )}
 
-      {total > perPage && (
+      {total > perPage ? (
         <nav className="mt-4 flex items-center justify-center gap-2 text-sm">
           <Link
-            href={buildHref(baseHref, {
-              q,
-              perPage,
-              page: Math.max(1, page - 1),
-            })}
+            href={buildHref(baseHref, { q, perPage, page: Math.max(1, page - 1) })}
             aria-disabled={page === 1}
             className={`rounded-md border px-3 py-1 ${
               page === 1
@@ -380,7 +407,7 @@ export default async function SetsIndex({
           </Link>
 
           <span className="px-2 text-white/80">
-            Page {page} of {totalPages}
+            Page {page} of {Math.max(1, Math.ceil(total / perPage))}
           </span>
 
           <Link
@@ -395,7 +422,7 @@ export default async function SetsIndex({
             Next →
           </Link>
         </nav>
-      )}
+      ) : null}
     </section>
   );
 }

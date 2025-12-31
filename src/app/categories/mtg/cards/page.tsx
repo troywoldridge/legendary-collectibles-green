@@ -249,6 +249,20 @@ export default async function MtgCardsIndex({
   return (
     <section className="space-y-6">
       {/* Header */}
+
+      {/* SEO intro */}
+<div className="max-w-3xl space-y-3 text-sm text-white/80">
+  <p>
+    Explore Magic: The Gathering cards from modern releases to iconic older sets. Search by card
+    name, set, type, color identity, or ID to discover staples, commanders, and collector pieces.
+  </p>
+
+  <p>
+    Legendary Collectibles makes it easy to browse card images, track price trends, and manage your
+    MTG collection in one place. New data is synced regularly to keep the catalog growing.
+  </p>
+</div>
+
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-white">Magic: The Gathering • Cards</h1>

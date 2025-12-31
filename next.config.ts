@@ -7,7 +7,8 @@ const nextConfig: NextConfig = {
       { protocol: 'https', hostname: 'imagedelivery.net', pathname: '/**' },
       { protocol: "https", hostname: "images.pokemontcg.io" },
       { protocol: "https", hostname: "c1.scryfall.com" },
-      { protocol: "https", hostname: "cards.scryfall.io" }
+      { protocol: "https", hostname: "cards.scryfall.io" },
+      { protocol: "https", hostname: "assets.tcgdex.net" },
     ],
   },
   async redirects() {

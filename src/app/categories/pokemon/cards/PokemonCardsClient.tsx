@@ -16,6 +16,7 @@ type Card = {
   cardId: string;
   name: string;
   setName: string | null;
+  number?: string | null; // ✅ add
   imageUrl: string | null;
   variants?: PokemonVariants;
 };
@@ -115,8 +116,7 @@ function TileVariantControls({
 
   if (!variants || !selected || available.length === 0) return null;
 
-  // canonical DB variant_type value to store in user_collection_items.variant_type
-  const selectedDbVariantType = VARIANT_DB[selected]; // normal | holofoil | reverse_holofoil | first_edition | promo
+  const selectedDbVariantType = VARIANT_DB[selected];
   const selectedOwned = ownedCounts[selected] ?? 0;
 
   return (
@@ -215,9 +215,11 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
 
               <div className="p-3 pb-2">
                 <div className="line-clamp-2 text-sm font-medium text-white">{c.name}</div>
+
+                {/* ✅ Pretty subheader: set_name • #number */}
                 <div className="mt-1 line-clamp-1 text-xs text-white/70">
-                  {c.cardId}
-                  {c.setName ? ` • ${c.setName}` : ""}
+                  {c.setName ? c.setName : "Unknown set"}
+                  {c.number ? ` • #${c.number}` : ""}
                 </div>
               </div>
             </Link>

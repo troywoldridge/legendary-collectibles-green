@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
-// app/(site)/page.tsx
+// src/app/(site)/page.tsx
 import "server-only";
 import Link from "next/link";
 import Image from "next/image";
@@ -7,7 +7,7 @@ import Script from "next/script";
 import { db } from "@/lib/db";
 import { categories } from "@/lib/db/schema";
 import { products, productImages } from "@/lib/db/schema/shop";
-import { asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { asc, desc, inArray, sql } from "drizzle-orm";
 import { CF_ACCOUNT_HASH } from "@/lib/cf";
 
 /* ---------------- Types ---------------- */
@@ -32,29 +32,66 @@ type DbCategory = typeof categories.$inferSelect;
 /* ---------------- UI constants ---------------- */
 export const dynamic = "force-dynamic";
 
-const BRANDS = ["Pokémon", "Yu-Gi-Oh!", "Magic: The Gathering", "One Piece", "Dragon Ball", "Funko"] as const;
-const FALLBACK_IMG = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+const BRANDS = ["Pokémon", "Yu-Gi-Oh!", "Magic: The Gathering", "One Piece", "Dragon Ball"] as const;
 
-/* Static fallback content (keeps the look if DB is empty) */
+const FALLBACK_IMG =
+  "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
 const CATEGORIES_FALLBACK: ReadonlyArray<CategoryCard> = [
-  { slug: "pokemon", label: "Pokémon", blurb: "Booster boxes, ETBs, singles", cfId: "b4e6cda2-4739-4717-5005-e0b84d75c200" },
-  { slug: "yugioh", label: "Yu-Gi-Oh!", blurb: "Boxes, tins, structure decks", cfId: "87101a20-6ada-4b66-0057-2d210feb9d00" },
-  { slug: "mtg", label: "Magic: The Gathering", blurb: "Play boosters, commander", cfId: "69ab5d2b-407c-4538-3c82-be8a551efa00" },
+  {
+    slug: "pokemon",
+    label: "Pokémon",
+    blurb: "Booster boxes, ETBs, singles",
+    cfId: "b4e6cda2-4739-4717-5005-e0b84d75c200",
+  },
+  {
+    slug: "yugioh",
+    label: "Yu-Gi-Oh!",
+    blurb: "Boxes, tins, structure decks",
+    cfId: "87101a20-6ada-4b66-0057-2d210feb9d00",
+  },
+  {
+    slug: "mtg",
+    label: "Magic: The Gathering",
+    blurb: "Play boosters, commander",
+    cfId: "69ab5d2b-407c-4538-3c82-be8a551efa00",
+  },
 ];
 
 /* ---------------- Helpers ---------------- */
 const fmtUSD = (cents: number) =>
-  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format((cents || 0) / 100);
+  new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format((cents || 0) / 100);
 
 const cfImageUrl = (id: string, variant = "categoryThumb") =>
   `https://imagedelivery.net/${CF_ACCOUNT_HASH}/${id}/${variant}`;
 
+/**
+ * If a URL is a Cloudflare Images delivery URL, replace its final segment (variant) with the one we want.
+ * Example:
+ *  https://imagedelivery.net/<acct>/<imageId>/productCard  ->  .../featuredDrop
+ */
+function forceCfVariant(url: string | undefined, variant: string): string | undefined {
+  if (!url) return url;
+  const m = url.match(/^(https:\/\/imagedelivery\.net\/[^/]+\/[^/]+)\/([^/?#]+)/);
+  if (!m) return url;
+  return `${m[1]}/${variant}`;
+}
+
 /* ---------------- Queries ---------------- */
 async function getCategoriesFromDB(): Promise<CategoryCard[]> {
   try {
-    const rows: DbCategory[] = await db.select().from(categories).orderBy(asc(categories.name)).limit(6);
+    const rows: DbCategory[] = await db
+      .select()
+      .from(categories)
+      .orderBy(asc(categories.name))
+      .limit(6);
 
-    type CatRow = DbCategory & Partial<{ cf_image_id: string | null; cfImageId: string | null; description: string | null }>;
+    type CatRow = DbCategory &
+      Partial<{ cf_image_id: string | null; cfImageId: string | null; description: string | null }>;
 
     const mapped = rows.map<CategoryCard>((c) => {
       const r = c as CatRow;
@@ -75,7 +112,6 @@ async function getCategoriesFromDB(): Promise<CategoryCard[]> {
 
 async function getFeaturedItems(): Promise<FeaturedItem[]> {
   try {
-    // Pull active products (and optionally exclude out-of-stock stock items)
     const rows = await db
       .select({
         id: products.id,
@@ -85,9 +121,7 @@ async function getFeaturedItems(): Promise<FeaturedItem[]> {
         updatedAt: products.updatedAt,
       })
       .from(products)
-      .where(
-        sql`${products.status} = 'active' AND (${products.inventoryType} != 'stock' OR ${products.quantity} > 0)`
-      )
+      .where(sql`${products.status} = 'active' AND (${products.inventoryType} != 'stock' OR ${products.quantity} > 0)`)
       .orderBy(desc(products.updatedAt))
       .limit(10);
 
@@ -108,18 +142,25 @@ async function getFeaturedItems(): Promise<FeaturedItem[]> {
         .orderBy(productImages.productId, productImages.sort);
 
       for (const im of imgs) {
-        if (!imgMap.has(im.productId)) imgMap.set(im.productId, { url: im.url, alt: im.alt ?? null });
+        if (!imgMap.has(im.productId)) {
+          imgMap.set(im.productId, { url: im.url, alt: im.alt ?? null });
+        }
       }
     }
 
     return rows.map((p) => {
       const img = imgMap.get(p.id);
+
+      // Force the variant for featured carousel.
+      // Create a CF Images variant named "featuredDrop" (portrait crop).
+      const forcedUrl = forceCfVariant(img?.url, "featuredDrop");
+
       return {
         title: p.title ?? "Untitled Product",
         tag: "Featured",
         price: fmtUSD(p.priceCents ?? 0),
         href: `/product/${p.slug}`,
-        imageUrl: img?.url,
+        imageUrl: forcedUrl ?? img?.url,
         alt: img?.alt ?? p.title ?? "Product image",
       };
     });
@@ -133,9 +174,34 @@ async function getFeaturedItems(): Promise<FeaturedItem[]> {
 export default async function HomePage() {
   const [CATEGORIES, FEATURED_ITEMS] = await Promise.all([getCategoriesFromDB(), getFeaturedItems()]);
 
+  // Home tiles: keep only the 3 main categories for now
+  const TILES: Array<{ key: string; label: string; href: string; cfId: string; alt?: string }> = [
+    {
+      key: "pokemon",
+      label: "Pokémon",
+      href: "/categories/pokemon/sets",
+      cfId: "eb1a8f57-bd66-4203-fb59-32749ee3e500",
+      alt: "Pokémon category",
+    },
+    {
+      key: "yugioh",
+      label: "Yu-Gi-Oh!",
+      href: "/categories/yugioh/sets",
+      cfId: "87101a20-6ada-4b66-0057-2d210feb9d00",
+      alt: "Yu-Gi-Oh! category",
+    },
+    {
+      key: "mtg",
+      label: "Magic: The Gathering",
+      href: "/categories/mtg/sets",
+      cfId: "69ab5d2b-407c-4538-3c82-be8a551efa00",
+      alt: "Magic: The Gathering category",
+    },
+  ];
+
   return (
     <>
-      {/* Inject verification <meta> with the exact "value" attribute Impact expects */}
+      {/* Inject verification meta for Impact */}
       <Script
         id="impact-meta-inject"
         strategy="beforeInteractive"
@@ -151,7 +217,7 @@ export default async function HomePage() {
         }}
       />
 
-      {/* Impact ST stat tag */}
+      {/* Impact stat tag */}
       <Script
         id="impact-stat"
         strategy="beforeInteractive"
@@ -167,10 +233,11 @@ export default async function HomePage() {
           <section className="relative" aria-labelledby="hero-title">
             <div className="mx-auto w-full max-w-[1100px] px-4 sm:px-0">
               <div className="flex min-h-[55vh] items-center justify-center py-10 sm:py-14">
-                <div className="w-full max-w-[900px] text-center mx-auto space-y-6 sm:space-y-8 lg:space-y-10">
+                <div className="mx-auto w-full max-w-[900px] space-y-6 text-center sm:space-y-8 lg:space-y-10">
                   <p className="mb-2 text-4xl font-semibold tracking-wide text-white/85 drop-shadow-[0_1px_2px_rgba(0,0,0,.6)]">
                     WELCOME TO LEGENDARY COLLECTIBLES
                   </p>
+
                   <h1
                     id="hero-title"
                     className="mb-3 text-4xl font-extrabold leading-tight text-white drop-shadow-[0_2px_10px_rgba(0,0,0,.45)] sm:text-5xl"
@@ -178,6 +245,7 @@ export default async function HomePage() {
                     Rip, trade, and collect{" "}
                     <span className="underline decoration-4 underline-offset-4">Legendary</span> cards
                   </h1>
+
                   <p className="mb-2 text-2xl font-semibold tracking-wide text-white/85 drop-shadow-[0_1px_2px_rgba(0,0,0,.6)]">
                     Sealed heat, graded grails, and weekly drops—curated for real collectors. Fast shipping. Authenticity guaranteed.
                   </p>
@@ -245,15 +313,18 @@ export default async function HomePage() {
               >
                 Shop by Category
               </h2>
+
               <p className="mt-1 text-2xl text-white/85 drop-shadow-[0_1px_1px_rgba(0,0,0,.6)]">
                 Find sealed product, singles, slabs, and figures by game or line.
               </p>
+
               <Link
                 href="/categories"
                 className="text-sm font-semibold text-white/90 underline underline-offset-4 hover:text-white"
               >
                 View all →
               </Link>
+
               <div className="mt-2 flex items-center justify-center gap-4">
                 <Link
                   href="/store"
@@ -264,77 +335,38 @@ export default async function HomePage() {
               </div>
             </div>
 
-            {(() => {
-              const TILES: Array<{ key: string; label: string; href: string; cfId: string; alt?: string }> = [
-                {
-                  key: "pokemon",
-                  label: "Pokémon",
-                  href: "/categories/pokemon/sets",
-                  cfId: "eb1a8f57-bd66-4203-fb59-32749ee3e500",
-                  alt: "Pokémon category",
-                },
-                {
-                  key: "yugioh",
-                  label: "Yu-Gi-Oh!",
-                  href: "/categories/yugioh/sets",
-                  cfId: "87101a20-6ada-4b66-0057-2d210feb9d00",
-                  alt: "Yu-Gi-Oh! category",
-                },
-                {
-                  key: "mtg",
-                  label: "Magic: The Gathering",
-                  href: "/categories/mtg/sets",
-                  cfId: "69ab5d2b-407c-4538-3c82-be8a551efa00",
-                  alt: "Magic: The Gathering category",
-                },
-                {
-                  key: "funko",
-                  label: "Funko Pop",
-                  href: "/categories/funko/sets",
-                  cfId: "48efbf88-be1f-4a1f-f3f7-892fe21b5000",
-                  alt: "Funko Pop category",
-                },
-                {
-                  key: "sports",
-                  label: "Sports Cards",
-                  href: "/categories/sports/sets",
-                  cfId: "f95ef753-c5fd-4079-9743-27cf651fd500",
-                  alt: "Sports Cards category",
-                },
-              ];
+            <div className="mx-auto max-w-4xl">
+              <ul className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                {TILES.map((t) => {
+                  const src = cfImageUrl(t.cfId, "categoryThumb");
+                  return (
+                    <li
+                      key={t.key}
+                      className="overflow-hidden rounded-xl border border-white/10 bg-white/5 transition hover:border-white/20 hover:bg-white/10"
+                    >
+                      <Link href={t.href} className="block">
+                        <div className="relative w-full" style={{ aspectRatio: "4 / 3" }}>
+                          <Image
+                            src={src}
+                            alt={t.alt ?? t.label}
+                            fill
+                            unoptimized
+                            priority={t.key === "pokemon"}
+                            className="object-cover"
+                            sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
+                          />
+                        </div>
 
-              return (
-                <ul className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-                  {TILES.map((t) => {
-                    const src = cfImageUrl(t.cfId, "categoryThumb");
-                    return (
-                      <li
-                        key={t.key}
-                        className="rounded-xl border border-white/10 bg-white/5 overflow-hidden hover:border-white/20 hover:bg-white/10 transition"
-                      >
-                        <Link href={t.href} className="block">
-                          <div className="relative w-full" style={{ aspectRatio: "4 / 3" }}>
-                            <Image
-                              src={src}
-                              alt={t.alt ?? t.label}
-                              fill
-                              unoptimized
-                              priority={t.key === "pokemon"}
-                              className="object-cover"
-                              sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
-                            />
-                          </div>
-                          <div className="p-3">
-                            <div className="text-sm font-semibold text-white">{t.label}</div>
-                            <div className="text-xs text-white/75">Shop now →</div>
-                          </div>
-                        </Link>
-                      </li>
-                    );
-                  })}
-                </ul>
-              );
-            })()}
+                        <div className="p-3">
+                          <div className="text-sm font-semibold text-white">{t.label}</div>
+                          <div className="text-xs text-white/75">Shop now →</div>
+                        </div>
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
           </section>
 
           {/* FEATURED DROPS */}
@@ -346,7 +378,11 @@ export default async function HomePage() {
               >
                 🔥 Featured Drops
               </h2>
-              <Link href="/drops" className="text-sm font-semibold text-white/90 underline underline-offset-4 hover:text-white">
+
+              <Link
+                href="/drops"
+                className="text-sm font-semibold text-white/90 underline underline-offset-4 hover:text-white"
+              >
                 See all →
               </Link>
             </div>
@@ -360,26 +396,29 @@ export default async function HomePage() {
                       key={`${item.href}-${idx}`}
                       className="snap-start w-[280px] shrink-0 overflow-hidden rounded-xl border border-white/20 bg-white/5 shadow-[0_8px_20px_rgba(0,0,0,.25)] backdrop-blur-sm transition hover:bg-white/10 hover:border-white/30"
                     >
-                      <div className="relative aspect-4/3 w-full bg-white/5">
+                      <div className="relative aspect-[3/4] w-full bg-black/20 p-2">
                         <Image
                           src={src}
                           alt={item.alt ?? item.title}
                           fill
-                          className="object-cover"
-                          sizes="(max-width: 640px) 90vw, (max-width: 1024px) 50vw, 33vw"
+                          className="object-contain"
+                          sizes="280px"
                           priority={false}
                           unoptimized
                         />
                       </div>
+
                       <div className="p-3">
                         <div className="mb-1 flex items-center gap-2">
                           <span className="rounded border border-white/30 bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-white/90">
                             {(item.tag || "").toUpperCase()}
                           </span>
                         </div>
+
                         <Link href={item.href} className="line-clamp-2 font-semibold text-white hover:underline">
                           {item.title}
                         </Link>
+
                         <div className="mt-1 text-sm font-semibold text-white/90">{item.price}</div>
                       </div>
                     </article>
@@ -394,9 +433,14 @@ export default async function HomePage() {
             <div className="overflow-hidden rounded-2xl border border-white/20 bg-white/5 p-5 text-white shadow-[0_8px_20px_rgba(0,0,0,.25)] backdrop-blur-sm ring-0 sm:p-6 lg:p-7">
               <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <h3 className="text-lg font-semibold drop-shadow-[0_1px_2px_rgba(0,0,0,.6)]">Get first dibs on restocks & drops</h3>
-                  <p className="text-sm text-white/85 drop-shadow-[0_1px_2px_rgba(0,0,0,.6)]">No spam. Just heat.</p>
+                  <h3 className="text-lg font-semibold drop-shadow-[0_1px_2px_rgba(0,0,0,.6)]">
+                    Get first dibs on restocks & drops
+                  </h3>
+                  <p className="text-sm text-white/85 drop-shadow-[0_1px_2px_rgba(0,0,0,.6)]">
+                    No spam. Just heat.
+                  </p>
                 </div>
+
                 <form className="flex w-full max-w-md items-center gap-2" action="/newsletter" method="post">
                   <input
                     type="email"

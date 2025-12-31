@@ -1,19 +1,26 @@
+// src/app/categories/mtg/sets/page.tsx
 import "server-only";
+
 import Link from "next/link";
 import Image from "next/image";
+import Script from "next/script";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { CF_ACCOUNT_HASH } from "@/lib/cf";
+import type { Metadata } from "next";
+import { site } from "@/config/site";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const metadata = {
-  title: "Magic The Gathering Card Prices, Collection Tracking & Shop | Legendary Collectibles",
+export const metadata: Metadata = {
+  title: "MTG Sets | Legendary Collectibles",
   description:
-    "Browse Magic The Gathering cards, track prices, manage your collection, and buy singles and sealed products online.",
+    "Browse Magic: The Gathering sets. Open a set to view the card gallery, track pricing, and manage your collection.",
+  alternates: {
+    canonical: `${site.url}/categories/mtg/sets`,
+  },
 };
-
 
 /* ---------------- Types ---------------- */
 type SearchParams = Record<string, string | string[] | undefined>;
@@ -56,10 +63,7 @@ function parsePage(v?: string | string[]) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
-function buildHref(
-  base: string,
-  qs: { q?: string | null; page?: number; perPage?: number }
-) {
+function buildHref(base: string, qs: { q?: string | null; page?: number; perPage?: number }) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", qs.q);
   if (qs.page) p.set("page", String(qs.page));
@@ -68,12 +72,14 @@ function buildHref(
   return s ? `${base}?${s}` : base;
 }
 
+function absUrl(path: string) {
+  return `${site.url}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 /* ---------------- DB ---------------- */
 async function getSets(opts: { q: string | null; offset: number; limit: number }) {
   const like = opts.q ? `%${opts.q}%` : null;
 
-  // Build sets from CARDS (always populated), then enrich from scryfall_sets if available.
-  // This guarantees the index never goes empty just because scryfall_sets is missing.
   const where = like
     ? sql`(
         COALESCE(ss.name, ds.set_code) ILIKE ${like}
@@ -180,36 +186,75 @@ export default async function MtgSetsIndex({
 
   const banner = cfImageUrl(CATEGORY.bannerCfId);
 
+  // ---- JSON-LD (SEO) ----
+  const itemList = rows.slice(0, 24).map((s, i) => {
+    const href = `${CATEGORY.baseHref}/${encodeURIComponent(s.id)}`;
+    const img =
+      (s.cover_url?.replace(/^http:\/\//, "https://")) ||
+      (s.icon_svg_uri?.replace(/^http:\/\//, "https://")) ||
+      undefined;
+
+    return {
+      "@type": "ListItem",
+      position: i + 1,
+      url: absUrl(href),
+      name: s.name ?? s.id.toUpperCase(),
+      ...(img ? { image: img } : {}),
+    };
+  });
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: "MTG Sets",
+    description:
+      "Browse Magic: The Gathering sets and open a set to view the card gallery and pricing.",
+    url: `${site.url}${CATEGORY.baseHref}`,
+    isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: site.url },
+    mainEntity: {
+      "@type": "ItemList",
+      itemListOrder: "https://schema.org/ItemListOrderDescending",
+      numberOfItems: total,
+      itemListElement: itemList,
+    },
+  };
+
   return (
     <section className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-        <div className="flex items-center gap-4">
-          <div className="relative h-20 w-36 shrink-0 overflow-hidden rounded-lg bg-white/5 ring-1 ring-white/10">
-            <Image
-              src={banner}
-              alt={CATEGORY.label}
-              fill
-              unoptimized
-              className="object-contain"
-              sizes="144px"
-              priority
-            />
-          </div>
+      <Script
+        id="ld-json-mtg-sets"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
 
-          <div>
-            <h1 className="text-2xl font-bold text-white">
-              {CATEGORY.label} • Sets
-            </h1>
-            <div className="text-sm text-white/80">
-              Browse sets and jump into card galleries.
+      {/* Header */}
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-4">
+            <div className="relative h-20 w-36 shrink-0 overflow-hidden rounded-lg bg-white/5 ring-1 ring-white/10">
+              <Image
+                src={banner}
+                alt={CATEGORY.label}
+                fill
+                unoptimized
+                className="object-contain"
+                sizes="144px"
+                priority
+              />
+            </div>
+
+            <div>
+              <h1 className="text-2xl font-bold text-white">{CATEGORY.label} • Sets</h1>
+              <p className="text-sm text-white/80">
+                Browse sets by release date. Open any set to view the card gallery.
+              </p>
             </div>
           </div>
-        </div>
 
-        <Link href="/categories" className="text-sky-300 hover:underline" prefetch={false}>
-          ← All categories
-        </Link>
+          <Link href="/categories" className="text-sky-300 hover:underline" prefetch={false}>
+            ← All categories
+          </Link>
+        </div>
       </div>
 
       {/* Top bar */}
@@ -300,7 +345,7 @@ export default async function MtgSetsIndex({
                   <div className="relative w-full" style={{ aspectRatio: "4 / 3" }}>
                     <Image
                       src={img}
-                      alt={s.name ?? s.id}
+                      alt={s.name ?? s.id.toUpperCase()}
                       fill
                       unoptimized
                       className="object-contain"
@@ -314,11 +359,7 @@ export default async function MtgSetsIndex({
                     </div>
 
                     <div className="mt-1 text-xs text-white/80">
-                      {[
-                        s.id.toUpperCase(),
-                        s.released_at ?? undefined,
-                        s.set_type ?? undefined,
-                      ]
+                      {[s.id.toUpperCase(), s.released_at ?? undefined, s.set_type ?? undefined]
                         .filter(Boolean)
                         .join(" • ")}
                     </div>

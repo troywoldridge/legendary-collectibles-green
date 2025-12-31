@@ -1,22 +1,19 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+// src/app/categories/mtg/sets/[id]/page.tsx
 import "server-only";
 
 import Link from "next/link";
+import Script from "next/script";
 import { notFound } from "next/navigation";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import CardGridTile from "@/components/CardGridTile";
+import type { Metadata } from "next";
+import { site } from "@/config/site";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-
-export const metadata = {
-  title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
-  description:
-    "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
-};
-
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -54,12 +51,88 @@ function parsePage(v?: string | string[]) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
-function buildHref(base: string, qs: { page?: number; perPage?: number }) {
+function buildQuery(qs: { page?: number; perPage?: number }) {
   const p = new URLSearchParams();
-  if (qs.page) p.set("page", String(qs.page));
   if (qs.perPage) p.set("perPage", String(qs.perPage));
+  if (qs.page && qs.page > 1) p.set("page", String(qs.page));
   const s = p.toString();
-  return s ? `${base}?${s}` : base;
+  return s ? `?${s}` : "";
+}
+
+function buildHref(base: string, qs: { page?: number; perPage?: number }) {
+  return `${base}${buildQuery(qs)}`;
+}
+
+function httpsify(u?: string | null) {
+  if (!u) return null;
+  return u.replace(/^http:\/\//i, "https://");
+}
+
+export async function generateMetadata(
+  { params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<SearchParams> },
+): Promise<Metadata> {
+  const p = await params;
+  const sp = await searchParams;
+
+  const id = decodeURIComponent(String(p.id ?? "")).trim();
+  if (!id) {
+    return { alternates: { canonical: `${site.url}/categories/mtg/sets` } };
+  }
+
+  const perPage = parsePerPage(sp?.perPage);
+  const page = Math.max(1, parsePage(sp?.page));
+
+  const setRes = await db.execute<SetRow>(sql`
+    SELECT
+      code,
+      name,
+      set_type,
+      block,
+      COALESCE(TO_CHAR(released_at,'YYYY-MM-DD'), NULL) AS released_at
+    FROM public.scryfall_sets
+    WHERE LOWER(code) = LOWER(${id})
+    LIMIT 1
+  `);
+
+  const s = setRes.rows?.[0] ?? null;
+  if (!s) {
+    return {
+      title: "MTG Set Not Found | Legendary Collectibles",
+      alternates: { canonical: `${site.url}/categories/mtg/sets/${encodeURIComponent(id)}` },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const baseHref = `/categories/mtg/sets/${encodeURIComponent(s.code)}`;
+  const canonical = `${site.url}${baseHref}${buildQuery({ page, perPage })}`;
+
+  const titleBase = `${s.name ?? s.code.toUpperCase()} • MTG Set | Legendary Collectibles`;
+  const title = page > 1 ? `${titleBase} • Page ${page}` : titleBase;
+
+  const desc = [
+    `Browse Magic: The Gathering cards in ${s.name ?? s.code.toUpperCase()}.`,
+    s.set_type ? `Type: ${s.set_type}.` : null,
+    s.block ? `Block: ${s.block}.` : null,
+    s.released_at ? `Released: ${s.released_at}.` : null,
+  ].filter(Boolean).join(" ");
+
+  return {
+    title,
+    description: desc,
+    alternates: { canonical },
+    openGraph: {
+      title,
+      description: desc,
+      url: canonical,
+      siteName: site.name ?? "Legendary Collectibles",
+      type: "website",
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description: desc,
+    },
+  };
 }
 
 export default async function MtgSetDetailPage({
@@ -141,14 +214,62 @@ export default async function MtgSetDetailPage({
 
   const baseHref = `/categories/mtg/sets/${encodeURIComponent(s.code)}`;
 
+  const from = total === 0 ? 0 : offset + 1;
+  const to = Math.min(offset + perPage, total);
+
+  // --- JSON-LD: Breadcrumbs + CollectionPage/ItemList ---
+  const canonicalUrl = `${site.url}${baseHref}${buildQuery({ page, perPage })}`;
+  const listItems = (cardsRes.rows ?? []).map((c, i) => ({
+    "@type": "ListItem",
+    position: offset + i + 1,
+    url: `${site.url}/categories/mtg/cards/${encodeURIComponent(c.id)}`,
+    name: c.name ?? c.id,
+    image: httpsify(c.image_url) ?? undefined,
+  }));
+
+  const breadcrumbLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Categories", item: `${site.url}/categories` },
+      { "@type": "ListItem", position: 2, name: "Magic: The Gathering", item: `${site.url}/categories/mtg/sets` },
+      { "@type": "ListItem", position: 3, name: s.name ?? s.code.toUpperCase(), item: canonicalUrl },
+    ],
+  };
+
+  const collectionLd = {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: `${s.name ?? s.code.toUpperCase()} • MTG Set`,
+    description: `Browse Magic: The Gathering cards in ${s.name ?? s.code.toUpperCase()}.`,
+    url: canonicalUrl,
+    mainEntity: {
+      "@type": "ItemList",
+      numberOfItems: total,
+      itemListOrder: "https://schema.org/ItemListOrderAscending",
+      itemListElement: listItems,
+    },
+  };
+
   return (
     <section className="space-y-6">
+      <Script
+        id="ld-json-mtg-set-breadcrumb"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbLd) }}
+      />
+      <Script
+        id="ld-json-mtg-set-collection"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(collectionLd) }}
+      />
+
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white">{s.name ?? s.code}</h1>
           <div className="text-sm text-white/70">
             {[
-              s.code,
+              s.code.toUpperCase(),
               s.set_type ?? undefined,
               s.block ? `Block: ${s.block}` : undefined,
               s.released_at ? `Released: ${s.released_at}` : undefined,
@@ -169,9 +290,13 @@ export default async function MtgSetDetailPage({
         </div>
       ) : (
         <>
+          <div className="text-sm text-white/80">
+            Showing {from}-{to} of {total} cards
+          </div>
+
           <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
             {(cardsRes.rows ?? []).map((c) => {
-              const img = (c.image_url ?? "").replace(/^http:\/\//, "https://") || null;
+              const img = httpsify(c.image_url) || null;
               const href = `/categories/mtg/cards/${encodeURIComponent(c.id)}`;
 
               return (

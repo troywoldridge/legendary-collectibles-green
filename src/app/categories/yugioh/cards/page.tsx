@@ -171,8 +171,24 @@ export default async function YugiohCardsIndexPage({
   }));
 
   return (
+    
     <section className="space-y-6">
       {/* Search */}
+
+                  {/* SEO intro */}
+<div className="max-w-3xl space-y-3 text-sm text-white/80">
+  <p>
+    Browse Yu-Gi-Oh! cards across classic eras and modern sets, including popular archetypes,
+    staples, and collector favorites. Use search to quickly find cards by name, set, rarity, or ID.
+  </p>
+
+  <p>
+    Legendary Collectibles helps you explore card images and details, track market movement, and
+    organize your collection over time. New cards and pricing data are added regularly as our
+    database expands.
+  </p>
+</div>
+
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <div className="mb-2 text-sm font-semibold text-white">
           Search Yu-Gi-Oh! cards
@@ -203,6 +219,9 @@ export default async function YugiohCardsIndexPage({
           )}
         </div>
       </div>
+
+
+
 
       {/* Empty state / Grid */}
       {rows.length === 0 ? (
