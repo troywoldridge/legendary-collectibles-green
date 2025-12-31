@@ -7,9 +7,9 @@ import { sql } from "drizzle-orm";
 export type GameId = "pokemon" | "yugioh" | "mtg";
 
 export type LivePrice = {
-  amount: number;       // ALWAYS dollars (e.g. 3.25)
+  amount: number; // ALWAYS dollars (e.g. 3.25)
   currency: "USD";
-  source: string;       // debug label: which vendor/field we used
+  source: string; // debug label: which vendor/field we used
 };
 
 /**
@@ -24,63 +24,121 @@ function num(v: string | number | null | undefined): number | null {
 /**
  * Normalize "unknown unit" numeric values into USD dollars.
  *
- * Why:
- * - Some tables store dollars as decimals: 5.86
- * - Some tables store cents as integers: 586
- * - If we ever read cents and render as dollars, you get 100x prices.
- *
  * Heuristic:
- * - If it's an integer >= 100, we treat it as cents (586 -> 5.86)
+ * - If it's an integer >= 100, treat it as cents (586 -> 5.86)
  * - Otherwise treat it as dollars
- *
- * Notes:
- * - This is intentionally conservative to prevent 100x inflation.
  */
 function usd(v: string | number | null | undefined): number | null {
   const n = num(v);
   if (n == null) return null;
-
-  // Treat large integers as cents
   if (Number.isInteger(n) && n >= 100) return n / 100;
-
   return n;
 }
 
-/* ---------------- Pokemon: tcg_card_prices_tcgplayer ---------------- */
+/* ---------------- Pokemon: tcg_card_prices_tcgplayer (CURRENT SCHEMA) ---------------- */
 
-async function getPokemonPrice(cardId: string): Promise<LivePrice | null> {
-  const row =
+type CanonVariant = "normal" | "holofoil" | "reverse_holofoil" | "first_edition" | "promo";
+
+function normalizeVariantType(input: unknown): CanonVariant {
+  const s = String(input ?? "").trim().toLowerCase();
+  if (!s) return "normal";
+
+  if (s === "normal") return "normal";
+  if (s === "holo" || s === "holofoil") return "holofoil";
+  if (
+    s === "reverse" ||
+    s === "reverse_holo" ||
+    s === "reverseholo" ||
+    s === "reverse_holofoil" ||
+    s === "reverse_holofoil"
+  )
+    return "reverse_holofoil";
+  if (s === "first" || s === "firstedition" || s === "first_edition") return "first_edition";
+  if (s === "promo" || s === "wpromo" || s === "w_promo") return "promo";
+
+  return "normal";
+}
+
+async function getPokemonPrice(cardId: string, variantType?: string | null): Promise<LivePrice | null> {
+  const vt = normalizeVariantType(variantType);
+
+  const rows =
     (
       await db.execute<{
-        market_normal: string | null;
-        market_holofoil: string | null;
-        market_reverse_holofoil: string | null;
+        updated_at: string | null;
+        variant_type: string | null;
+
+        // “wide” variant columns (text dollars)
         normal: string | null;
         holofoil: string | null;
         reverse_holofoil: string | null;
+        first_edition_holofoil: string | null;
+        first_edition_normal: string | null;
+
+        // numeric fallbacks
+        market_price: string | number | null;
+        mid_price: string | number | null;
+        low_price: string | number | null;
+        high_price: string | number | null;
       }>(sql`
         SELECT
-          market_normal,
-          market_holofoil,
-          market_reverse_holofoil,
+          updated_at,
+          variant_type,
           normal,
           holofoil,
-          reverse_holofoil
-        FROM tcg_card_prices_tcgplayer
+          reverse_holofoil,
+          first_edition_holofoil,
+          first_edition_normal,
+          market_price,
+          mid_price,
+          low_price,
+          high_price
+        FROM public.tcg_card_prices_tcgplayer
         WHERE card_id = ${cardId}
-        LIMIT 1
+        ORDER BY
+          CASE
+            -- exact match first
+            WHEN btrim(COALESCE(variant_type,'')) = ${vt} THEN 0
+
+            -- for "normal", treat NULL/'' as a match
+            WHEN ${vt} = 'normal' AND (variant_type IS NULL OR btrim(variant_type) = '') THEN 1
+
+            ELSE 2
+          END,
+          updated_at DESC NULLS LAST
+        LIMIT 5
       `)
-    ).rows?.[0] ?? null;
+    ).rows ?? [];
 
-  if (!row) return null;
+  if (!rows.length) return null;
 
-  // IMPORTANT: use usd() not num()
+  // Prefer an exact row match; otherwise fallback to first row (usually the blank/normal row)
+  const exact = rows.find((r) => (r.variant_type ?? "").trim() === vt) ?? null;
+  const blank = rows.find((r) => !String(r.variant_type ?? "").trim()) ?? null;
+  const row = exact ?? (vt === "normal" ? blank : null) ?? rows[0];
+
+  // Pick the best “wide” field for the selected variant
+  let wide: string | null = null;
+
+  if (vt === "normal") wide = row.normal;
+  else if (vt === "holofoil") wide = row.holofoil;
+  else if (vt === "reverse_holofoil") wide = row.reverse_holofoil;
+  else if (vt === "first_edition") wide = row.first_edition_holofoil ?? row.first_edition_normal ?? null;
+  else if (vt === "promo") wide = row.holofoil ?? row.normal ?? null;
+
   const candidates: Array<{ v: number | null; label: string }> = [
-    { v: usd(row.market_normal), label: "tcgplayer.market_normal" },
-    { v: usd(row.market_holofoil), label: "tcgplayer.market_holofoil" },
-    { v: usd(row.market_reverse_holofoil), label: "tcgplayer.market_reverse_holofoil" },
-    { v: usd(row.normal), label: "tcgplayer.normal" },
+    // wide/variant-specific first
+    { v: usd(wide), label: `tcgplayer.${vt}` },
+
+    // then generic numeric fallbacks (if wide is empty)
+    { v: usd(row.market_price), label: "tcgplayer.market_price" },
+    { v: usd(row.mid_price), label: "tcgplayer.mid_price" },
+    { v: usd(row.low_price), label: "tcgplayer.low_price" },
+    { v: usd(row.high_price), label: "tcgplayer.high_price" },
+
+    // finally, for promos we sometimes still want to fall back to normal/holo
     { v: usd(row.holofoil), label: "tcgplayer.holofoil" },
+    { v: usd(row.normal), label: "tcgplayer.normal" },
     { v: usd(row.reverse_holofoil), label: "tcgplayer.reverse_holofoil" },
   ];
 
@@ -116,7 +174,6 @@ async function getYgoPrice(cardId: string): Promise<LivePrice | null> {
 
   if (!row) return null;
 
-  // Also hardened: if any YGO source ever stores cents, we won't blow up UI.
   const candidates: Array<{ v: number | null; label: string }> = [
     { v: usd(row.tcgplayer_price), label: "ygo.tcgplayer_price" },
     { v: usd(row.cardmarket_price), label: "ygo.cardmarket_price" },
@@ -163,12 +220,13 @@ export function normalizeGame(raw: string): GameId | null {
 export async function getLivePriceForCard(
   game: GameId,
   cardId: string,
+  variantType?: string | null,
 ): Promise<LivePrice | null> {
   if (!cardId) return null;
 
   switch (game) {
     case "pokemon":
-      return getPokemonPrice(cardId);
+      return getPokemonPrice(cardId, variantType);
     case "yugioh":
       return getYgoPrice(cardId);
     case "mtg":

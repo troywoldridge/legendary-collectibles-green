@@ -1,3 +1,4 @@
+// src/app/categories/pokemon/sets/[id]/page.tsx
 import "server-only";
 
 import Link from "next/link";
@@ -5,12 +6,21 @@ import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import PokemonCardsClient from "../../cards/PokemonCardsClient";
+import type { Metadata } from "next";
+import { site } from "@/config/site";
 
-export const metadata = {
-  title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
-  description:
-    "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
-};
+export async function generateMetadata(
+  { params }: { params: Promise<{ id: string }> }
+): Promise<Metadata> {
+  const { id } = await params;
+  const safeId = encodeURIComponent(id);
+
+  return {
+    alternates: {
+      canonical: `${site.url}/categories/pokemon/sets/${safeId}`,
+    },
+  };
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +31,7 @@ type SetRow = {
   name: string | null;
   series: string | null;
   ptcgo_code: string | null;
-  release_date: string | null;
+  release_date: string | null; // TEXT in DB
   logo_url: string | null;
   symbol_url: string | null;
 };
@@ -30,9 +40,12 @@ type CardListRow = {
   id: string;
   name: string | null;
   rarity: string | null;
+  number: string | null; // ✅ card number / collector number
+
   small_image: string | null;
   large_image: string | null;
 
+  // variants joined from tcg_card_variants
   v_normal: boolean | null;
   v_reverse: boolean | null;
   v_holo: boolean | null;
@@ -137,13 +150,13 @@ export default async function SetDetailPage({
     `);
     setRow = res.rows?.[0];
   } catch {
-    // ignore
+    // ignore; fallback below
   }
 
   if (!setRow) {
     const res = await db.execute<SetRow>(sql`
       SELECT id, name, series, ptcgo_code, release_date, logo_url, symbol_url
-      FROM tcg_sets
+      FROM public.tcg_sets
       WHERE id = ${setParam}
          OR lower(ptcgo_code) = lower(${setParam})
          OR lower(name) = lower(${nameGuess})
@@ -181,7 +194,12 @@ export default async function SetDetailPage({
 
   if (q) {
     conditions.push(
-      sql`(c.name ILIKE ${"%" + q + "%"} OR c.rarity ILIKE ${"%" + q + "%"} OR c.id ILIKE ${"%" + q + "%"})`,
+      sql`(
+        c.name ILIKE ${"%" + q + "%"}
+        OR c.rarity ILIKE ${"%" + q + "%"}
+        OR c.id ILIKE ${"%" + q + "%"}
+        OR c.number ILIKE ${"%" + q + "%"}
+      )`,
     );
   }
 
@@ -210,30 +228,49 @@ export default async function SetDetailPage({
   const safePage = Math.min(totalPages, Math.max(1, reqPage));
   const safeOffset = (safePage - 1) * perPage;
 
-  const rowsSql = sql<CardListRow>`
-    SELECT
-      c.id,
-      c.name,
-      c.rarity,
-      c.small_image,
-      c.large_image,
+  // ✅ Sort by card number (numeric-first), then by id/name as fallback.
+  // Handles:
+  // - "001" => 1
+  // - "4a" after 4
+  // - "TG12" after numeric ones, still stable
+    const rows =
+    (
+      await db.execute<CardListRow>(sql`
+        SELECT
+          c.id,
+          c.name,
+          c.rarity,
+          c.small_image,
+          c.large_image,
 
-      v.normal        AS v_normal,
-      v.reverse       AS v_reverse,
-      v.holo          AS v_holo,
-      v.first_edition AS v_first_edition,
-      v.w_promo       AS v_w_promo
+          v.normal        AS v_normal,
+          v.reverse       AS v_reverse,
+          v.holo          AS v_holo,
+          v.first_edition AS v_first_edition,
+          v.w_promo       AS v_w_promo
 
-    FROM public.tcg_cards c
-    LEFT JOIN public.tcg_card_variants v
-      ON v.card_id = c.id
+        FROM public.tcg_cards c
+        LEFT JOIN public.tcg_card_variants v
+          ON v.card_id = c.id
 
-    WHERE ${whereSql}
-    ORDER BY c.name ASC NULLS LAST, c.id ASC
-    LIMIT ${perPage} OFFSET ${safeOffset}
-  `;
+        WHERE ${whereSql}
+        ORDER BY
+          -- put numeric ids first (me1-37)
+          CASE WHEN split_part(c.id, '-', 2) ~ '^\\d+$' THEN 0 ELSE 1 END,
 
-  const rows = (await db.execute(rowsSql)).rows as CardListRow[];
+          -- numeric value of suffix (001 -> 1)
+          NULLIF(regexp_replace(split_part(c.id, '-', 2), '[^\\d].*$', ''), '')::int NULLS LAST,
+
+          -- any suffix (a/b/etc) after digits, for stability
+          regexp_replace(split_part(c.id, '-', 2), '^\\d+', '') ASC,
+
+          -- stable fallback
+          split_part(c.id, '-', 2) ASC,
+          c.id ASC
+        LIMIT ${perPage} OFFSET ${safeOffset}
+      `)
+    ).rows ?? [];
+
 
   const from = total === 0 ? 0 : safeOffset + 1;
   const to = Math.min(safeOffset + perPage, total);
@@ -253,18 +290,20 @@ export default async function SetDetailPage({
 
   const subtitle = subtitleParts.join(" • ");
 
-  // ✅ Adapt to PokemonCardsClient shape (variants ALWAYS present)
+  // ✅ match the cards index page shape EXACTLY
   const cards = rows.map((c) => ({
     cardId: c.id,
     name: c.name ?? c.id,
     setName: setRow?.name ?? canonicalSetId,
     imageUrl: c.large_image || c.small_image || null,
+    // optional: if your client can display it, you now have it
+    number: c.number ?? null,
     variants: {
-      normal: c.v_normal ?? false,
-      reverse: c.v_reverse ?? false,
-      holo: c.v_holo ?? false,
-      first_edition: c.v_first_edition ?? false,
-      w_promo: c.v_w_promo ?? false,
+      normal: c.v_normal,
+      reverse: c.v_reverse,
+      holo: c.v_holo,
+      first_edition: c.v_first_edition,
+      w_promo: c.v_w_promo,
     },
   }));
 
@@ -285,9 +324,7 @@ export default async function SetDetailPage({
                 priority
               />
             ) : (
-              <div className="absolute inset-0 grid place-items-center text-xs text-white/60">
-                No image
-              </div>
+              <div className="absolute inset-0 grid place-items-center text-xs text-white/60">No image</div>
             )}
           </div>
 
@@ -359,7 +396,7 @@ export default async function SetDetailPage({
             <input
               name="q"
               defaultValue={q ?? ""}
-              placeholder="Search cards (name/rarity/id)…"
+              placeholder="Search cards (name/rarity/id/number)…"
               className="w-60 rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50 md:w-[320px]"
             />
             <button
@@ -404,6 +441,7 @@ export default async function SetDetailPage({
         </div>
       </div>
 
+      {/* Grid */}
       {cards.length === 0 ? (
         <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">
           {q || raresOnly || holoOnly ? "No cards matched your filters." : "No cards found in this set."}
@@ -412,10 +450,17 @@ export default async function SetDetailPage({
         <PokemonCardsClient cards={cards} />
       )}
 
+      {/* Pagination */}
       {total > perPage && (
         <nav className="mt-4 flex items-center justify-center gap-2 text-sm">
           <Link
-            href={buildHref(baseHref, { q, perPage, rares: raresOnly, holo: holoOnly, page: prevPage })}
+            href={buildHref(baseHref, {
+              q,
+              perPage,
+              rares: raresOnly,
+              holo: holoOnly,
+              page: prevPage,
+            })}
             aria-disabled={isFirst}
             className={`rounded-md border px-3 py-1 ${
               isFirst
@@ -431,7 +476,13 @@ export default async function SetDetailPage({
           </span>
 
           <Link
-            href={buildHref(baseHref, { q, perPage, rares: raresOnly, holo: holoOnly, page: nextPage })}
+            href={buildHref(baseHref, {
+              q,
+              perPage,
+              rares: raresOnly,
+              holo: holoOnly,
+              page: nextPage,
+            })}
             aria-disabled={isLast}
             className={`rounded-md border px-3 py-1 ${
               isLast

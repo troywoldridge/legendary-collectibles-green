@@ -9,9 +9,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
+  title: "Magic The Gathering Card Prices, Collection Tracking & Shop | Legendary Collectibles",
   description:
-    "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
+    "Browse Magic The Gathering cards, track prices, manage your collection, and buy singles and sealed products online.",
 };
 
 

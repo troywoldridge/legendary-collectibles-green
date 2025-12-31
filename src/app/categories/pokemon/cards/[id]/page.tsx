@@ -17,6 +17,8 @@ import { site } from "@/config/site";
 import type { PokemonVariants } from "@/components/pokemon/VariantChips";
 import VariantPickerAdd from "@/components/pokemon/VariantPickerAdd";
 
+
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;

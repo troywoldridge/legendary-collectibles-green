@@ -7,11 +7,21 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
 
-export const metadata = {
-  title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
-  description:
-    "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
+import type { Metadata } from "next";
+import { site } from "@/config/site";
+
+const BASE =
+  process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+  "https://legendary-collectibles.com";
+
+export const metadata: Metadata = {
+  title: "Pokémon Sets | Legendary Collectibles",
+  description: "Browse all Pokémon TCG sets. View cards, prices, and manage your collection.",
+  alternates: {
+    canonical: `${BASE}/categories/pokemon/sets`,
+  },
 };
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

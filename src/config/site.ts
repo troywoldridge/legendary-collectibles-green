@@ -3,10 +3,11 @@ export const site = {
   shortName: "Legendary",
   description:
     "Buy Pokémon, Yu-Gi-Oh!, Magic: The Gathering, and Funko Pop collectibles online. Trusted marketplace for TCG and pop culture fans.",
-  url: "https://legendarycollectibles.com",
+  url: "https://legendary-collectibles.com",
+
   ogImage: "/og-image.jpg",
   twitter: "@LegendaryShop", // ✅ added for layout.tsx
-  email: "support@legendarycollectibles.com",        // primary
+  email: "support@legendary-collectibles.com",        // primary
   adminEmail: "admin@legendary-collectibles.com", 
   phone: "+1-800-555-0123",
 

@@ -20,17 +20,15 @@ function xmlEscape(s: string) {
 export async function GET() {
   const now = new Date().toISOString();
 
-  // ✅ List every sitemap file that exists
   const sitemaps = [
-  `${BASE}/sitemap-pokemon.xml`,
-  `${BASE}/sitemap-ygo.xml`,
-  `${BASE}/sitemap-mtg-1.xml`,
-  `${BASE}/sitemap-mtg-2.xml`,
-  `${BASE}/sitemap-mtg-3.xml`,
-  `${BASE}/sitemap-mtg-4.xml`,
-  `${BASE}/sitemap-mtg-5.xml`,
-];
-
+    `${BASE}/sitemap-pokemon.xml`,
+    `${BASE}/sitemap-ygo.xml`,
+    `${BASE}/sitemap-mtg-1.xml`,
+    `${BASE}/sitemap-mtg-2.xml`,
+    `${BASE}/sitemap-mtg-3.xml`,
+    `${BASE}/sitemap-mtg-4.xml`,
+    `${BASE}/sitemap-mtg-5.xml`,
+  ];
 
   const body = `<?xml version="1.0" encoding="UTF-8"?>
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -39,7 +37,7 @@ ${sitemaps
     (loc) => `  <sitemap>
     <loc>${xmlEscape(loc)}</loc>
     <lastmod>${now}</lastmod>
-  </sitemap>`
+  </sitemap>`,
   )
   .join("\n")}
 </sitemapindex>
@@ -48,8 +46,7 @@ ${sitemaps
   return new NextResponse(body, {
     headers: {
       "content-type": "application/xml; charset=utf-8",
-      // index can be cached a little; change to no-store if you prefer
-      "cache-control": "public, max-age=3600",
+      "cache-control": "no-store",
     },
   });
 }

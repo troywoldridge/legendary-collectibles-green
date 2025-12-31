@@ -38,7 +38,7 @@
     "src/app/cart",
     "src/lib/amozon.js",
     ".next/dev/dev/types/**/*.ts"
-  ],
+, "src/app/api"  ],
   "exclude": [
     "node_modules"
   ]

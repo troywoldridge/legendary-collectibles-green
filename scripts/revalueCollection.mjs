@@ -1,7 +1,9 @@
 // scripts/revalueCollection.mjs
-// node --import tsx scripts/revalueJobs.mts 
 // Node 20+
 // Uses DATABASE_URL from your .env
+//
+// Run:
+//   node scripts/revalueCollection.mjs
 
 import "dotenv/config";
 import pg from "pg";
@@ -18,11 +20,11 @@ async function main() {
   try {
     console.log("=== Collection revalue: start ===");
 
-    // Current date in DB (UTC, date only)
+    // Date from DB (date only)
     const { rows: dateRows } = await client.query(
-      "SELECT CURRENT_DATE::date AS d",
+      "SELECT CURRENT_DATE::date AS d"
     );
-    const asOfDate = dateRows[0].d;
+    const asOfDate = dateRows[0]?.d;
     console.log("as_of_date:", asOfDate);
 
     // Load all collection items
@@ -44,7 +46,7 @@ async function main() {
     }
     console.log(`Found ${items.length} collection items`);
 
-    // Load vendor prices into in-memory maps
+    // Load vendor prices into maps
     const [pokemonPrices, ygoPrices, mtgPrices] = await Promise.all([
       loadPokemonPrices(client),
       loadYgoPrices(client),
@@ -63,20 +65,19 @@ async function main() {
         ygoPrices,
         mtgPrices,
       });
+
       const qty = Number(item.quantity || 0);
 
       const priceCents =
-        price != null && Number.isFinite(price)
-          ? Math.round(price * 100)
-          : null;
+        price != null && Number.isFinite(price) ? Math.round(price * 100) : null;
 
-      const totalValueCents =
-        priceCents != null ? priceCents * qty : null;
-
+      // NOTE: this is per-unit last_value_cents (matches your existing update behavior)
       updates.push({
         id: item.id,
         last_value_cents: priceCents,
       });
+
+      const totalValueCents = priceCents != null ? priceCents * qty : null;
 
       let agg = perUser.get(item.user_id);
       if (!agg) {
@@ -95,6 +96,7 @@ async function main() {
       if (item.cost_cents != null) {
         agg.totalCostCents += Number(item.cost_cents) * qty;
       }
+
       if (totalValueCents != null) {
         agg.totalValueCents += totalValueCents;
       }
@@ -104,17 +106,14 @@ async function main() {
 
     // --- 2a) Update user_collection_items.last_value_cents in bulk ---
     if (updates.length) {
+      // We avoid assuming id is uuid; compare via ::text to be safe
+      // Also allow last_value_cents to be null (cast to int via ::int when not null)
       const valuesSql = updates
-        .map(
-          (_u, i) =>
-            `($${i * 2 + 1}::uuid, $${i * 2 + 2}::integer)`,
-        )
+        .map((_u, i) => `($${i * 2 + 1}::text, $${i * 2 + 2}::int)`)
         .join(", ");
 
       const params = [];
-      for (const u of updates) {
-        params.push(u.id, u.last_value_cents);
-      }
+      for (const u of updates) params.push(String(u.id), u.last_value_cents);
 
       await client.query(
         `
@@ -122,54 +121,50 @@ async function main() {
         SET last_value_cents = v.last_value_cents,
             updated_at = NOW()
         FROM (VALUES ${valuesSql}) AS v(id, last_value_cents)
-        WHERE u.id = v.id;
-      `,
-        params,
+        WHERE u.id::text = v.id;
+        `,
+        params
       );
 
-      console.log(
-        `Updated last_value_cents for ${updates.length} items`,
-      );
+      console.log(`Updated last_value_cents for ${updates.length} items`);
     }
 
     // --- 2b) Insert daily valuations per user ---
-    const dailyValuesSql = [];
-    const dailyParams = [];
-    let idx = 1;
-
-    for (const [userId, agg] of perUser.entries()) {
-      dailyValuesSql.push(
-        `($${idx++}::text, $${idx++}::date, $${idx++}::integer, $${idx++}::integer, $${idx++}::bigint, $${idx++}::bigint)`,
-      );
-      dailyParams.push(
-        userId,
-        asOfDate,
-        agg.totalQty,
-        agg.distinctItems,
-        agg.totalCostCents || 0,
-        agg.totalValueCents || 0,
-      );
-    }
-
-    if (dailyValuesSql.length) {
-      // Clear existing rows for this date (so reruns are idempotent)
+    if (perUser.size) {
+      // Clear existing rows for this date (idempotent reruns)
       await client.query(
         `DELETE FROM user_collection_daily_valuations WHERE as_of_date = $1`,
-        [asOfDate],
+        [asOfDate]
       );
+
+      const dailyValuesSql = [];
+      const dailyParams = [];
+      let idx = 1;
+
+      for (const [userId, agg] of perUser.entries()) {
+        dailyValuesSql.push(
+          `($${idx++}::text, $${idx++}::date, $${idx++}::integer, $${idx++}::integer, $${idx++}::bigint, $${idx++}::bigint)`
+        );
+        dailyParams.push(
+          String(userId),
+          asOfDate,
+          agg.totalQty,
+          agg.distinctItems,
+          agg.totalCostCents || 0,
+          agg.totalValueCents || 0
+        );
+      }
 
       await client.query(
         `
         INSERT INTO user_collection_daily_valuations
           (user_id, as_of_date, total_quantity, distinct_items, total_cost_cents, total_value_cents)
         VALUES ${dailyValuesSql.join(", ")}
-      `,
-        dailyParams,
+        `,
+        dailyParams
       );
 
-      console.log(
-        `Inserted daily valuations for ${perUser.size} user(s)`,
-      );
+      console.log(`Inserted daily valuations for ${perUser.size} user(s)`);
     }
 
     await client.query("COMMIT");
@@ -191,17 +186,18 @@ async function main() {
 // ---- Price loaders --------------------------------------------------
 
 async function loadPokemonPrices(client) {
-  // Safely treat everything as text first, then numeric
+  // Use numeric columns first, then safely parse variant text if it's numeric.
   const { rows } = await client.query(`
     SELECT
       card_id,
       COALESCE(
-        NULLIF(TRIM(market_normal::text), '')::numeric,
-        NULLIF(TRIM(market_reverse_holofoil::text), '')::numeric,
-        NULLIF(TRIM(market_holofoil::text), '')::numeric,
-        NULLIF(TRIM(normal::text), '')::numeric,
-        NULLIF(TRIM(reverse_holofoil::text), '')::numeric,
-        NULLIF(TRIM(holofoil::text), '')::numeric
+        market_price,
+        mid_price,
+        CASE WHEN normal ~ '^[0-9]+(\\.[0-9]+)?$' THEN normal::numeric END,
+        CASE WHEN reverse_holofoil ~ '^[0-9]+(\\.[0-9]+)?$' THEN reverse_holofoil::numeric END,
+        CASE WHEN holofoil ~ '^[0-9]+(\\.[0-9]+)?$' THEN holofoil::numeric END,
+        CASE WHEN first_edition_holofoil ~ '^[0-9]+(\\.[0-9]+)?$' THEN first_edition_holofoil::numeric END,
+        CASE WHEN first_edition_normal ~ '^[0-9]+(\\.[0-9]+)?$' THEN first_edition_normal::numeric END
       ) AS tp_price
     FROM tcg_card_prices_tcgplayer
   `);
@@ -213,27 +209,24 @@ async function loadPokemonPrices(client) {
     }
   }
 
-  // Optional: eBay medians as fallback if TCGplayer missing
-  const { rows: ebayRows } = await client.query(
-    `
-    SELECT card_id, median
-    FROM tcg_card_prices_ebay
-    WHERE game = 'pokemon'
-  `,
-  );
-  for (const r of ebayRows) {
-    if (
-      r.card_id &&
-      r.median != null &&
-      !map.has(r.card_id)
-    ) {
-      map.set(r.card_id, Number(r.median));
+  // Optional eBay fallback if table exists
+  try {
+    const { rows: ebayRows } = await client.query(`
+      SELECT card_id, median
+      FROM tcg_card_prices_ebay
+      WHERE game = 'pokemon'
+    `);
+
+    for (const r of ebayRows) {
+      if (r.card_id && r.median != null && !map.has(r.card_id)) {
+        map.set(r.card_id, Number(r.median));
+      }
     }
+  } catch (e) {
+    console.warn("Pokemon eBay fallback skipped:", e?.message || e);
   }
 
-  console.log(
-    `Loaded ${map.size} Pokémon price entries (TCGplayer + eBay fallback)`,
-  );
+  console.log(`Loaded ${map.size} Pokémon price entries`);
   return map;
 }
 
@@ -289,20 +282,11 @@ function getPriceForItem(item, maps) {
 
   if (!cardId) return null;
 
-  if (game === "pokemon") {
-    return maps.pokemonPrices.get(cardId) ?? null;
-  }
+  if (game === "pokemon") return maps.pokemonPrices.get(cardId) ?? null;
+  if (game === "ygo" || game === "yugioh") return maps.ygoPrices.get(cardId) ?? null;
+  if (game === "mtg" || game === "magic") return maps.mtgPrices.get(cardId) ?? null;
 
-  if (game === "ygo" || game === "yugioh") {
-    return maps.ygoPrices.get(cardId) ?? null;
-  }
-
-  if (game === "mtg" || game === "magic") {
-    return maps.mtgPrices.get(cardId) ?? null;
-  }
-
-  // Sports, Funko, etc. — not wired yet
-  return null;
+  return null; // other categories not wired yet
 }
 
 // ---- Kick off -------------------------------------------------------

@@ -5,11 +5,13 @@ import Link from "next/link";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import PokemonCardsClient from "./PokemonCardsClient";
+import type { Metadata } from "next";
+import { site } from "@/config/site";
 
-export const metadata = {
-  title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
-  description:
-    "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
+export const metadata: Metadata = {
+  title: "Pokemon Cards | Legendary Collectibles",
+  description: "Browse pokemon cards, prices, and collection tools.",
+  alternates: { canonical: `${site.url}/categories/pokemon/cards` },
 };
 
 export const runtime = "nodejs";

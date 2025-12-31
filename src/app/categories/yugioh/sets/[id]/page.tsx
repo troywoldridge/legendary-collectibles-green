@@ -7,8 +7,25 @@ import { db } from "@/lib/db";
 
 import YgoCardsClient from "../../cards/YgoCardsClient";
 
+import type { Metadata } from "next";
+import { site } from "@/config/site";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+export async function generateMetadata(
+  { params }: { params: Promise<{ id: string }> }
+): Promise<Metadata> {
+  const { id } = await params;
+  const safeId = encodeURIComponent(id);
+
+  return {
+    alternates: {
+      canonical: `${site.url}/categories/yugioh/cards/${safeId}`,
+    },
+  };
+}
+
 
 type Row = {
   card_id: string;

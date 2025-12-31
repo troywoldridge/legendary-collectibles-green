@@ -5,14 +5,15 @@ import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
+import type { Metadata } from "next";
+import { site } from "@/config/site";
 
-export const metadata = {
-  title:
-    "Yu-Gi-Oh Card Prices, Collection Tracking & Shop | Legendary Collectibles",
-  description:
-    "Browse Yu-Gi-Oh  cards, track prices, manage your collection, and buy singles and sealed products online.",
+
+export const metadata: Metadata = {
+  title: "Yu-Gi-Oh! Sets | Legendary Collectibles",
+  description: "Browse Yu-Gi-Oh! sets and their cards.",
+  alternates: { canonical: `${site.url}/categories/yugioh/sets` },
 };
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 

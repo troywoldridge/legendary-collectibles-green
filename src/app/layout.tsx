@@ -36,7 +36,12 @@ export const metadata: Metadata = {
   metadataBase,
   title: { default: title, template },
   description: site?.description ?? "",
-  alternates: { canonical: site?.url ?? undefined },
+
+  // IMPORTANT:
+  // Do NOT set a site-wide canonical here.
+  // Canonicals must be per-page (via metadata/generateMetadata),
+  // otherwise Google will treat many pages as duplicates of the homepage.
+
   openGraph: {
     type: "website",
     url: site?.url ?? undefined,
@@ -53,6 +58,7 @@ export const metadata: Metadata = {
     ],
     locale: "en_US",
   },
+
   twitter: {
     card: "summary_large_image",
     site: site?.twitter ?? undefined,

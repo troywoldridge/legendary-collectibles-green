@@ -8,8 +8,20 @@ import { db } from "@/lib/db";
 import YgoCardSearch from "@/components/ygo/YgoCardSearch";
 import YgoCardsClient from "./YgoCardsClient";
 
+import type { Metadata } from "next";
+import { site } from "@/config/site";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+
+
+export const metadata: Metadata = {
+  title: "Yu-Gi-Oh! Cards | Legendary Collectibles",
+  description: "Browse Yu-Gi-Oh! cards, prices, and collection tools.",
+  alternates: { canonical: `${site.url}/categories/yugioh/cards` },
+};
+
 
 /* ---------------- Types ---------------- */
 type ListRow = {

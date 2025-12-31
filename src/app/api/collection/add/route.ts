@@ -48,7 +48,9 @@ function todayISODate(): string {
  * - first_edition
  * - promo
  */
-function normalizeVariantType(input: unknown): string {
+type CanonVariant = "normal" | "holofoil" | "reverse_holofoil" | "first_edition" | "promo";
+
+function normalizeVariantType(input: unknown): CanonVariant {
   const s = String(input ?? "").trim().toLowerCase();
   if (!s) return "normal";
 
@@ -77,6 +79,141 @@ function variantLabel(v: string): string {
   }
 }
 
+/** tolerant parsing: handles "0.07", "$0.07", " 0.07 " */
+function toNumber(x: unknown): number | null {
+  if (x == null) return null;
+  if (typeof x === "number") return Number.isFinite(x) ? x : null;
+
+  if (typeof x === "string") {
+    let s = x.trim();
+    if (!s) return null;
+    s = s.replace(/,/g, "");
+    s = s.replace(/[^\d.\-]/g, "");
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  return null;
+}
+
+function toCentsFromPrice(x: unknown): number | null {
+  const n = toNumber(x);
+  if (n == null || n <= 0) return null;
+  return Math.round(n * 100);
+}
+
+function pickTcgplayerWideCents(
+  row: {
+    normal: string | null;
+    holofoil: string | null;
+    reverse_holofoil: string | null;
+    first_edition_holofoil: string | null;
+    first_edition_normal: string | null;
+    market_price: string | number | null;
+    low_price: string | number | null;
+    mid_price: string | number | null;
+    high_price: string | number | null;
+  },
+  variantType: CanonVariant,
+): { cents: number | null; used: "wide" | "generic" | "none" } {
+  let wideVal: string | null = null;
+
+  if (variantType === "normal") wideVal = row.normal;
+  else if (variantType === "holofoil") wideVal = row.holofoil;
+  else if (variantType === "reverse_holofoil") wideVal = row.reverse_holofoil;
+  else if (variantType === "first_edition") {
+    wideVal = row.first_edition_holofoil ?? row.first_edition_normal ?? null;
+  } else if (variantType === "promo") {
+    wideVal = row.holofoil ?? row.normal ?? null;
+  }
+
+  const wideCents = toCentsFromPrice(wideVal);
+  if (wideCents != null) return { cents: wideCents, used: "wide" };
+
+  const generic =
+    toCentsFromPrice(row.market_price) ??
+    toCentsFromPrice(row.mid_price) ??
+    toCentsFromPrice(row.low_price) ??
+    toCentsFromPrice(row.high_price);
+
+  if (generic != null) return { cents: generic, used: "generic" };
+
+  return { cents: null, used: "none" };
+}
+
+/**
+ * Pokémon DB-first lookup:
+ * - Reads wide columns (normal/holofoil/reverse_holofoil/etc.) on tcgplayer table
+ * - Works even when variant_type is blank (your me1 rows are like this)
+ * - If no usable price in DB, returns null (caller may optionally fallback to live)
+ */
+async function lookupPokemonDbPrice(cardId: string, variantType: CanonVariant) {
+  const res = await db.execute<{
+    updated_at: string | null;
+    variant_type: string | null;
+
+    normal: string | null;
+    holofoil: string | null;
+    reverse_holofoil: string | null;
+    first_edition_holofoil: string | null;
+    first_edition_normal: string | null;
+
+    market_price: string | number | null;
+    low_price: string | number | null;
+    mid_price: string | number | null;
+    high_price: string | number | null;
+
+    currency: string | null;
+  }>(sql`
+    SELECT
+      updated_at,
+      variant_type,
+      normal,
+      holofoil,
+      reverse_holofoil,
+      first_edition_holofoil,
+      first_edition_normal,
+      market_price,
+      low_price,
+      mid_price,
+      high_price,
+      currency
+    FROM public.tcg_card_prices_tcgplayer
+    WHERE card_id = ${cardId}
+    ORDER BY
+      -- Prefer exact variant_type match when present
+      CASE WHEN variant_type = ${variantType} THEN 0 ELSE 1 END,
+      -- Prefer rows that actually have a usable wide value for the requested variant
+      CASE
+        WHEN ${variantType} = 'normal' AND normal IS NOT NULL AND btrim(normal) <> '' THEN 0
+        WHEN ${variantType} = 'holofoil' AND holofoil IS NOT NULL AND btrim(holofoil) <> '' THEN 0
+        WHEN ${variantType} = 'reverse_holofoil' AND reverse_holofoil IS NOT NULL AND btrim(reverse_holofoil) <> '' THEN 0
+        ELSE 1
+      END,
+      updated_at DESC NULLS LAST
+    LIMIT 10
+  `);
+
+  const rows = res.rows ?? [];
+  if (!rows.length) return null;
+
+  for (const row of rows) {
+    const picked = pickTcgplayerWideCents(row, variantType);
+    if (picked.cents != null) {
+      return {
+        unitPriceCents: picked.cents,
+        source: "tcgplayer_db",
+        confidence: picked.used === "wide" ? "variant_column" : "market_or_mid",
+        currency: (row.currency ?? "USD").toUpperCase(),
+        updatedAt: row.updated_at ?? null,
+      };
+    }
+  }
+
+  return null;
+}
+
 export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -99,13 +236,10 @@ export async function POST(req: Request) {
   const gradingCompany = (body.grading_company ?? "UNGR").trim().toUpperCase();
   const gradeLabel = (body.grade_label ?? "Ungraded").trim();
 
-  // IMPORTANT:
-  // Your DB currently has cert_number NOT NULL (based on your error),
-  // so we must never send null. Use empty string when absent.
-  const certNumber = (body.cert_number ?? "").toString().trim(); // "" allowed
+  const certNumber = (body.cert_number ?? "").toString().trim();
   const purchaseDate = body.purchase_date ?? null;
 
-  const variantType = normalizeVariantType(body.variantType);
+  const variantType: CanonVariant = normalizeVariantType(body.variantType);
 
   const qtyRaw = body.quantity ?? 1;
   const quantity =
@@ -132,7 +266,6 @@ export async function POST(req: Request) {
   const isFree = !isPro && !isCollector;
 
   // Determine whether this add will INSERT a new row or UPDATE an existing one.
-  // MUST include variant_type + folder + grading identity fields.
   let existingId: string | null = null;
 
   try {
@@ -200,14 +333,12 @@ export async function POST(req: Request) {
         (maxItems != null && projectedItems > maxItems) ||
         (maxCollections != null && projectedCollections > maxCollections)
       ) {
-        const hitItems = maxItems != null && projectedItems > maxItems;
-        const hitCollections = maxCollections != null && projectedCollections > maxCollections;
-
         const planName = isFree ? "Free" : isCollector ? "Collector" : plan.id;
 
         const errorParts: string[] = [];
-        if (hitItems && maxItems != null) errorParts.push(`item limit reached (${currentItems}/${maxItems})`);
-        if (hitCollections && maxCollections != null)
+        if (maxItems != null && projectedItems > maxItems)
+          errorParts.push(`item limit reached (${currentItems}/${maxItems})`);
+        if (maxCollections != null && projectedCollections > maxCollections)
           errorParts.push(`collection limit reached (${currentCollections}/${maxCollections})`);
 
         return NextResponse.json(
@@ -233,19 +364,44 @@ export async function POST(req: Request) {
   let unitPriceCents: number | null = null;
   let priceSource: string | null = null;
   let priceConfidence: string | null = null;
+  let priceCurrency: string | null = null;
 
   try {
-    // NOTE: your current getLivePriceForCard is still using an old schema (market_normal etc),
-    // so it may throw. We catch and continue.
+  if (gameNorm === "pokemon") {
+    // 1️⃣ DB-first lookup (authoritative)
+    const dbPrice = await lookupPokemonDbPrice(cardId, variantType);
+
+    if (dbPrice) {
+      unitPriceCents = dbPrice.unitPriceCents;
+      priceSource = dbPrice.source;
+      priceConfidence = dbPrice.confidence;
+      priceCurrency = dbPrice.currency ?? "USD";
+    } else {
+      // 2️⃣ Live fallback ONLY if DB has nothing usable
+      const livePrice = await getLivePriceForCard("pokemon", cardId, variantType);
+
+      if (livePrice) {
+        unitPriceCents = Math.round(livePrice.amount * 100);
+        priceSource = livePrice.source;
+        priceConfidence = "live_fallback";
+        priceCurrency = livePrice.currency ?? "USD";
+      }
+    }
+  } else {
+    // Non-Pokémon paths unchanged
     const livePrice = await getLivePriceForCard(gameNorm as GameId, cardId);
+
     if (livePrice) {
       unitPriceCents = Math.round(livePrice.amount * 100);
-      priceSource = (livePrice as any)?.source ?? null;
-      priceConfidence = (livePrice as any)?.confidence ?? null;
+      priceSource = livePrice.source;
+      priceConfidence = "live";
+      priceCurrency = livePrice.currency ?? "USD";
     }
-  } catch (err) {
-    console.warn("collection/add price lookup failed (continuing)", err);
   }
+} catch (err) {
+  console.warn("collection/add price lookup failed (continuing)", err);
+}
+
 
   const asOfDate = todayISODate();
 
@@ -282,6 +438,7 @@ export async function POST(req: Request) {
           quantity: newQty,
           card_id: cardId,
           variant_type: variantType,
+          currency: priceCurrency ?? "USD",
         });
 
         try {
@@ -303,7 +460,7 @@ export async function POST(req: Request) {
               ${asOfDate},
               ${gameNorm},
               ${newLastValueCents},
-              'USD',
+              ${priceCurrency ?? "USD"},
               ${priceSource},
               ${priceConfidence},
               ${metaJson}::jsonb
@@ -386,6 +543,7 @@ export async function POST(req: Request) {
         quantity,
         card_id: cardId,
         variant_type: variantType,
+        currency: priceCurrency ?? "USD",
       });
 
       try {
@@ -407,7 +565,7 @@ export async function POST(req: Request) {
             ${asOfDate},
             ${gameNorm},
             ${insertedLastValueCents},
-            'USD',
+            ${priceCurrency ?? "USD"},
             ${priceSource},
             ${priceConfidence},
             ${metaJson}::jsonb

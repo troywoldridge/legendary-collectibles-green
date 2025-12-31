@@ -1,3 +1,4 @@
+// src/app/robots.ts
 import type { MetadataRoute } from "next";
 import { site } from "@/config/site";
 
@@ -10,21 +11,15 @@ export default function robots(): MetadataRoute.Robots {
         userAgent: "*",
         allow: "/",
         disallow: [
-          // auth / user-only
-           "/sign-in",
-            "/sign-up",
-            "/post-auth",
-            "/collection",
-            "/collection",
-            "/account",
-            "/dashboard",
-
-          // internal / API / next internals
+          "/sign-in",
+          "/sign-up",
+          "/post-auth",
+          "/collection",
+          "/account",
+          "/dashboard",
           "/api/",
           "/_next/",
           "/cdn-cgi/",
-
-          // if you ever use these
           "/admin",
           "/admin/",
           "/api/dev/",
@@ -32,6 +27,6 @@ export default function robots(): MetadataRoute.Robots {
       },
     ],
     sitemap: `${BASE}/sitemap.xml`,
-    host: BASE,
+    // ✅ don't output Host:
   };
 }
