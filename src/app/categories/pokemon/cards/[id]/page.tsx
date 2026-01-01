@@ -3,6 +3,7 @@
 import "server-only";
 
 import type { Metadata } from "next";
+import Script from "next/script";
 import Image from "next/image";
 import Link from "next/link";
 import { sql } from "drizzle-orm";
@@ -16,8 +17,6 @@ import { site } from "@/config/site";
 
 import type { PokemonVariants } from "@/components/pokemon/VariantChips";
 import VariantPickerAdd from "@/components/pokemon/VariantPickerAdd";
-
-
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -91,7 +90,7 @@ type CardMetaRow = {
 };
 
 async function getCardMeta(cardId: string): Promise<CardMetaRow | null> {
-  const row =
+  return (
     (
       await db.execute<CardMetaRow>(sql`
         SELECT
@@ -107,28 +106,42 @@ async function getCardMeta(cardId: string): Promise<CardMetaRow | null> {
         WHERE id = ${cardId}
         LIMIT 1
       `)
-    ).rows?.[0] ?? null;
+    ).rows?.[0] ?? null
+  );
+}
 
-  return row;
+function absBase() {
+  return (
+    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+    site?.url ||
+    "https://legendary-collectibles.com"
+  );
 }
 
 function absUrl(path: string) {
-  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+  const base = absBase().replace(/\/+$/, "");
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
-function absMaybe(urlOrPath: string) {
+function absMaybe(urlOrPath: string | null | undefined) {
   if (!urlOrPath) return absUrl("/og-image.png");
   if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
   return absUrl(urlOrPath);
 }
 
-export async function generateMetadata({ params }: { params: { id: string } }): Promise<Metadata> {
+export async function generateMetadata({
+  params,
+}: {
+  params: { id: string };
+}): Promise<Metadata> {
   const raw = decodeURIComponent(params.id ?? "").trim();
   const card = await getCardMeta(raw);
 
+  const canonical = absUrl(
+    `/categories/pokemon/cards/${encodeURIComponent(card?.id ?? raw)}`,
+  );
+
   if (!card) {
-    const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(raw)}`);
     return {
       title: `Pokémon Card Details | ${site.name}`,
       description: `Browse Pokémon cards, track prices, manage your collection, and shop on ${site.name}.`,
@@ -139,19 +152,22 @@ export async function generateMetadata({ params }: { params: { id: string } }): 
 
   const name = card.name ?? card.id;
   const setPart = card.set_name ? ` (${card.set_name})` : "";
-  const title = `${name}${setPart} — Details, Prices & Collection | ${site.name}`;
+  const title = `${name}${setPart} — Price, Details & Collection | ${site.name}`;
 
-  const descriptionParts = [
+  const description = [
     `View ${name} Pokémon card details`,
     card.rarity ? `rarity: ${card.rarity}` : null,
     card.set_name ? `set: ${card.set_name}` : null,
-    `market price + trends`,
+    `market prices and trends`,
     `add to your collection`,
-  ].filter(Boolean);
+  ]
+    .filter(Boolean)
+    .join(", ")
+    .concat(".");
 
-  const description = `${descriptionParts.join(", ")}.`;
-  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card.id)}`);
-  const ogImage = absMaybe(card.large_image || card.small_image || site.ogImage || "/og-image.png");
+  const ogImage = absMaybe(
+    card.large_image || card.small_image || site.ogImage || "/og-image.png",
+  );
 
   return {
     title,
@@ -219,8 +235,110 @@ function parseTextList(v: string | null): string[] {
   return [s];
 }
 
+function toNum(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function normalizeCurrency(cur?: string | null): "USD" | "EUR" | string {
+  const c = (cur ?? "").trim().toUpperCase();
+  return c || "USD";
+}
+
+function parseUpdatedAtToIso(updatedAt?: string | null): string | null {
+  // Your column is TEXT, and could be various formats.
+  // We'll try a very safe parse: accept YYYY-MM-DD only.
+  const s = (updatedAt ?? "").trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replaceAll("/", "-");
+  return null;
+}
+
+type OfferRow = {
+  url: string | null;
+  updated_at: string | null;
+  currency: string | null;
+  variant_type: string | null;
+  low_price: unknown;
+  mid_price: unknown;
+  high_price: unknown;
+  market_price: unknown;
+};
+
+function pickBestOffer(rows: OfferRow[]): {
+  price: number | null;
+  currency: string;
+  url: string | null;
+  updatedAtIso: string | null;
+  variantType: string | null;
+} {
+  if (!rows.length) {
+    return { price: null, currency: "USD", url: null, updatedAtIso: null, variantType: null };
+  }
+
+  const withNum = rows.map((r) => {
+    const market = toNum(r.market_price);
+    const mid = toNum(r.mid_price);
+    const low = toNum(r.low_price);
+    const high = toNum(r.high_price);
+    const price = (market ?? mid ?? low ?? high ?? null);
+    return { r, price };
+  });
+
+  // Prefer a "normal" variant if it has a usable price
+  const normal = withNum.find(
+    (x) => (x.r.variant_type ?? "").toLowerCase() === "normal" && x.price != null && x.price > 0,
+  );
+  const any = withNum.find((x) => x.price != null && x.price > 0) ?? null;
+
+  const chosen = (normal ?? any)?.r ?? rows[0];
+  const chosenPrice = (normal ?? any)?.price ?? null;
+
+  return {
+    price: chosenPrice,
+    currency: normalizeCurrency(chosen.currency),
+    url: chosen.url ?? null,
+    updatedAtIso: parseUpdatedAtToIso(chosen.updated_at),
+    variantType: chosen.variant_type ?? null,
+  };
+}
+
+/**
+ * ✅ Source of truth for Pokémon: tcg_card_prices_tcgplayer
+ * We fetch all variant rows for card_id and select the best representative Offer.
+ */
+async function getSchemaOfferFromTcgplayer(cardId: string) {
+  const rows =
+    (
+      await db.execute<OfferRow>(sql`
+        SELECT
+          p.url,
+          p.updated_at,
+          p.currency,
+          p.variant_type,
+          p.low_price,
+          p.mid_price,
+          p.high_price,
+          p.market_price
+        FROM public.tcg_card_prices_tcgplayer p
+        WHERE p.card_id = ${cardId}
+        ORDER BY
+          CASE WHEN LOWER(p.variant_type) = 'normal' THEN 0 ELSE 1 END,
+          p.market_price DESC NULLS LAST,
+          p.mid_price DESC NULLS LAST
+      `)
+    ).rows ?? [];
+
+  return pickBestOffer(rows);
+}
+
 async function getCardById(cardId: string): Promise<CardRow | null> {
-  const row =
+  return (
     (
       await db.execute<CardRow>(sql`
         SELECT
@@ -263,9 +381,8 @@ async function getCardById(cardId: string): Promise<CardRow | null> {
         WHERE id = ${cardId}
         LIMIT 1
       `)
-    ).rows?.[0] ?? null;
-
-  return row;
+    ).rows?.[0] ?? null
+  );
 }
 
 async function getVariantsByCardId(cardId: string): Promise<PokemonVariants> {
@@ -285,7 +402,6 @@ async function getVariantsByCardId(cardId: string): Promise<PokemonVariants> {
       `)
     ).rows?.[0] ?? null;
 
-  // ✅ normalize to strict booleans (avoid null/driver weirdness)
   return row
     ? {
         normal: row.normal === true,
@@ -334,10 +450,7 @@ function Chips({ label, values }: { label: string; values: string[] }) {
       <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
       <div className="mt-2 flex flex-wrap gap-2">
         {values.map((v) => (
-          <span
-            key={v}
-            className="rounded-full border border-white/15 bg-white/10 px-2 py-1 text-xs text-white"
-          >
+          <span key={v} className="rounded-full border border-white/15 bg-white/10 px-2 py-1 text-xs text-white">
             {v}
           </span>
         ))}
@@ -359,7 +472,6 @@ function TextBlock({ title, text }: { title: string; text: string | null }) {
 /* ------------------------------------------------
    Page
 ------------------------------------------------- */
-
 export default async function PokemonCardDetailPage({
   params,
   searchParams,
@@ -376,11 +488,28 @@ export default async function PokemonCardDetailPage({
   const display = readDisplay(sp);
   const id = decodeURIComponent(rawId ?? "").trim();
 
-  const [card, variants] = await Promise.all([getCardById(id), getVariantsByCardId(id)]);
+  const [card, variants, offer] = await Promise.all([
+    getCardById(id),
+    getVariantsByCardId(id),
+    getSchemaOfferFromTcgplayer(id),
+  ]);
 
   if (!card) {
+    const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(id)}`);
     return (
       <section className="space-y-6">
+        <Script
+          id="card-notfound-jsonld"
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "WebPage",
+              url: canonical,
+              name: "Pokémon Card Not Found",
+            }),
+          }}
+        />
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
           <h1 className="text-2xl font-bold text-white">Card not found</h1>
           <p className="mt-2 break-all text-sm text-white/70">
@@ -394,8 +523,17 @@ export default async function PokemonCardDetailPage({
     );
   }
 
+  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card.id)}`);
   const cover = bestImage(card);
+  const coverAbs = cover ? absMaybe(cover) : null;
+
   const pricesHref = `/categories/pokemon/cards/${encodeURIComponent(card.id)}/prices`;
+
+    // Prefer set_id for URLs; only fall back to set_name when it's non-empty
+  const setSlug = (card.set_id ?? "").trim() || (card.set_name ?? "").trim();
+  const setHref = setSlug ? `/categories/pokemon/sets/${encodeURIComponent(setSlug)}` : null;
+
+
   const ownedCounts = await getOwnedVariantCounts(userId ?? null, card.id);
 
   const types = parseTextList(card.types);
@@ -403,8 +541,132 @@ export default async function PokemonCardDetailPage({
   const retreat = parseTextList(card.retreat_cost);
   const pokedexNums = parseTextList(card.national_pokedex_numbers);
 
+  // ---------------------------
+  // JSON-LD: Breadcrumbs + Product (+Offer if price exists)
+  // ---------------------------
+  const productName = (card.name ?? card.id).trim();
+  const sku = card.id;
+
+  const breadcrumbsJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: absUrl("/") },
+      { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
+      { "@type": "ListItem", position: 3, name: "Pokémon", item: absUrl("/categories/pokemon/sets") },
+      { "@type": "ListItem", position: 4, name: "Pokémon Cards", item: absUrl("/categories/pokemon/cards") },
+      { "@type": "ListItem", position: 5, name: productName, item: canonical },
+    ],
+  };
+
+  const productJsonLd: any = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    "@id": `${canonical}#product`,
+    name: productName,
+    sku,
+    url: canonical,
+    image: coverAbs ? [coverAbs] : undefined,
+    category: "Pokémon Trading Card",
+    brand: { "@type": "Brand", name: "Pokémon" },
+    description: [
+      card.rarity ? `Rarity: ${card.rarity}` : null,
+      card.set_name ? `Set: ${card.set_name}` : null,
+      card.series ? `Series: ${card.series}` : null,
+      card.release_date ? `Release date: ${card.release_date}` : null,
+    ]
+      .filter(Boolean)
+      .join(" • "),
+    additionalProperty: [
+      card.rarity ? { "@type": "PropertyValue", name: "Rarity", value: card.rarity } : null,
+      card.set_name ? { "@type": "PropertyValue", name: "Set", value: card.set_name } : null,
+      card.series ? { "@type": "PropertyValue", name: "Series", value: card.series } : null,
+      card.artist ? { "@type": "PropertyValue", name: "Artist", value: card.artist } : null,
+      card.hp ? { "@type": "PropertyValue", name: "HP", value: card.hp } : null,
+      card.supertype ? { "@type": "PropertyValue", name: "Supertype", value: card.supertype } : null,
+      types.length ? { "@type": "PropertyValue", name: "Types", value: types.join(", ") } : null,
+      subtypes.length ? { "@type": "PropertyValue", name: "Subtypes", value: subtypes.join(", ") } : null,
+      card.regulation_mark
+        ? { "@type": "PropertyValue", name: "Regulation Mark", value: card.regulation_mark }
+        : null,
+      offer.variantType
+        ? { "@type": "PropertyValue", name: "Variant Type (priced)", value: offer.variantType }
+        : null,
+    ].filter(Boolean),
+  };
+
+  if (offer.price != null && offer.price > 0) {
+    const offerJson: any = {
+      "@type": "Offer",
+      url: canonical,
+      priceCurrency: offer.currency || "USD",
+      price: offer.price.toFixed(2),
+      availability: "https://schema.org/InStock",
+      itemCondition: "https://schema.org/UsedCondition",
+      seller: {
+        "@type": "Organization",
+        name: site.name ?? "Legendary Collectibles",
+        url: absBase(),
+      },
+    };
+
+    // optional: if updated_at is parseable, set a safe validity horizon
+    // (helps crawlers understand recency without lying)
+    if (offer.updatedAtIso) {
+      offerJson.priceValidUntil = offer.updatedAtIso;
+    }
+
+    productJsonLd.offers = offerJson;
+  }
+
+  // empty-safe AggregateRating (only add when you have real values)
+  // productJsonLd.aggregateRating = { ... }  // later when you actually have them
+
+  const webPageJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "@id": `${canonical}#webpage`,
+    url: canonical,
+    name: `${productName} — Pokémon Card`,
+    isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: absBase() },
+    primaryImageOfPage: coverAbs ? { "@type": "ImageObject", url: coverAbs } : undefined,
+    mainEntity: { "@id": `${canonical}#product` },
+  };
+
   return (
     <section className="space-y-8">
+      {/* JSON-LD */}
+      <Script
+        id="pokemon-card-webpage-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
+      />
+      <Script
+        id="pokemon-card-breadcrumbs-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }}
+      />
+      <Script
+        id="pokemon-card-product-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
+      />
+
+      {/* Visible breadcrumbs */}
+      <nav className="text-xs text-white/70">
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href="/" className="hover:underline">Home</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories" className="hover:underline">Categories</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories/pokemon/sets" className="hover:underline">Pokémon</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories/pokemon/cards" className="hover:underline">Cards</Link>
+          <span className="text-white/40">/</span>
+          <span className="text-white/90">{productName}</span>
+        </div>
+      </nav>
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
@@ -480,6 +742,26 @@ export default async function PokemonCardDetailPage({
                   {card.release_date ? <span className="mr-3">Release: {card.release_date}</span> : null}
                   {card.regulation_mark ? <span>Reg: {card.regulation_mark}</span> : null}
                 </div>
+
+                {setHref ? (
+                  <div className="mt-3 text-sm">
+                    <Link href={setHref} className="text-sky-300 hover:underline">
+                      View this set →
+                    </Link>
+                  </div>
+                ) : null}
+
+                {offer.price != null && offer.price > 0 ? (
+                  <div className="mt-3 text-sm text-white/80">
+                    <span className="text-white/60">TCGplayer market:</span>{" "}
+                    <span className="font-semibold text-white">
+                      {offer.currency.toUpperCase() === "USD" ? "$" : ""}
+                      {offer.price.toFixed(2)}{" "}
+                      {offer.currency && offer.currency.toUpperCase() !== "USD" ? offer.currency.toUpperCase() : ""}
+                    </span>
+                    {offer.updatedAtIso ? <span className="text-white/50"> • updated {offer.updatedAtIso}</span> : null}
+                  </div>
+                ) : null}
               </div>
 
               <div className="flex flex-wrap items-center gap-3 text-sm">
@@ -520,8 +802,6 @@ export default async function PokemonCardDetailPage({
           <Field label="Total" value={card.total} />
 
           <Field label="PTCGO Code" value={card.ptcgo_code} />
-          <Field label="Symbol URL" value={card.symbol_url} />
-          <Field label="Logo URL" value={card.logo_url} />
 
           <Chips label="Types" values={types} />
           <Chips label="Subtypes" values={subtypes} />
@@ -550,6 +830,11 @@ export default async function PokemonCardDetailPage({
         <Link href="/categories/pokemon/cards" className="text-sky-300 hover:underline">
           ← Back to cards
         </Link>
+        {setHref ? (
+          <Link href={setHref} className="text-sky-300 hover:underline">
+            ← Back to set
+          </Link>
+        ) : null}
         <Link href={pricesHref} className="text-sky-300 hover:underline">
           → Prices
         </Link>

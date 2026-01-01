@@ -1,12 +1,16 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import Image from "next/image";
+import Script from "next/script";
 import { notFound } from "next/navigation";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
+
+import { site } from "@/config/site";
 
 import { getLatestEbaySnapshot } from "@/lib/ebay";
 import EbayFallbackPrice from "@/components/EbayFallbackPrice";
@@ -16,14 +20,13 @@ import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
 import CardActions from "@/components/collection/CardActions";
 
-import type { Metadata } from "next";
-import { site } from "@/config/site";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-
+/* ---------------- Types ---------------- */
+type SearchParams = Record<string, string | string[] | undefined>;
+type Currency = "USD" | "EUR";
 
 type MtgMetaRow = {
   id: string;
@@ -35,6 +38,44 @@ type MtgMetaRow = {
   type_line: string | null;
 };
 
+type CardRow = {
+  id: string;
+  name: string | null;
+  printed_name: string | null;
+
+  mana_cost: string | null;
+  cmc: string | null;
+  colors: string | null;
+  color_identity: string | null;
+
+  type_line: string | null;
+  rarity: string | null;
+  set_code: string | null;
+  collector_number: string | null;
+  oracle_id: string | null;
+  layout: string | null;
+  oracle_text: string | null;
+  image_url: string | null;
+
+  usd: string | null;
+  usd_foil: string | null;
+  usd_etched: string | null;
+  eur: string | null;
+  tix: string | null;
+  price_updated: string | null;
+
+  ebay_usd_cents: number | null;
+  ebay_url: string | null;
+};
+
+type SetRow = {
+  name: string | null;
+  set_type: string | null;
+  block: string | null;
+  released_at: string | null;
+};
+
+/* ---------------- URL helpers ---------------- */
 function absUrl(path: string) {
   const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
@@ -46,7 +87,91 @@ function absMaybe(urlOrPath: string) {
   return absUrl(urlOrPath);
 }
 
+function readCurrency(sp: SearchParams): Currency {
+  const raw = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency)?.toUpperCase();
+  return raw === "EUR" ? "EUR" : "USD";
+}
 
+function withParam(baseHref: string, key: string, val: string) {
+  const u = new URL(baseHref, "https://x/");
+  u.searchParams.set(key, val);
+  return u.pathname + (u.search ? u.search : "");
+}
+
+/* ---------------- ID parsing helpers ---------------- */
+function parseSetAndNumber(raw: string): { set: string; num: string } | null {
+  const cleaned = raw.replace(/[–—]/g, "-").replace(":", "-").replace("/", "-");
+  const m = cleaned.match(/^([A-Za-z0-9]{2,10})-(.+)$/);
+  if (!m) return null;
+  return { set: m[1], num: decodeURIComponent(m[2]) };
+}
+
+function normalizeNumVariants(n: string) {
+  const exact = n;
+  const noZeros = n.replace(/^0+/, "");
+  const lower = n.toLowerCase();
+  return { exact, noZeros, lower };
+}
+
+async function resolveScryfallId(rawParam: string): Promise<string | null> {
+  const idNoDashes = rawParam.replace(/-/g, "");
+
+  const probe = await db.execute<{ id: string }>(sql`
+    SELECT c.id::text AS id
+    FROM public.scryfall_cards_raw c
+    WHERE c.id::text = ${rawParam}
+       OR REPLACE(c.id::text,'-','') = ${idNoDashes}
+    LIMIT 1
+  `);
+
+  let foundId = probe.rows?.[0]?.id ?? null;
+
+  if (!foundId) {
+    const parsed = parseSetAndNumber(rawParam);
+    if (parsed) {
+      const set = parsed.set.toLowerCase();
+      const { exact, noZeros, lower } = normalizeNumVariants(parsed.num);
+
+      const p2 = await db.execute<{ id: string }>(sql`
+        SELECT c.id::text AS id
+        FROM public.scryfall_cards_raw c
+        WHERE LOWER(c.set_code) = ${set}
+          AND (
+            c.collector_number::text = ${exact}
+            OR ltrim(c.collector_number::text,'0') = ${noZeros}
+            OR LOWER(c.collector_number::text) = ${lower}
+          )
+        LIMIT 1
+      `);
+      foundId = p2.rows?.[0]?.id ?? null;
+    }
+  }
+
+  return foundId;
+}
+
+/* ---------------- Pricing helpers ---------------- */
+function money(s?: string | null) {
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n.toFixed(2);
+}
+
+function fmtCurrency(nStr: string | null, currency: Currency) {
+  const n = money(nStr);
+  if (!n) return "—";
+  return `${currency === "EUR" ? "€" : "$"}${n}`;
+}
+
+function fmtTix(v?: string | null) {
+  if (!v) return "—";
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  return n.toFixed(2);
+}
+
+/* ---------------- Meta fetch ---------------- */
 async function getMtgMeta(foundId: string): Promise<MtgMetaRow | null> {
   const row =
     (
@@ -77,11 +202,13 @@ async function getMtgMeta(foundId: string): Promise<MtgMetaRow | null> {
 
 /**
  * Dynamic metadata for MTG card pages.
- * Uses the same ID resolution logic as the page so the canonical matches the real card.
+ * Canonical ALWAYS uses resolved UUID (foundId), not rawParam.
  */
-export async function generateMetadata(
-  { params }: { params: { id: string } }
-): Promise<Metadata> {
+export async function generateMetadata({
+  params,
+}: {
+  params: { id: string };
+}): Promise<Metadata> {
   const rawParam = decodeURIComponent(params.id ?? "").trim();
 
   if (!rawParam) {
@@ -92,41 +219,9 @@ export async function generateMetadata(
     };
   }
 
-  // ---- resolve to the canonical true Scryfall UUID ----
-  const idNoDashes = rawParam.replace(/-/g, "");
+  const foundId = await resolveScryfallId(rawParam);
 
-  const probe = await db.execute<{ id: string }>(sql`
-    SELECT c.id::text AS id
-    FROM public.scryfall_cards_raw c
-    WHERE c.id::text = ${rawParam}
-      OR REPLACE(c.id::text,'-','') = ${idNoDashes}
-    LIMIT 1
-  `);
-
-  let foundId = probe.rows?.[0]?.id ?? null;
-
-  if (!foundId) {
-    const parsed = parseSetAndNumber(rawParam);
-    if (parsed) {
-      const set = parsed.set.toLowerCase();
-      const { exact, noZeros, lower } = normalizeNumVariants(parsed.num);
-
-      const p2 = await db.execute<{ id: string }>(sql`
-        SELECT c.id::text AS id
-        FROM public.scryfall_cards_raw c
-        WHERE LOWER(c.set_code) = ${set}
-          AND (
-            c.collector_number::text = ${exact}
-            OR ltrim(c.collector_number::text,'0') = ${noZeros}
-            OR LOWER(c.collector_number::text) = ${lower}
-          )
-        LIMIT 1
-      `);
-      foundId = p2.rows?.[0]?.id ?? null;
-    }
-  }
-
-  // ✅ If not found → noindex
+  // not found => noindex, but stable canonical
   if (!foundId) {
     const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(rawParam)}`);
     return {
@@ -137,7 +232,6 @@ export async function generateMetadata(
     };
   }
 
-  // ✅ Canonical MUST use the resolved UUID (foundId), not rawParam
   const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(foundId)}`);
 
   const meta = await getMtgMeta(foundId);
@@ -148,8 +242,8 @@ export async function generateMetadata(
     meta?.set_code && meta?.collector_number
       ? ` (${meta.set_code.toUpperCase()} #${meta.collector_number})`
       : meta?.set_code
-      ? ` (${meta.set_code.toUpperCase()})`
-      : "";
+        ? ` (${meta.set_code.toUpperCase()})`
+        : "";
 
   const title = `${name}${setPart} — MTG Prices & Collection | ${site.name}`;
 
@@ -172,7 +266,6 @@ export async function generateMetadata(
     title,
     description,
     alternates: { canonical },
-
     openGraph: {
       type: "website",
       url: canonical,
@@ -181,7 +274,6 @@ export async function generateMetadata(
       siteName: site.name,
       images: [{ url: ogImage }],
     },
-
     twitter: {
       card: "summary_large_image",
       title,
@@ -190,43 +282,6 @@ export async function generateMetadata(
     },
   };
 }
-
-
-
-type CardRow = {
-  id: string;
-  name: string | null;
-  printed_name: string | null;
-  mana_cost: string | null;
-  cmc: string | null;
-  colors: string | null;
-  color_identity: string | null;
-  type_line: string | null;
-  rarity: string | null;
-  set_code: string | null;
-  collector_number: string | null;
-  oracle_id: string | null;
-  layout: string | null;
-  oracle_text: string | null;
-  image_url: string | null;
-
-  usd: string | null;
-  usd_foil: string | null;
-  usd_etched: string | null;
-  eur: string | null;
-  tix: string | null;
-  price_updated: string | null;
-
-  ebay_usd_cents: number | null;
-  ebay_url: string | null;
-};
-
-type SetRow = {
-  name: string | null;
-  set_type: string | null;
-  block: string | null;
-  released_at: string | null;
-};
 
 /* ---------- Mana helpers ---------- */
 function tokenizeMana(cost?: string | null): string[] {
@@ -299,74 +354,26 @@ function ManaCost({ cost }: { cost: string | null }) {
   );
 }
 
-/* ---------- ID parsing helpers ---------- */
-function parseSetAndNumber(raw: string): { set: string; num: string } | null {
-  const cleaned = raw.replace(/[–—]/g, "-").replace(":", "-").replace("/", "-");
-  const m = cleaned.match(/^([A-Za-z0-9]{2,10})-(.+)$/);
-  if (!m) return null;
-  return { set: m[1], num: decodeURIComponent(m[2]) };
-}
-function normalizeNumVariants(n: string) {
-  const exact = n;
-  const noZeros = n.replace(/^0+/, "");
-  const lower = n.toLowerCase();
-  return { exact, noZeros, lower };
-}
-
-function money(s?: string | null) {
-  if (!s) return null;
-  const n = Number(s);
-  if (!Number.isFinite(n)) return s;
-  return n.toFixed(2);
-}
-
-/* ---------- Page ---------- */
+/* ---------------- Page ---------------- */
 export default async function MtgCardDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<SearchParams>;
 }) {
   const { id: rawId } = await params;
+  const sp = await searchParams;
+
+  const currency: Currency = readCurrency(sp);
+
   const rawParam = decodeURIComponent(rawId ?? "").trim();
   if (!rawParam) notFound();
 
   const { userId } = await auth();
   const canSave = !!userId;
 
-  const idNoDashes = rawParam.replace(/-/g, "");
-
-  // STEP 1: direct probe by uuid text
-  const probe = await db.execute<{ id: string }>(sql`
-    SELECT c.id::text AS id
-    FROM public.scryfall_cards_raw c
-    WHERE c.id::text = ${rawParam}
-      OR REPLACE(c.id::text,'-','') = ${idNoDashes}
-    LIMIT 1
-  `);
-  let foundId = probe.rows?.[0]?.id ?? null;
-
-  // STEP 1b: SET-NUM fallback (SOI-1)
-  if (!foundId) {
-    const parsed = parseSetAndNumber(rawParam);
-    if (parsed) {
-      const set = parsed.set.toLowerCase();
-      const { exact, noZeros, lower } = normalizeNumVariants(parsed.num);
-
-      const p2 = await db.execute<{ id: string }>(sql`
-        SELECT c.id::text AS id
-        FROM public.scryfall_cards_raw c
-        WHERE LOWER(c.set_code) = ${set}
-          AND (
-            c.collector_number::text = ${exact}
-            OR ltrim(c.collector_number::text,'0') = ${noZeros}
-            OR LOWER(c.collector_number::text) = ${lower}
-          )
-        LIMIT 1
-      `);
-      foundId = p2.rows?.[0]?.id ?? null;
-    }
-  }
-
+  const foundId = await resolveScryfallId(rawParam);
   if (!foundId) notFound();
 
   // STEP 2: load card row (FACE-SAFE fields + correct market tables)
@@ -377,7 +384,6 @@ export default async function MtgCardDetailPage({
 
       (c.payload->>'printed_name') AS printed_name,
 
-      -- Face-safe mana / rules text (many cards store these in card_faces[])
       COALESCE(
         c.payload->>'mana_cost',
         c.payload->'card_faces'->0->>'mana_cost',
@@ -401,7 +407,6 @@ export default async function MtgCardDetailPage({
         c.payload->'card_faces'->1->>'oracle_text'
       ) AS oracle_text,
 
-      -- Face-safe image URL
       COALESCE(
         (c.payload->'image_uris'->>'normal'),
         (c.payload->'image_uris'->>'large'),
@@ -411,7 +416,6 @@ export default async function MtgCardDetailPage({
         (c.payload->'card_faces'->0->'image_uris'->>'small')
       ) AS image_url,
 
-      -- Prices: effective first, then scryfall_latest fallback
       COALESCE(e.effective_usd,        s.usd)::text        AS usd,
       COALESCE(e.effective_usd_foil,   s.usd_foil)::text   AS usd_foil,
       COALESCE(e.effective_usd_etched, s.usd_etched)::text AS usd_etched,
@@ -422,7 +426,6 @@ export default async function MtgCardDetailPage({
         TO_CHAR(s.updated_at,'YYYY-MM-DD')
       ) AS price_updated,
 
-      -- eBay price snapshot from your market tables (schema-correct)
       (
         SELECT mpc.price_cents
         FROM public.market_items mi
@@ -480,19 +483,28 @@ export default async function MtgCardDetailPage({
     console.error("[ebay snapshot failed]", err);
   }
 
+  const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(card.id)}`);
+
+  const breadcrumbsJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: absUrl("/") },
+      { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
+      { "@type": "ListItem", position: 3, name: "MTG Cards", item: absUrl("/categories/mtg/cards") },
+      { "@type": "ListItem", position: 4, name: card.name ?? card.id, item: canonical },
+    ],
+  };
+
   const hero = (card.image_url ?? "").replace(/^http:\/\//, "https://") || null;
   const setHref = card.set_code ? `/categories/mtg/sets/${encodeURIComponent(card.set_code)}` : null;
 
-  const price = {
-    usd: money(card.usd),
-    usd_foil: money(card.usd_foil),
-    usd_etched: money(card.usd_etched),
-    eur: money(card.eur),
-    tix: card.tix,
-    updated_at: card.price_updated,
-  };
-
-  const hasPrimaryPrice = !!price.usd || !!price.usd_foil || !!price.usd_etched || !!price.eur || !!price.tix;
+  const hasPrimaryPrice =
+    !!money(card.usd) ||
+    !!money(card.usd_foil) ||
+    !!money(card.usd_etched) ||
+    !!money(card.eur) ||
+    !!fmtTix(card.tix).replace("—", "");
 
   const serverEbayPrice = typeof card.ebay_usd_cents === "number" ? card.ebay_usd_cents / 100 : null;
   const serverEbayUrl = card.ebay_url || null;
@@ -507,8 +519,41 @@ export default async function MtgCardDetailPage({
     marketplace: "amazon",
   });
 
+  const baseHref = `/categories/mtg/cards/${encodeURIComponent(card.id)}`;
+
   return (
     <section className="space-y-8">
+      <Script
+        id="mtg-card-breadcrumbs-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }}
+      />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Link href="/categories/mtg/cards" className="text-sky-300 hover:underline" prefetch={false}>
+          ← Back to MTG cards
+        </Link>
+
+        {/* Currency toggle */}
+        <div className="rounded-md border border-white/20 bg-white/10 p-1 text-sm text-white">
+          <span className="px-2">Currency:</span>
+          <Link
+            href={withParam(baseHref, "currency", "USD")}
+            className={`rounded px-2 py-1 ${currency === "USD" ? "bg-white/20" : "hover:bg-white/10"}`}
+            prefetch={false}
+          >
+            USD
+          </Link>
+          <Link
+            href={withParam(baseHref, "currency", "EUR")}
+            className={`ml-1 rounded px-2 py-1 ${currency === "EUR" ? "bg-white/20" : "hover:bg-white/10"}`}
+            prefetch={false}
+          >
+            EUR
+          </Link>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
         {/* Image */}
         <div className="md:col-span-5">
@@ -539,7 +584,7 @@ export default async function MtgCardDetailPage({
                 {setHref ? (
                   <>
                     Set:{" "}
-                    <Link href={setHref} className="text-sky-300 hover:underline">
+                    <Link href={setHref} className="text-sky-300 hover:underline" prefetch={false}>
                       {setRow?.name ?? card.set_code}
                     </Link>
                   </>
@@ -591,28 +636,46 @@ export default async function MtgCardDetailPage({
             </div>
           </div>
 
-          {/* Market Prices: always render so the page never looks empty */}
+          {/* Market Prices */}
           <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-white">
                 Market Prices{!hasPrimaryPrice && serverEbayPrice != null ? " (Scryfall missing — eBay available)" : ""}
               </h2>
-              <div className="text-xs text-white/60">Updated {price.updated_at ?? "—"}</div>
+              <div className="text-xs text-white/60">Updated {card.price_updated ?? "—"}</div>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-              <div><div className="text-sm text-white/70">USD</div><div className="text-lg font-semibold text-white">{price.usd ?? "—"}</div></div>
-              <div><div className="text-sm text-white/70">USD Foil</div><div className="text-lg font-semibold text-white">{price.usd_foil ?? "—"}</div></div>
-              <div><div className="text-sm text-white/70">USD Etched</div><div className="text-lg font-semibold text-white">{price.usd_etched ?? "—"}</div></div>
-              <div><div className="text-sm text-white/70">EUR</div><div className="text-lg font-semibold text-white">{price.eur ?? "—"}</div></div>
-              <div><div className="text-sm text-white/70">TIX</div><div className="text-lg font-semibold text-white">{price.tix ?? "—"}</div></div>
+              {/* Show both rows, but format using chosen currency where relevant */}
+              <div>
+                <div className="text-sm text-white/70">USD</div>
+                <div className="text-lg font-semibold text-white">{fmtCurrency(card.usd, "USD")}</div>
+              </div>
+              <div>
+                <div className="text-sm text-white/70">USD Foil</div>
+                <div className="text-lg font-semibold text-white">{fmtCurrency(card.usd_foil, "USD")}</div>
+              </div>
+              <div>
+                <div className="text-sm text-white/70">USD Etched</div>
+                <div className="text-lg font-semibold text-white">{fmtCurrency(card.usd_etched, "USD")}</div>
+              </div>
+
+              <div>
+                <div className="text-sm text-white/70">EUR</div>
+                <div className="text-lg font-semibold text-white">{fmtCurrency(card.eur, "EUR")}</div>
+              </div>
+
+              <div>
+                <div className="text-sm text-white/70">TIX</div>
+                <div className="text-lg font-semibold text-white">{fmtTix(card.tix)}</div>
+              </div>
             </div>
 
             {!hasPrimaryPrice && serverEbayPrice != null ? (
               <div className="mt-3 text-sm text-white/80">
                 eBay snapshot: <span className="font-semibold text-white">${serverEbayPrice.toFixed(2)}</span>
                 {serverEbayUrl ? (
-                  <Link href={serverEbayUrl} className="ml-2 text-sky-300 underline" target="_blank">
+                  <Link href={serverEbayUrl} className="ml-2 text-sky-300 underline" target="_blank" prefetch={false}>
                     View on eBay
                   </Link>
                 ) : null}
@@ -622,7 +685,7 @@ export default async function MtgCardDetailPage({
 
           <EbayFallbackPrice cardId={card.id} q={ebayQ} showWhen="missing" hasPrimaryPrice={hasPrimaryPrice} />
 
-          {/* Always show a details block */}
+          {/* Details */}
           <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <h2 className="text-lg font-semibold text-white">Card Details</h2>
             <div className="mt-2 grid gap-2 text-sm text-white/85 sm:grid-cols-2">
@@ -633,7 +696,7 @@ export default async function MtgCardDetailPage({
             </div>
           </section>
 
-          {/* Rules text (face-safe now, so it will appear for most cards) */}
+          {/* Rules text */}
           {card.oracle_text ? (
             <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
               <h2 className="text-lg font-semibold text-white">Rules Text</h2>

@@ -2,17 +2,12 @@
 import "server-only";
 
 import Link from "next/link";
+import Script from "next/script";
+import type { Metadata } from "next";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import PokemonCardsClient from "./PokemonCardsClient";
-import type { Metadata } from "next";
 import { site } from "@/config/site";
-
-export const metadata: Metadata = {
-  title: "Pokemon Cards | Legendary Collectibles",
-  description: "Browse pokemon cards, prices, and collection tools.",
-  alternates: { canonical: `${site.url}/categories/pokemon/cards` },
-};
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,7 +24,6 @@ type CardListRow = {
   small_image: string | null;
   large_image: string | null;
 
-  // variants (left joined)
   v_normal: boolean | null;
   v_reverse: boolean | null;
   v_holo: boolean | null;
@@ -49,6 +43,19 @@ const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
 const LANG_OPTIONS = ["en", "ja"] as const;
 type LangOpt = (typeof LANG_OPTIONS)[number];
 
+function absBase() {
+  return (
+    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+    site?.url ||
+    "https://legendary-collectibles.com"
+  );
+}
+
+function absUrl(path: string) {
+  const base = absBase().replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 function parsePerPage(v?: string): number {
   const n = Number(v ?? 30);
   return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 30;
@@ -66,7 +73,7 @@ function parseLang(v?: string): LangOpt {
 
 function buildHref(
   base: string,
-  qs: { q?: string | null; page?: number; perPage?: number; lang?: LangOpt }
+  qs: { q?: string | null; page?: number; perPage?: number; lang?: LangOpt },
 ) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", qs.q);
@@ -79,7 +86,7 @@ function buildHref(
 
 /** Normalize variants to strict booleans so client chip logic is deterministic */
 function normalizeVariants(
-  row: Pick<CardListRow, "v_normal" | "v_reverse" | "v_holo" | "v_first_edition" | "v_w_promo">
+  row: Pick<CardListRow, "v_normal" | "v_reverse" | "v_holo" | "v_first_edition" | "v_w_promo">,
 ) {
   return {
     normal: row.v_normal === true,
@@ -93,19 +100,70 @@ function normalizeVariants(
 function tcgdexImageUrl(base?: string | null, quality: "low" | "high" = "high") {
   if (!base) return null;
 
-  // TCGdex "image" is often a base path without extension/quality
-  // Example: https://assets.tcgdex.net/ja/swsh/swsh3/136
   if (base.startsWith("https://assets.tcgdex.net/")) {
-    // If it already has /low.webp or /high.png etc, leave it
     if (/\.(webp|png|jpg)$/.test(base)) return base;
     if (/\/(low|high)\.(webp|png|jpg)$/.test(base)) return base;
-
     return `${base}/${quality}.webp`;
   }
 
   return base;
 }
 
+/* ---------------- SEO metadata (dynamic) ---------------- */
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}): Promise<Metadata> {
+  const sp = await searchParams;
+
+  const q = (sp?.q ?? "").trim();
+  const lang = parseLang(sp?.lang);
+  const page = parsePage(sp?.page);
+
+  const basePath = "/categories/pokemon/cards";
+  const canonical = absUrl(basePath);
+
+  const titleBase =
+    lang === "ja"
+      ? "Japanese Pokémon Cards"
+      : "Pokémon Cards";
+
+  const title =
+    q
+      ? `${titleBase} matching “${q}” | ${site.name}`
+      : page > 1
+        ? `${titleBase} (Page ${page}) | ${site.name}`
+        : `${titleBase} | ${site.name}`;
+
+  const description =
+    lang === "ja"
+      ? "Browse authentic Japanese Pokémon cards including modern sets, vintage releases, and promo cards. Track prices, manage your collection, and discover rare Japanese exclusives."
+      : "Browse Pokémon cards across modern and classic sets. Track prices, view variants, and manage your personal collection on Legendary Collectibles.";
+
+  const og = site?.ogImage ? (site.ogImage.startsWith("http") ? site.ogImage : absUrl(site.ogImage)) : absUrl("/og-image.png");
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    robots: { index: true, follow: true },
+    openGraph: {
+      type: "website",
+      url: canonical,
+      siteName: site.name,
+      title,
+      description,
+      images: [{ url: og }],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [og],
+    },
+  };
+}
 
 export default async function PokemonCardsIndex({
   searchParams,
@@ -121,7 +179,7 @@ export default async function PokemonCardsIndex({
   const lang: LangOpt = parseLang(sp?.lang);
 
   // For Japanese we synced from TCGdex
-  const source = lang === "ja" ? "tcgdex" : null; // keep EN open-ended
+  const source = lang === "ja" ? "tcgdex" : null;
 
   const where = sql`
     WHERE c.lang = ${lang}
@@ -189,10 +247,10 @@ export default async function PokemonCardsIndex({
     name: c.name ?? c.id,
     setName: c.set_name ?? c.set_id ?? null,
     number: c.number ?? null,
-     imageUrl:
-    lang === "ja"
-      ? tcgdexImageUrl(c.large_image || c.small_image, "high")
-      : (c.large_image || c.small_image || null),
+    imageUrl:
+      lang === "ja"
+        ? tcgdexImageUrl(c.large_image || c.small_image, "high")
+        : (c.large_image || c.small_image || null),
     variants: normalizeVariants(c),
   }));
 
@@ -201,15 +259,81 @@ export default async function PokemonCardsIndex({
   const isFirst = safePage <= 1;
   const isLast = safePage >= totalPages;
 
+  // ---------------------------
+  // JSON-LD: Breadcrumbs + CollectionPage ItemList
+  // ---------------------------
+  const canonical = absUrl(baseHref);
+
+  const breadcrumbsJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: absUrl("/") },
+      { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
+      { "@type": "ListItem", position: 3, name: "Pokémon", item: absUrl("/categories/pokemon/sets") },
+      {
+        "@type": "ListItem",
+        position: 4,
+        name: lang === "ja" ? "Japanese Pokémon Cards" : "Pokémon Cards",
+        item: canonical,
+      },
+    ],
+  };
+
+  const itemList = {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: lang === "ja" ? "Japanese Pokémon Cards" : "Pokémon Cards",
+    url: canonical,
+    description:
+      lang === "ja"
+        ? "Browse authentic Japanese Pokémon cards including modern sets, vintage releases, and promo cards. Track prices and manage your collection."
+        : "Browse Pokémon cards across modern and classic sets. Track prices, explore variants, and manage your collection.",
+    mainEntity: {
+      "@type": "ItemList",
+      numberOfItems: total,
+      itemListElement: rows.map((r, idx) => ({
+        "@type": "ListItem",
+        position: safeOffset + idx + 1,
+        name: r.name ?? r.id,
+        url: absUrl(`/categories/pokemon/cards/${encodeURIComponent(r.id)}`),
+      })),
+    },
+  };
+
   return (
     <section className="space-y-6">
+      {/* JSON-LD */}
+      <Script
+        id="pokemon-cards-breadcrumbs-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }}
+      />
+      <Script
+        id="pokemon-cards-collectionpage-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(itemList) }}
+      />
+
+      {/* Visible breadcrumbs */}
+      <nav className="text-xs text-white/70">
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href="/" className="hover:underline">Home</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories" className="hover:underline">Categories</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories/pokemon/sets" className="hover:underline">Pokémon</Link>
+          <span className="text-white/40">/</span>
+          <span className="text-white/90">{lang === "ja" ? "Japanese Cards" : "Cards"}</span>
+        </div>
+      </nav>
+
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-white">
-          <h1 className="text-2xl font-bold">Pokémon Cards</h1>
+          <h1 className="text-2xl font-bold">{lang === "ja" ? "Japanese Pokémon Cards" : "Pokémon Cards"}</h1>
           <div className="text-sm text-white/80">
             Showing {from}-{to} of {total}
-            {q ? " (filtered)" : ""} • Language: {lang.toUpperCase()} • Tap a variant chip to add that
-            version
+            {q ? " (filtered)" : ""} • Language: {lang.toUpperCase()} • Tap a variant chip to add that version
           </div>
         </div>
 
@@ -293,37 +417,31 @@ export default async function PokemonCardsIndex({
       </header>
 
       {/* SEO intro */}
-<div className="max-w-3xl space-y-3 text-sm text-white/80">
-  {lang === "ja" ? (
-    <>
-      <p>
-        Explore authentic Japanese Pokémon cards, including exclusive releases, high-quality prints,
-        and sets that often debut in Japan before appearing internationally. Japanese Pokémon cards
-        are highly sought after for their print quality and unique artwork.
-      </p>
-
-      <p>
-        Browse Japanese Pokémon TCG cards by set and card number, view high-resolution images, and
-        track cards in your personal collection. Great for collectors hunting promos, early releases,
-        and Japan-only cards.
-      </p>
-    </>
-  ) : (
-    <>
-      <p>
-        Browse a comprehensive collection of authentic Pokémon cards, including modern releases,
-        classic sets, and collector favorites. Legendary Collectibles helps Pokémon TCG fans discover,
-        track, and manage cards across multiple eras and print styles.
-      </p>
-
-      <p>
-        Use search to find cards by name, rarity, set, or ID, then explore images and variants before
-        adding them to your collection. New cards and pricing data are added regularly.
-      </p>
-    </>
-  )}
-</div>
-
+      <div className="max-w-3xl space-y-3 text-sm text-white/80">
+        {lang === "ja" ? (
+          <>
+            <p>
+              Browse authentic Japanese Pokémon cards including modern sets, vintage releases, and promo cards. Track prices,
+              manage your collection, and discover rare Japanese exclusives.
+            </p>
+            <p>
+              Search by card name, rarity, set, or ID, then explore high-resolution images and variants before adding cards to your collection.
+              Japanese cards are popular for print quality, early set releases, and Japan-only promos.
+            </p>
+          </>
+        ) : (
+          <>
+            <p>
+              Browse Pokémon cards across modern and classic sets, from competitive staples to collector favorites. Legendary Collectibles helps
+              Pokémon TCG fans discover cards, track market pricing, and manage a personal collection.
+            </p>
+            <p>
+              Use search to find cards by name, rarity, set, or ID, then view images and variants before adding them to your collection.
+              New cards and pricing data are added regularly.
+            </p>
+          </>
+        )}
+      </div>
 
       {cards.length === 0 ? (
         <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90 backdrop-blur-sm">

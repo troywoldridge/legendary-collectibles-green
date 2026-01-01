@@ -1,18 +1,15 @@
+// src/app/categories/pokemon/cards/[id]/prices/page.tsx
 import "server-only";
 
 import Link from "next/link";
+import Script from "next/script";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
 import MarketPrices from "@/components/MarketPrices";
 import { type DisplayCurrency, convert, formatMoney, getFx } from "@/lib/pricing";
-
-export const metadata = {
-  title: "Pokémon Card Prices, Collection Tracking & Shop | Legendary Collectibles",
-  description:
-    "Browse Pokémon cards, track prices, manage your collection, and buy singles and sealed products online.",
-};
-
+import type { Metadata } from "next";
+import { site } from "@/config/site";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,6 +38,14 @@ type CmHist = {
   low_price: string | null;
   suggested_price: string | null;
 };
+
+function absBase() {
+  return (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+}
+function absUrl(path: string) {
+  const base = absBase();
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 function readDisplay(sp: SearchParams): DisplayCurrency {
   const a = (Array.isArray(sp?.display) ? sp.display[0] : sp?.display) ?? "";
@@ -140,6 +145,52 @@ async function loadHistory(cardId: string, days = 90) {
   return { tcg, cm };
 }
 
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const p = await params;
+  const raw = decodeURIComponent(p.id ?? "").trim();
+  const cardId = (await resolveCardId(raw)) ?? raw;
+  const core = await loadCore(cardId);
+
+  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(cardId)}/prices`);
+
+  if (!core) {
+    return {
+      title: `Pokémon Card Prices | ${site.name}`,
+      description: `View Pokémon card price history and market trends on ${site.name}.`,
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const name = core.name ?? core.id;
+  const title = `Prices: ${name} — Pokémon Card Value & Trends | ${site.name}`;
+  const desc = `View recent market prices and trends for ${name}. See TCGplayer and Cardmarket price history, and switch display currency.`;
+
+  return {
+    title,
+    description: desc,
+    alternates: { canonical },
+    robots: { index: true, follow: true },
+    openGraph: {
+      type: "website",
+      url: canonical,
+      title,
+      description: desc,
+      siteName: site.name,
+      images: core.large_image || core.small_image ? [{ url: (core.large_image || core.small_image) as string }] : [],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description: desc,
+    },
+  };
+}
+
 export default async function PokemonCardPricesPage({
   params,
   searchParams,
@@ -175,6 +226,7 @@ export default async function PokemonCardPricesPage({
 
   const baseDetail = `/categories/pokemon/cards/${encodeURIComponent(core.id)}`;
   const baseHref = `${baseDetail}/prices`;
+  const canonical = absUrl(baseHref);
 
   const fx = getFx();
 
@@ -241,17 +293,100 @@ export default async function PokemonCardPricesPage({
 
   const noHistory = metrics.length === 0 || metrics.every((m) => !m.latest);
 
+  // -----------------------
+  // JSON-LD
+  // -----------------------
+  const cover = (core.large_image || core.small_image || null) as string | null;
+
+  const breadcrumbLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: absUrl("/") },
+      { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
+      { "@type": "ListItem", position: 3, name: "Pokémon", item: absUrl("/categories/pokemon/sets") },
+      { "@type": "ListItem", position: 4, name: "Pokémon Cards", item: absUrl("/categories/pokemon/cards") },
+      { "@type": "ListItem", position: 5, name: core.name ?? core.id, item: absUrl(baseDetail) },
+      { "@type": "ListItem", position: 6, name: "Prices", item: canonical },
+    ],
+  };
+
+  // pick a representative price for Offer (latest available)
+  const priceCandidate =
+    asNum(tcgLatest?.normal) ??
+    asNum(tcgLatest?.holofoil) ??
+    asNum(tcgLatest?.reverse_holofoil) ??
+    null;
+
+  const offer =
+    priceCandidate != null && priceCandidate > 0
+      ? {
+          "@type": "Offer",
+          url: canonical,
+          priceCurrency: (tcgCur ?? "USD").toUpperCase(),
+          price: priceCandidate.toFixed(2),
+          availability: "https://schema.org/InStock",
+          itemCondition: "https://schema.org/UsedCondition",
+          seller: {
+            "@type": "Organization",
+            name: site.name ?? "Legendary Collectibles",
+            url: absBase(),
+          },
+        }
+      : null;
+
+  const productJsonLd: any = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    "@id": `${absUrl(baseDetail)}#product`,
+    name: (core.name ?? core.id).trim(),
+    sku: core.id,
+    url: absUrl(baseDetail),
+    image: cover ? [cover] : undefined,
+    category: "Pokémon Trading Card",
+    brand: { "@type": "Brand", name: "Pokémon" },
+    ...(offer ? { offers: offer } : {}),
+    // AggregateRating intentionally omitted until you have real ratings.
+  };
+
+  const webPageJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "@id": `${canonical}#webpage`,
+    url: canonical,
+    name: `Prices: ${core.name ?? core.id}`,
+    isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: absBase() },
+    mainEntity: { "@id": `${absUrl(baseDetail)}#product` },
+  };
+
   return (
     <section className="space-y-8">
+      <Script id="pokemon-prices-webpage-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }} />
+      <Script id="pokemon-prices-breadcrumb-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbLd) }} />
+      <Script id="pokemon-prices-product-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }} />
+
+      {/* Visible breadcrumbs */}
+      <nav className="text-xs text-white/70">
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href="/" className="hover:underline">Home</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories" className="hover:underline">Categories</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories/pokemon/sets" className="hover:underline">Pokémon</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories/pokemon/cards" className="hover:underline">Cards</Link>
+          <span className="text-white/40">/</span>
+          <Link href={baseDetail} className="hover:underline">{core.name ?? core.id}</Link>
+          <span className="text-white/40">/</span>
+          <span className="text-white/90">Prices</span>
+        </div>
+      </nav>
+
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-white">
-              Prices: {core.name ?? core.id}
-            </h1>
-            <div className="mt-1 text-sm text-white/70">
-              Market snapshot + trends.
-            </div>
+            <h1 className="text-2xl font-bold text-white">Prices: {core.name ?? core.id}</h1>
+            <div className="mt-1 text-sm text-white/70">Market snapshot + trends.</div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

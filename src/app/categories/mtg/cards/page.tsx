@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
+
+import type { Metadata } from "next";
 import Link from "next/link";
 import Image from "next/image";
 import { sql } from "drizzle-orm";
@@ -9,17 +11,45 @@ import { site } from "@/config/site";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-export const metadata = {
-  title: "Magic The Gathering Card Prices, Collection Tracking & Shop | Legendary Collectibles",
+/* ---------------- SEO ---------------- */
+function absUrl(path: string) {
+  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+function absMaybe(urlOrPath: string) {
+  if (!urlOrPath) return absUrl("/og-image.png");
+  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
+  return absUrl(urlOrPath);
+}
+
+export const metadata: Metadata = {
+  title: `Magic: The Gathering Cards — Prices & Collection | ${site.name}`,
   description:
-    "Browse Magic The Gathering cards, track prices, manage your collection, and buy singles and sealed products online.",
-     alternates: { canonical: `${site.url}/categories/yugioh/cards` },
+    "Browse Magic: The Gathering cards, track prices, manage your collection, and shop singles and sealed products.",
+  alternates: { canonical: absUrl("/categories/mtg/cards") },
+  openGraph: {
+    type: "website",
+    url: absUrl("/categories/mtg/cards"),
+    title: `Magic: The Gathering Cards — Prices & Collection | ${site.name}`,
+    description:
+      "Browse MTG cards with live prices and collection tools. Search by name, set code, type, color, and rarity.",
+    siteName: site.name,
+    images: [{ url: absMaybe(site.ogImage || "/og-image.png") }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: `Magic: The Gathering Cards — Prices & Collection | ${site.name}`,
+    description:
+      "Browse MTG cards with live prices and collection tools. Search by name, set code, type, color, and rarity.",
+    images: [absMaybe(site.ogImage || "/og-image.png")],
+  },
 };
-
 
 /* ---------------- Types ---------------- */
 type SearchParams = Record<string, string | string[] | undefined>;
+type Currency = "USD" | "EUR";
 
 type CardThumb = {
   id: string;
@@ -29,15 +59,26 @@ type CardThumb = {
   rarity: string | null;
   type_line: string | null;
   image_url: string | null;
+
   price_usd: string | null;
+  price_eur: string | null;
   price_updated: string | null;
 };
 
 /* ---------------- UI Constants ---------------- */
 const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
 const COLOR_OPTS = ["White", "Blue", "Black", "Red", "Green", "Colorless"] as const;
-const TYPE_OPTS = ["Artifact","Creature","Enchantment","Instant","Land","Planeswalker","Sorcery","Tribal"] as const;
-const RARITY_UI = ["Common","Uncommon","Rare","Mythic Rare","Special","Basic Land"] as const;
+const TYPE_OPTS = [
+  "Artifact",
+  "Creature",
+  "Enchantment",
+  "Instant",
+  "Land",
+  "Planeswalker",
+  "Sorcery",
+  "Tribal",
+] as const;
+const RARITY_UI = ["Common", "Uncommon", "Rare", "Mythic Rare", "Special", "Basic Land"] as const;
 
 const RARITY_MAP: Record<(typeof RARITY_UI)[number], string> = {
   Common: "common",
@@ -47,14 +88,25 @@ const RARITY_MAP: Record<(typeof RARITY_UI)[number], string> = {
   Special: "special",
   "Basic Land": "basic",
 };
+
 const COLOR_CODE: Record<(typeof COLOR_OPTS)[number], string> = {
-  White: "W", Blue: "U", Black: "B", Red: "R", Green: "G", Colorless: "",
+  White: "W",
+  Blue: "U",
+  Black: "B",
+  Red: "R",
+  Green: "G",
+  Colorless: "",
 };
 
 /* ---------------- Helpers ---------------- */
 function lastVal(v?: string | string[]) {
   if (Array.isArray(v)) return v[v.length - 1];
   return v;
+}
+
+function readCurrency(sp: SearchParams): Currency {
+  const raw = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency)?.toUpperCase();
+  return raw === "EUR" ? "EUR" : "USD";
 }
 
 function parsePerPage(sp: SearchParams) {
@@ -82,14 +134,16 @@ function buildHref(
     set?: string | null;
     p?: number;
     pp?: number;
+    currency?: Currency;
     color?: string[];
     type?: string[];
     rarity?: string[];
-  }
+  },
 ) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", String(qs.q));
   if (qs.set) p.set("set", String(qs.set));
+  if (qs.currency) p.set("currency", qs.currency);
   p.set("p", String(qs.p ?? 1));
   p.set("pp", String(qs.pp ?? 60));
   (qs.color ?? []).forEach((c) => p.append("color", c));
@@ -99,6 +153,12 @@ function buildHref(
   return s ? `${base}?${s}` : base;
 }
 
+function withParam(baseHref: string, key: string, val: string) {
+  const u = new URL(baseHref, "https://x/");
+  u.searchParams.set(key, val);
+  return u.pathname + (u.search ? u.search : "");
+}
+
 function orJoin(parts: any[]) {
   if (!parts.length) return sql`TRUE`;
   let expr = parts[0];
@@ -106,7 +166,18 @@ function orJoin(parts: any[]) {
   return sql`(${expr})`;
 }
 
-const fmt = (s?: string | null) => (s == null ? null : Number(s).toFixed(2));
+async function getFmtMoney() {
+  const pricing: any = await import("@/lib/pricing").catch(() => null);
+  if (pricing?.fmtMoney) return pricing.fmtMoney as (v: any, cur?: string) => string;
+  return null;
+}
+
+function safeNum(v?: string | null) {
+  if (!v) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
 
 /* ---------------- Data ---------------- */
 async function getCards(opts: {
@@ -121,6 +192,7 @@ async function getCards(opts: {
   noStore();
 
   const like = opts.q ? `%${opts.q}%` : null;
+  const setNorm = opts.set ? opts.set.trim().toLowerCase() : null;
 
   let where = sql`TRUE`;
 
@@ -132,8 +204,8 @@ async function getCards(opts: {
     )`;
   }
 
-  if (opts.set) {
-    where = sql`${where} AND (c.set_code ILIKE ${opts.set})`;
+  if (setNorm) {
+    where = sql`${where} AND LOWER(c.set_code) = ${setNorm}`;
   }
 
   if (opts.rarities.length) {
@@ -152,8 +224,6 @@ async function getCards(opts: {
   if (opts.colors.length) {
     const colorParts = opts.colors.map((ui) => {
       if (ui === "Colorless") {
-        // Scryfall: colorless cards often have colors: [] or null.
-        // We treat NULL or [] as colorless.
         return sql`(c.payload->'colors' IS NULL OR jsonb_array_length(c.payload->'colors') = 0)`;
       }
       const code = COLOR_CODE[ui as keyof typeof COLOR_CODE];
@@ -169,40 +239,40 @@ async function getCards(opts: {
   `);
   const total = Number(totalRes.rows?.[0]?.count ?? "0");
 
-  // ✅ Price join uses mtg_card_prices ONLY (your detail page already uses this)
- // ✅ Price join uses mtg_prices_effective + mtg_prices_scryfall_latest fallback
-const rowsRes = await db.execute<CardThumb>(sql`
-  SELECT
-    c.id::text AS id,
-    c.name,
-    c.collector_number AS number,
-    c.set_code,
-    (c.payload->>'rarity') AS rarity,
-    (c.payload->>'type_line') AS type_line,
-    COALESCE(
-      (c.payload->'image_uris'->>'normal'),
-      (c.payload->'image_uris'->>'large'),
-      (c.payload->'image_uris'->>'small'),
-      (c.payload->'card_faces'->0->'image_uris'->>'normal'),
-      (c.payload->'card_faces'->0->'image_uris'->>'large'),
-      (c.payload->'card_faces'->0->'image_uris'->>'small')
-    ) AS image_url,
+  const rowsRes = await db.execute<CardThumb>(sql`
+    SELECT
+      c.id::text AS id,
+      c.name,
+      c.collector_number AS number,
+      c.set_code,
+      (c.payload->>'rarity') AS rarity,
+      (c.payload->>'type_line') AS type_line,
+      COALESCE(
+        (c.payload->'image_uris'->>'normal'),
+        (c.payload->'image_uris'->>'large'),
+        (c.payload->'image_uris'->>'small'),
+        (c.payload->'card_faces'->0->'image_uris'->>'normal'),
+        (c.payload->'card_faces'->0->'image_uris'->>'large'),
+        (c.payload->'card_faces'->0->'image_uris'->>'small')
+      ) AS image_url,
 
-    COALESCE(e.effective_usd, s.usd)::text AS price_usd,
-    COALESCE(
-      TO_CHAR(e.effective_updated_at,'YYYY-MM-DD'),
-      TO_CHAR(s.updated_at,'YYYY-MM-DD')
-    ) AS price_updated
+      COALESCE(e.effective_usd, s.usd)::text AS price_usd,
+      COALESCE(e.effective_eur, s.eur)::text AS price_eur,
 
-  FROM public.scryfall_cards_raw c
-  LEFT JOIN public.mtg_prices_effective e
-    ON e.scryfall_id = c.id
-  LEFT JOIN public.mtg_prices_scryfall_latest s
-    ON s.scryfall_id = c.id
-  WHERE ${where}
-  ORDER BY c.name ASC NULLS LAST
-  LIMIT ${opts.limit} OFFSET ${opts.offset}
-`);
+      COALESCE(
+        TO_CHAR(e.effective_updated_at,'YYYY-MM-DD'),
+        TO_CHAR(s.updated_at,'YYYY-MM-DD')
+      ) AS price_updated
+
+    FROM public.scryfall_cards_raw c
+    LEFT JOIN public.mtg_prices_effective e
+      ON e.scryfall_id = c.id
+    LEFT JOIN public.mtg_prices_scryfall_latest s
+      ON s.scryfall_id = c.id
+    WHERE ${where}
+    ORDER BY c.name ASC NULLS LAST
+    LIMIT ${opts.limit} OFFSET ${opts.offset}
+  `);
 
   return { rows: rowsRes.rows ?? [], total };
 }
@@ -214,16 +284,25 @@ export default async function MtgCardsIndex({
   searchParams: Promise<SearchParams>;
 }) {
   const sp = await searchParams;
+
   const baseHref = "/categories/mtg/cards";
+  const currency = readCurrency(sp);
 
   const q = (lastVal(sp?.q) ?? "")?.trim() || null;
   const set = (lastVal(sp?.set) ?? "")?.trim() || null;
+
   const perPage = parsePerPage(sp);
   const reqPage = parsePage(sp);
 
-  const selColors = parseMulti(sp, "color").filter((c) => (COLOR_OPTS as readonly string[]).includes(c));
-  const selTypes = parseMulti(sp, "type").filter((t) => (TYPE_OPTS as readonly string[]).includes(t));
-  const selRarities = parseMulti(sp, "rarity").filter((r) => (RARITY_UI as readonly string[]).includes(r));
+  const selColors = parseMulti(sp, "color").filter((c) =>
+    (COLOR_OPTS as readonly string[]).includes(c),
+  );
+  const selTypes = parseMulti(sp, "type").filter((t) =>
+    (TYPE_OPTS as readonly string[]).includes(t),
+  );
+  const selRarities = parseMulti(sp, "rarity").filter((r) =>
+    (RARITY_UI as readonly string[]).includes(r),
+  );
 
   const { rows, total } = await getCards({
     q,
@@ -238,59 +317,159 @@ export default async function MtgCardsIndex({
   const totalPages = Math.max(1, Math.ceil(total / perPage));
   const page = Math.max(1, Math.min(totalPages, reqPage));
   const offset = (page - 1) * perPage;
+
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + perPage, total);
+
   const isFirst = page <= 1;
   const isLast = page >= totalPages;
 
   const filterCount = selColors.length + selTypes.length + selRarities.length;
   const filtersOpen = filterCount > 0;
 
+  const fmtMoney = await getFmtMoney();
+  const fmt = (n: number | null) => {
+    if (n == null) return "—";
+    if (fmtMoney) return fmtMoney(n, currency);
+    const sym = currency === "EUR" ? "€" : "$";
+    return `${sym}${n.toFixed(2)}`;
+  };
+
+  const banner = site.ogImage || "/og-image.png";
+
+  const clearHref = buildHref(baseHref, { pp: perPage, p: 1, currency });
+
   return (
     <section className="space-y-6">
-      {/* Header */}
+      {/* Header / Hero */}
+      <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-4">
+            <div className="relative h-20 w-36 shrink-0 overflow-hidden rounded-lg bg-white/5 ring-1 ring-white/10">
+              <Image
+                src={banner}
+                alt="Magic: The Gathering"
+                fill
+                unoptimized
+                className="object-contain"
+                sizes="144px"
+                priority
+              />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-white">Magic: The Gathering • Cards</h1>
+              <div className="text-sm text-white/80">
+                Search all MTG cards across sets. Filter by color, type, and rarity.
+              </div>
+            </div>
+          </div>
 
-      {/* SEO intro */}
-<div className="max-w-3xl space-y-3 text-sm text-white/80">
-  <p>
-    Explore Magic: The Gathering cards from modern releases to iconic older sets. Search by card
-    name, set, type, color identity, or ID to discover staples, commanders, and collector pieces.
-  </p>
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Currency toggle */}
+            <div className="rounded-md border border-white/20 bg-white/10 p-1 text-sm text-white">
+              <span className="px-2">Currency:</span>
+              <Link
+                href={withParam(clearHref, "currency", "USD")}
+                className={`rounded px-2 py-1 ${
+                  currency === "USD" ? "bg-white/20" : "hover:bg-white/10"
+                }`}
+                prefetch={false}
+              >
+                USD
+              </Link>
+              <Link
+                href={withParam(clearHref, "currency", "EUR")}
+                className={`ml-1 rounded px-2 py-1 ${
+                  currency === "EUR" ? "bg-white/20" : "hover:bg-white/10"
+                }`}
+                prefetch={false}
+              >
+                EUR
+              </Link>
+            </div>
 
-  <p>
-    Legendary Collectibles makes it easy to browse card images, track price trends, and manage your
-    MTG collection in one place. New data is synced regularly to keep the catalog growing.
-  </p>
-</div>
-
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Magic: The Gathering • Cards</h1>
-          <div className="text-sm text-white/80">
-            Search all MTG cards across sets. Filter by color, type, and rarity.
+            <Link href="/categories/mtg/sets" className="text-sky-300 hover:underline" prefetch={false}>
+              ← Browse sets
+            </Link>
           </div>
         </div>
-        <Link href="/categories/mtg/sets" className="text-sky-300 hover:underline" prefetch={false}>
-          ← Browse sets
-        </Link>
+
+        {/* ✅ Quick search (new) */}
+        <div className="mt-4 rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+          <div className="mb-2 text-sm font-semibold text-white">Find a card</div>
+
+          <form action={baseHref} method="get" className="flex flex-wrap items-center gap-2">
+            {/* persist state */}
+            <input type="hidden" name="currency" value={currency} />
+            <input type="hidden" name="pp" value={String(perPage)} />
+            <input type="hidden" name="p" value="1" />
+            {selColors.map((v) => <input key={`qs-c-${v}`} type="hidden" name="color" value={v} />)}
+            {selTypes.map((v) => <input key={`qs-t-${v}`} type="hidden" name="type" value={v} />)}
+            {selRarities.map((v) => <input key={`qs-r-${v}`} type="hidden" name="rarity" value={v} />)}
+
+            <input
+              name="q"
+              defaultValue={q ?? ""}
+              placeholder="Search name / number / type…"
+              className="w-60 md:w-[360px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
+            />
+            <input
+              name="set"
+              defaultValue={set ?? ""}
+              placeholder="Set code (e.g. SOI)"
+              className="w-[160px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
+            />
+            <button
+              type="submit"
+              className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20"
+            >
+              Search
+            </button>
+
+            {(q || set || filterCount) ? (
+              <a
+                href={clearHref}
+                className="ml-auto rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
+              >
+                Clear
+              </a>
+            ) : null}
+          </form>
+        </div>
+
+        {/* SEO intro */}
+        <div className="mt-4 max-w-3xl space-y-3 text-sm text-white/80">
+          <p>
+            Explore Magic: The Gathering cards from modern releases to iconic older sets. Search by card
+            name, set code, type, color identity, or ID to discover staples, commanders, and collector pieces.
+          </p>
+          <p>
+            Legendary Collectibles makes it easy to browse card images, track price trends, and manage your
+            MTG collection in one place. New data is synced regularly to keep the catalog growing.
+          </p>
+        </div>
       </div>
 
-      {/* Top bar */}
+      {/* Status bar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-sm text-white/80">
-          Showing {from}-{to} of {total} cards
-          {q ? ` • “${q}”` : ""}{set ? ` • set: ${set}` : ""}
+          Showing {from}-{to} of {total.toLocaleString()} cards
+          {q ? ` • “${q}”` : ""}
+          {set ? ` • set: ${set.toUpperCase()}` : ""}
           {filterCount ? ` • ${filterCount} filter${filterCount > 1 ? "s" : ""}` : ""}
         </div>
 
         {/* Per-page */}
         <form action={baseHref} method="get" className="flex items-center gap-2">
+          {/* persist */}
+          <input type="hidden" name="currency" value={currency} />
           {q ? <input type="hidden" name="q" value={q} /> : null}
           {set ? <input type="hidden" name="set" value={set} /> : null}
           {selColors.map((v) => <input key={`c-${v}`} type="hidden" name="color" value={v} />)}
           {selTypes.map((v) => <input key={`t-${v}`} type="hidden" name="type" value={v} />)}
           {selRarities.map((v) => <input key={`r-${v}`} type="hidden" name="rarity" value={v} />)}
           <input type="hidden" name="p" value="1" />
+
           <label htmlFor="pp" className="sr-only">Per page</label>
           <select
             id="pp"
@@ -298,8 +477,11 @@ export default async function MtgCardsIndex({
             defaultValue={String(perPage)}
             className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white"
           >
-            {PER_PAGE_OPTIONS.map((n) => (<option key={n} value={n}>{n}</option>))}
+            {PER_PAGE_OPTIONS.map((n) => (
+              <option key={n} value={n}>{n}</option>
+            ))}
           </select>
+
           <button
             type="submit"
             className="rounded-md border border-white/20 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20"
@@ -309,83 +491,92 @@ export default async function MtgCardsIndex({
         </form>
       </div>
 
-      {/* Search + Filters */}
+      {/* Filters (still here, so it matches the “full” pages) */}
       <form action={baseHref} method="get" className="rounded-xl border border-white/10 bg-white/5 p-3">
+        <input type="hidden" name="currency" value={currency} />
         <input type="hidden" name="pp" value={String(perPage)} />
         <input type="hidden" name="p" value="1" />
+        {q ? <input type="hidden" name="q" value={q} /> : null}
+        {set ? <input type="hidden" name="set" value={set} /> : null}
 
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            name="q"
-            defaultValue={q ?? ""}
-            placeholder="Search name / number / type…"
-            className="w-60 md:w-[320px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
-          />
-          <input
-            name="set"
-            defaultValue={set ?? ""}
-            placeholder="Set code (e.g. SOI)"
-            className="w-[140px] rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-white/60 outline-none focus:ring-2 focus:ring-white/50"
-          />
-          <button
-            type="submit"
-            className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20"
-          >
-            Search
-          </button>
+        <details className="relative" open={filtersOpen}>
+          <summary className="list-none inline-flex cursor-pointer select-none items-center gap-2 rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
+            Filters
+            {filterCount > 0 && (
+              <span className="rounded-full bg-white/20 px-1.5 text-xs">{filterCount}</span>
+            )}
+          </summary>
 
-          {(q || set || filterCount) ? (
-            <a
-              href={buildHref(baseHref, { pp: perPage, p: 1 })}
-              className="ml-auto rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
-            >
-              Clear
-            </a>
-          ) : null}
+          <div className="z-10 mt-2 w-[min(92vw,900px)] rounded-xl border border-white/10 bg-black/60 p-4 backdrop-blur-md shadow-2xl">
+            <div className="grid gap-4">
+              <fieldset className="grid grid-cols-2 gap-2 sm:grid-cols-6">
+                <legend className="col-span-full text-xs uppercase tracking-wide text-white/60">Colors</legend>
+                {COLOR_OPTS.map((c) => (
+                  <label key={c} className="flex items-center gap-2 text-sm text-white/90">
+                    <input
+                      type="checkbox"
+                      name="color"
+                      value={c}
+                      defaultChecked={selColors.includes(c)}
+                      className="h-4 w-4 rounded border-white/30 bg-transparent"
+                    />
+                    <span>{c}</span>
+                  </label>
+                ))}
+              </fieldset>
 
-          <details className="relative ml-auto sm:ml-2" open={filtersOpen}>
-            <summary className="list-none inline-flex cursor-pointer select-none items-center gap-2 rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20">
-              Filters
-              {filterCount > 0 && (
-                <span className="rounded-full bg-white/20 px-1.5 text-xs">{filterCount}</span>
-              )}
-            </summary>
+              <fieldset className="grid grid-cols-2 gap-2 sm:grid-cols-8">
+                <legend className="col-span-full text-xs uppercase tracking-wide text-white/60">Types</legend>
+                {TYPE_OPTS.map((t) => (
+                  <label key={t} className="flex items-center gap-2 text-sm text-white/90">
+                    <input
+                      type="checkbox"
+                      name="type"
+                      value={t}
+                      defaultChecked={selTypes.includes(t)}
+                      className="h-4 w-4 rounded border-white/30 bg-transparent"
+                    />
+                    <span>{t}</span>
+                  </label>
+                ))}
+              </fieldset>
 
-            <div className="z-10 mt-2 w-[min(92vw,900px)] rounded-xl border border-white/10 bg-black/60 p-4 backdrop-blur-md shadow-2xl">
-              <div className="grid gap-4">
-                <fieldset className="grid grid-cols-2 gap-2 sm:grid-cols-6">
-                  <legend className="col-span-full text-xs uppercase tracking-wide text-white/60">Colors</legend>
-                  {COLOR_OPTS.map((c) => (
-                    <label key={c} className="flex items-center gap-2 text-sm text-white/90">
-                      <input type="checkbox" name="color" value={c} defaultChecked={selColors.includes(c)} className="h-4 w-4 rounded border-white/30 bg-transparent" />
-                      <span>{c}</span>
-                    </label>
-                  ))}
-                </fieldset>
+              <fieldset className="grid grid-cols-2 gap-2 sm:grid-cols-6">
+                <legend className="col-span-full text-xs uppercase tracking-wide text-white/60">Rarities</legend>
+                {RARITY_UI.map((r) => (
+                  <label key={r} className="flex items-center gap-2 text-sm text-white/90">
+                    <input
+                      type="checkbox"
+                      name="rarity"
+                      value={r}
+                      defaultChecked={selRarities.includes(r)}
+                      className="h-4 w-4 rounded border-white/30 bg-transparent"
+                    />
+                    <span>{r}</span>
+                  </label>
+                ))}
+              </fieldset>
 
-                <fieldset className="grid grid-cols-2 gap-2 sm:grid-cols-8">
-                  <legend className="col-span-full text-xs uppercase tracking-wide text-white/60">Types</legend>
-                  {TYPE_OPTS.map((t) => (
-                    <label key={t} className="flex items-center gap-2 text-sm text-white/90">
-                      <input type="checkbox" name="type" value={t} defaultChecked={selTypes.includes(t)} className="h-4 w-4 rounded border-white/30 bg-transparent" />
-                      <span>{t}</span>
-                    </label>
-                  ))}
-                </fieldset>
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                <button
+                  type="submit"
+                  className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/20"
+                >
+                  Apply filters
+                </button>
 
-                <fieldset className="grid grid-cols-2 gap-2 sm:grid-cols-6">
-                  <legend className="col-span-full text-xs uppercase tracking-wide text-white/60">Rarities</legend>
-                  {RARITY_UI.map((r) => (
-                    <label key={r} className="flex items-center gap-2 text-sm text-white/90">
-                      <input type="checkbox" name="rarity" value={r} defaultChecked={selRarities.includes(r)} className="h-4 w-4 rounded border-white/30 bg-transparent" />
-                      <span>{r}</span>
-                    </label>
-                  ))}
-                </fieldset>
+                {(q || set || filterCount) ? (
+                  <a
+                    href={clearHref}
+                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
+                  >
+                    Clear
+                  </a>
+                ) : null}
               </div>
             </div>
-          </details>
-        </div>
+          </div>
+        </details>
       </form>
 
       {/* Grid */}
@@ -398,7 +589,10 @@ export default async function MtgCardsIndex({
           {rows.map((c) => {
             const img = (c.image_url ?? "").replace(/^http:\/\//, "https://") || "/placeholder.svg";
             const href = `/categories/mtg/cards/${encodeURIComponent(c.id)}`;
-            const price = fmt(c.price_usd);
+
+            const usd = safeNum(c.price_usd);
+            const eur = safeNum(c.price_eur);
+            const price = currency === "EUR" ? eur : usd;
 
             return (
               <li
@@ -416,22 +610,22 @@ export default async function MtgCardsIndex({
                       sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
                     />
                   </div>
+
                   <div className="p-3">
-                    <div className="line-clamp-2 text-sm font-medium text-white">
-                      {c.name ?? c.id}
-                    </div>
+                    <div className="line-clamp-2 text-sm font-medium text-white">{c.name ?? c.id}</div>
+
                     <div className="mt-1 text-xs text-white/70">
                       {[c.set_code || undefined, c.number || undefined, c.rarity || undefined]
                         .filter(Boolean)
                         .join(" • ")}
                     </div>
+
                     <div className="mt-1 text-xs text-white/60">
-                      {price ? `$${price}` : "—"}
+                      {fmt(price)}
                       {c.price_updated ? ` • ${c.price_updated}` : ""}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-white/60 line-clamp-1">
-                      {c.type_line ?? ""}
-                    </div>
+
+                    <div className="mt-0.5 text-[11px] text-white/60 line-clamp-1">{c.type_line ?? ""}</div>
                   </div>
                 </Link>
               </li>
@@ -443,6 +637,8 @@ export default async function MtgCardsIndex({
       {/* Pager */}
       {total > perPage && (
         <form action={baseHref} method="get" className="mt-4 flex items-center justify-center gap-2 text-sm">
+          {/* persist */}
+          <input type="hidden" name="currency" value={currency} />
           {q ? <input type="hidden" name="q" value={q} /> : null}
           {set ? <input type="hidden" name="set" value={set} /> : null}
           <input type="hidden" name="pp" value={String(perPage)} />
@@ -450,25 +646,61 @@ export default async function MtgCardsIndex({
           {selTypes.map((v) => <input key={`pt-${v}`} type="hidden" name="type" value={v} />)}
           {selRarities.map((v) => <input key={`pr-${v}`} type="hidden" name="rarity" value={v} />)}
 
-          <button type="submit" name="p" value="1" disabled={isFirst}
-            className={`rounded-md border px-3 py-1 ${isFirst ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"}`}>
+          <button
+            type="submit"
+            name="p"
+            value="1"
+            disabled={isFirst}
+            className={`rounded-md border px-3 py-1 ${
+              isFirst
+                ? "pointer-events-none border-white/10 text-white/40"
+                : "border-white/20 text-white hover:bg-white/10"
+            }`}
+          >
             « First
           </button>
 
-          <button type="submit" name="p" value={String(Math.max(1, page - 1))} disabled={isFirst}
-            className={`rounded-md border px-3 py-1 ${isFirst ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"}`}>
+          <button
+            type="submit"
+            name="p"
+            value={String(Math.max(1, page - 1))}
+            disabled={isFirst}
+            className={`rounded-md border px-3 py-1 ${
+              isFirst
+                ? "pointer-events-none border-white/10 text-white/40"
+                : "border-white/20 text-white hover:bg-white/10"
+            }`}
+          >
             ← Prev
           </button>
 
           <span className="px-2 text-white/80">Page {page} of {totalPages}</span>
 
-          <button type="submit" name="p" value={String(Math.min(totalPages, page + 1))} disabled={isLast}
-            className={`rounded-md border px-3 py-1 ${isLast ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"}`}>
+          <button
+            type="submit"
+            name="p"
+            value={String(Math.min(totalPages, page + 1))}
+            disabled={isLast}
+            className={`rounded-md border px-3 py-1 ${
+              isLast
+                ? "pointer-events-none border-white/10 text-white/40"
+                : "border-white/20 text-white hover:bg-white/10"
+            }`}
+          >
             Next →
           </button>
 
-          <button type="submit" name="p" value={String(totalPages)} disabled={isLast}
-            className={`rounded-md border px-3 py-1 ${isLast ? "pointer-events-none border-white/10 text-white/40" : "border-white/20 text-white hover:bg-white/10"}`}>
+          <button
+            type="submit"
+            name="p"
+            value={String(totalPages)}
+            disabled={isLast}
+            className={`rounded-md border px-3 py-1 ${
+              isLast
+                ? "pointer-events-none border-white/10 text-white/40"
+                : "border-white/20 text-white hover:bg-white/10"
+            }`}
+          >
             Last »
           </button>
         </form>

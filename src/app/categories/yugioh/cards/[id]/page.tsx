@@ -2,6 +2,7 @@
 import "server-only";
 
 import type { Metadata } from "next";
+import Script from "next/script";
 import Image from "next/image";
 import Link from "next/link";
 import { sql } from "drizzle-orm";
@@ -18,8 +19,6 @@ import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
 
 import { site } from "@/config/site";
-
-
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,13 +42,15 @@ type CardRow = {
 };
 
 type ImageRow = { small: string | null; large: string | null };
+
 type PriceRow = {
-  tcgplayer: string | null;
-  cardmarket: string | null;
-  ebay: string | null;
-  amazon: string | null;
-  coolstuffinc: string | null;
+  tcgplayer: number | null;
+  cardmarket: number | null;
+  ebay: number | null;
+  amazon: number | null;
+  coolstuffinc: number | null;
 };
+
 type BanlistRow = { tcg: string | null; ocg: string | null; goat: string | null };
 
 type SetEntry = {
@@ -60,8 +61,8 @@ type SetEntry = {
 };
 
 /* ---------------- Helpers ---------------- */
-function money(v: string | number | null | undefined) {
-  if (!v) return "—";
+function money(v: number | string | null | undefined) {
+  if (v == null) return "—";
   const n = typeof v === "number" ? v : parseFloat(String(v));
   if (!Number.isFinite(n)) return "—";
   return `$${n.toFixed(2)}`;
@@ -73,9 +74,40 @@ function bestImage(imgs: ImageRow[]): string | null {
   return first.large || first.small || null;
 }
 
+function absBase() {
+  return (
+    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+    site?.url?.replace(/\/+$/, "") ||
+    "https://legendary-collectibles.com"
+  );
+}
+
 function absUrl(path: string) {
-  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/$/, "");
+  const base = absBase();
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function absMaybe(urlOrPath: string | null | undefined) {
+  if (!urlOrPath) return absUrl("/og-image.png");
+  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
+  return absUrl(urlOrPath);
+}
+
+function pickUsdPriceFromPrices(prices: PriceRow | null): number | null {
+  if (!prices) return null;
+
+  const candidates = [
+    prices.tcgplayer,
+    prices.ebay,
+    prices.amazon,
+    prices.coolstuffinc,
+    prices.cardmarket, // last resort
+  ];
+
+  for (const v of candidates) {
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+  }
+  return null;
 }
 
 /* ---------------- Data loaders ---------------- */
@@ -133,7 +165,7 @@ async function getCard(param: string): Promise<{
           p.ebay_price         AS ebay,
           p.amazon_price       AS amazon,
           p.coolstuffinc_price AS coolstuffinc
-        FROM ygo_card_prices p
+        FROM public.ygo_card_prices p
         WHERE p.card_id = ${id}
         LIMIT 1
       `)
@@ -143,7 +175,7 @@ async function getCard(param: string): Promise<{
     (
       await db.execute<BanlistRow>(sql`
         SELECT b.ban_tcg AS tcg, b.ban_ocg AS ocg, b.ban_goat AS goat
-        FROM ygo_card_banlist b
+        FROM public.ygo_card_banlist b
         WHERE b.card_id = ${id}
         LIMIT 1
       `)
@@ -153,7 +185,7 @@ async function getCard(param: string): Promise<{
     (
       await db.execute<SetEntry>(sql`
         SELECT s.set_name, s.set_code, s.set_rarity, s.set_price
-        FROM ygo_card_sets s
+        FROM public.ygo_card_sets s
         WHERE s.card_id = ${id}
         GROUP BY s.set_name, s.set_code, s.set_rarity, s.set_price
         ORDER BY s.set_name ASC, s.set_code ASC NULLS LAST
@@ -164,9 +196,7 @@ async function getCard(param: string): Promise<{
 }
 
 /* ---------------- SEO: Dynamic Metadata ---------------- */
-export async function generateMetadata(
-  { params }: { params: { id: string } }
-): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: { id: string } }): Promise<Metadata> {
   const id = decodeURIComponent(params.id ?? "").trim();
   if (!id) {
     const canonical = absUrl("/categories/yugioh/cards");
@@ -177,10 +207,16 @@ export async function generateMetadata(
     };
   }
 
-  // Load minimal card + image for SEO
   const card =
     (
-      await db.execute<{ id: string; name: string; type: string | null; race: string | null; attribute: string | null; archetype: string | null }>(sql`
+      await db.execute<{
+        id: string;
+        name: string;
+        type: string | null;
+        race: string | null;
+        attribute: string | null;
+        archetype: string | null;
+      }>(sql`
         SELECT
           c.card_id AS id,
           c.name,
@@ -188,7 +224,7 @@ export async function generateMetadata(
           c.race,
           c.attribute,
           c.archetype
-        FROM ygo_cards c
+        FROM public.ygo_cards c
         WHERE c.card_id = ${id}
         LIMIT 1
       `)
@@ -198,7 +234,7 @@ export async function generateMetadata(
     (
       await db.execute<{ large: string | null; small: string | null }>(sql`
         SELECT i.image_url AS large, i.image_url_small AS small
-        FROM ygo_card_images i
+        FROM public.ygo_card_images i
         WHERE i.card_id = ${id}
         ORDER BY (CASE WHEN i.image_url IS NOT NULL THEN 0 ELSE 1 END),
                  i.image_url_small NULLS LAST
@@ -208,7 +244,6 @@ export async function generateMetadata(
 
   const canonical = absUrl(`/categories/yugioh/cards/${encodeURIComponent(id)}`);
 
-  // If not found, return a safe non-indexable result (prevents “soft 404” garbage titles)
   if (!card) {
     return {
       title: `Yu-Gi-Oh! Card Not Found | ${site.name}`,
@@ -218,18 +253,18 @@ export async function generateMetadata(
     };
   }
 
-  const ogImage = (img?.large || img?.small || site.ogImage || "/og-image.png") ?? "/og-image.png";
+  const ogImage = absMaybe(img?.large || img?.small || site.ogImage || "/og-image.png");
   const title = `${card.name} — Yu-Gi-Oh! Prices & Collection | ${site.name}`;
 
-  const descBits = [
+  const description = [
     card.type ? `Type: ${card.type}` : null,
     card.attribute ? `Attribute: ${card.attribute}` : null,
     card.race ? `Race: ${card.race}` : null,
     card.archetype ? `Archetype: ${card.archetype}` : null,
     "Track prices, add to collection, and shop listings.",
-  ].filter(Boolean);
-
-  const description = descBits.join(" • ");
+  ]
+    .filter(Boolean)
+    .join(" • ");
 
   return {
     title,
@@ -240,6 +275,7 @@ export async function generateMetadata(
       url: canonical,
       title,
       description,
+      siteName: site.name,
       images: [{ url: ogImage }],
     },
     twitter: {
@@ -278,7 +314,13 @@ export default async function YugiohCardDetailPage({
     );
   }
 
+  const canonical = absUrl(`/categories/yugioh/cards/${encodeURIComponent(card.id)}`);
+  const baseCards = "/categories/yugioh/cards";
+  const baseSets = "/categories/yugioh/sets";
+
   const cover = bestImage(images);
+  const coverAbs = cover ? absMaybe(cover) : null;
+
   const firstSet = sets[0]?.set_name ?? null;
 
   // Amazon affiliate link (server-side)
@@ -292,8 +334,122 @@ export default async function YugiohCardDetailPage({
   const { userId } = await auth();
   const canSave = !!userId;
 
+  // SEO/JSON-LD Offer
+  const offerPrice = pickUsdPriceFromPrices(prices);
+
+  const breadcrumbsJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: absUrl("/") },
+      { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
+      { "@type": "ListItem", position: 3, name: "Yu-Gi-Oh!", item: absUrl(baseCards) },
+      ...(firstSet
+        ? [{ "@type": "ListItem", position: 4, name: firstSet, item: absUrl(`${baseSets}/${encodeURIComponent(firstSet)}`) }]
+        : []),
+      {
+        "@type": "ListItem",
+        position: firstSet ? 5 : 4,
+        name: card.name,
+        item: canonical,
+      },
+    ],
+  };
+
+  const productJsonLd: any = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    "@id": `${canonical}#product`,
+    name: card.name,
+    sku: card.id,
+    url: canonical,
+    image: coverAbs ? [coverAbs] : undefined,
+    category: "Yu-Gi-Oh! Trading Card",
+    brand: { "@type": "Brand", name: "Yu-Gi-Oh!" },
+    description: [
+      card.type ? `Type: ${card.type}` : null,
+      card.attribute ? `Attribute: ${card.attribute}` : null,
+      card.race ? `Race: ${card.race}` : null,
+      card.archetype ? `Archetype: ${card.archetype}` : null,
+    ]
+      .filter(Boolean)
+      .join(" • "),
+    additionalProperty: [
+      card.type ? { "@type": "PropertyValue", name: "Type", value: card.type } : null,
+      card.attribute ? { "@type": "PropertyValue", name: "Attribute", value: card.attribute } : null,
+      card.race ? { "@type": "PropertyValue", name: "Race", value: card.race } : null,
+      card.archetype ? { "@type": "PropertyValue", name: "Archetype", value: card.archetype } : null,
+      firstSet ? { "@type": "PropertyValue", name: "Set (example)", value: firstSet } : null,
+    ].filter(Boolean),
+  };
+
+  if (offerPrice != null) {
+    productJsonLd.offers = {
+      "@type": "Offer",
+      url: canonical,
+      priceCurrency: "USD",
+      price: offerPrice.toFixed(2),
+      availability: "https://schema.org/InStock",
+      itemCondition: "https://schema.org/UsedCondition",
+      seller: {
+        "@type": "Organization",
+        name: site.name ?? "Legendary Collectibles",
+        url: absBase(),
+      },
+    };
+  }
+
+  const webPageJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "@id": `${canonical}#webpage`,
+    url: canonical,
+    name: `${card.name} — Yu-Gi-Oh! Card`,
+    isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: absBase() },
+    primaryImageOfPage: coverAbs ? { "@type": "ImageObject", url: coverAbs } : undefined,
+    mainEntity: { "@id": `${canonical}#product` },
+  };
+
   return (
     <section className="space-y-8">
+      {/* JSON-LD */}
+      <Script
+        id="ygo-card-webpage-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
+      />
+      <Script
+        id="ygo-card-breadcrumbs-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }}
+      />
+      <Script
+        id="ygo-card-product-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
+      />
+
+      {/* Visible breadcrumbs */}
+      <nav className="text-xs text-white/70">
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href="/" className="hover:underline">Home</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories" className="hover:underline">Categories</Link>
+          <span className="text-white/40">/</span>
+          <Link href={baseCards} className="hover:underline">Yu-Gi-Oh!</Link>
+          {firstSet ? (
+            <>
+              <span className="text-white/40">/</span>
+              <Link href={`${baseSets}/${encodeURIComponent(firstSet)}`} className="hover:underline">
+                {firstSet}
+              </Link>
+            </>
+          ) : null}
+          <span className="text-white/40">/</span>
+          <span className="text-white/90">{card.name}</span>
+        </div>
+      </nav>
+
       {/* Quick search at the top */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <div className="mb-2 text-sm font-semibold text-white">Find another card</div>
@@ -317,9 +473,7 @@ export default async function YugiohCardDetailPage({
                   priority
                 />
               ) : (
-                <div className="absolute inset-0 grid place-items-center text-white/70">
-                  No image
-                </div>
+                <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
               )}
             </div>
           </div>
@@ -339,16 +493,19 @@ export default async function YugiohCardDetailPage({
                   {card.race ? <span className="mr-3">Race: {card.race}</span> : null}
                   {card.archetype ? <span>Archetype: {card.archetype}</span> : null}
                 </div>
+
+                {offerPrice != null ? (
+                  <div className="mt-2 text-sm text-white/80">
+                    <span className="text-white/60">Market reference:</span>{" "}
+                    <span className="font-semibold text-white">${offerPrice.toFixed(2)}</span>
+                  </div>
+                ) : null}
               </div>
             </div>
 
             {/* CTAs */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <CardEbayCTA
-                card={{ id: card.id, name: card.name, set_name: firstSet ?? null }}
-                game="Yu-Gi-Oh!"
-                variant="pill"
-              />
+              <CardEbayCTA card={{ id: card.id, name: card.name, set_name: firstSet ?? null }} game="Yu-Gi-Oh!" variant="pill" />
               <CardAmazonCTA url={amazonLink?.url} label={card.name} />
             </div>
 
@@ -391,7 +548,7 @@ export default async function YugiohCardDetailPage({
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-white">Market Prices</h2>
-              <div className="text-xs text-white/60">Native currency as provided</div>
+              <div className="text-xs text-white/60">USD reference (best available source)</div>
             </div>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -454,14 +611,11 @@ export default async function YugiohCardDetailPage({
 
       {/* Footer nav */}
       <div className="flex flex-wrap gap-4 text-sm">
-        <Link href="/categories/yugioh/cards" className="text-sky-300 hover:underline">
+        <Link href={baseCards} className="text-sky-300 hover:underline">
           ← Back to cards
         </Link>
         {firstSet && (
-          <Link
-            href={`/categories/yugioh/sets/${encodeURIComponent(firstSet)}`}
-            className="text-sky-300 hover:underline"
-          >
+          <Link href={`/categories/yugioh/sets/${encodeURIComponent(firstSet)}`} className="text-sky-300 hover:underline">
             ← Back to set
           </Link>
         )}
@@ -470,7 +624,7 @@ export default async function YugiohCardDetailPage({
   );
 }
 
-function PriceBox({ label, value }: { label: string; value: string | null | undefined }) {
+function PriceBox({ label, value }: { label: string; value: number | null | undefined }) {
   return (
     <div className="rounded-xl border border-white/10 bg-white/5 p-3">
       <div className="text-sm font-medium text-white">{label}</div>

@@ -1,24 +1,51 @@
 // src/app/categories/mtg/sets/page.tsx
 import "server-only";
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import Image from "next/image";
 import Script from "next/script";
+import { unstable_noStore as noStore } from "next/cache";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { CF_ACCOUNT_HASH } from "@/lib/cf";
-import type { Metadata } from "next";
 import { site } from "@/config/site";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+/* ---------------- SEO helpers ---------------- */
+function absUrl(path: string) {
+  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+function absMaybe(urlOrPath: string) {
+  if (!urlOrPath) return absUrl("/og-image.png");
+  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
+  return absUrl(urlOrPath);
+}
 
 export const metadata: Metadata = {
-  title: "MTG Sets | Legendary Collectibles",
+  title: `MTG Sets | ${site.name}`,
   description:
     "Browse Magic: The Gathering sets. Open a set to view the card gallery, track pricing, and manage your collection.",
-  alternates: {
-    canonical: `${site.url}/categories/mtg/sets`,
+  alternates: { canonical: absUrl("/categories/mtg/sets") },
+  openGraph: {
+    type: "website",
+    url: absUrl("/categories/mtg/sets"),
+    title: `MTG Sets | ${site.name}`,
+    description:
+      "Browse Magic: The Gathering sets by release date. Open any set to view the card gallery and pricing.",
+    siteName: site.name,
+    images: [{ url: absMaybe(site.ogImage || "/og-image.png") }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: `MTG Sets | ${site.name}`,
+    description:
+      "Browse Magic: The Gathering sets by release date. Open any set to view the card gallery and pricing.",
+    images: [absMaybe(site.ogImage || "/og-image.png")],
   },
 };
 
@@ -26,7 +53,7 @@ export const metadata: Metadata = {
 type SearchParams = Record<string, string | string[] | undefined>;
 
 type SetItem = {
-  id: string; // set_code (from cards)
+  id: string; // set_code (lowercase)
   name: string | null;
   set_type: string | null;
   released_at: string | null; // YYYY-MM-DD
@@ -49,35 +76,39 @@ const cfImageUrl = (id: string, variant = "categoryThumb") =>
   `https://imagedelivery.net/${CF_ACCOUNT_HASH}/${id}/${variant}`;
 
 /* ---------------- Helpers ---------------- */
-function firstVal(v?: string | string[]) {
-  return Array.isArray(v) ? v[0] : v;
+function lastVal(v?: string | string[]) {
+  if (Array.isArray(v)) return v[v.length - 1];
+  return v;
 }
 
-function parsePerPage(v?: string | string[]) {
-  const n = Number(firstVal(v) ?? 30);
-  return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 30;
+function parsePerPage(sp: SearchParams) {
+  const raw = lastVal(sp?.pp) ?? lastVal(sp?.perPage);
+  const n = Number(raw ?? 60);
+  return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 60;
 }
 
-function parsePage(v?: string | string[]) {
-  const n = Number(firstVal(v) ?? 1);
+function parsePage(sp: SearchParams) {
+  const raw = lastVal(sp?.p) ?? lastVal(sp?.page);
+  const n = Number(raw ?? 1);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
-function buildHref(base: string, qs: { q?: string | null; page?: number; perPage?: number }) {
+function buildHref(
+  base: string,
+  qs: { q?: string | null; p?: number; pp?: number },
+) {
   const p = new URLSearchParams();
   if (qs.q) p.set("q", qs.q);
-  if (qs.page) p.set("page", String(qs.page));
-  if (qs.perPage) p.set("perPage", String(qs.perPage));
+  p.set("p", String(qs.p ?? 1));
+  p.set("pp", String(qs.pp ?? 60));
   const s = p.toString();
   return s ? `${base}?${s}` : base;
 }
 
-function absUrl(path: string) {
-  return `${site.url}${path.startsWith("/") ? path : `/${path}`}`;
-}
-
 /* ---------------- DB ---------------- */
 async function getSets(opts: { q: string | null; offset: number; limit: number }) {
+  noStore();
+
   const like = opts.q ? `%${opts.q}%` : null;
 
   const where = like
@@ -164,9 +195,9 @@ export default async function MtgSetsIndex({
   const sp = await searchParams;
   const baseHref = CATEGORY.baseHref;
 
-  const q = (firstVal(sp?.q) ?? "").trim() || null;
-  const perPage = parsePerPage(sp?.perPage);
-  const reqPage = parsePage(sp?.page);
+  const q = (lastVal(sp?.q) ?? "").trim() || null;
+  const perPage = parsePerPage(sp);
+  const reqPage = parsePage(sp);
 
   const { rows, total } = await getSets({
     q,
@@ -209,7 +240,7 @@ export default async function MtgSetsIndex({
     name: "MTG Sets",
     description:
       "Browse Magic: The Gathering sets and open a set to view the card gallery and pricing.",
-    url: `${site.url}${CATEGORY.baseHref}`,
+    url: absUrl(CATEGORY.baseHref),
     isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: site.url },
     mainEntity: {
       "@type": "ItemList",
@@ -218,6 +249,8 @@ export default async function MtgSetsIndex({
       itemListElement: itemList,
     },
   };
+
+  const clearHref = buildHref(baseHref, { p: 1, pp: perPage });
 
   return (
     <section className="space-y-6">
@@ -260,20 +293,20 @@ export default async function MtgSetsIndex({
       {/* Top bar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-sm text-white/80">
-          Showing {from}-{to} of {total} sets{q ? " (filtered)" : ""}
+          Showing {from}-{to} of {total.toLocaleString()} sets{q ? " (filtered)" : ""}
         </div>
 
         <div className="flex flex-wrap gap-3">
           {/* Per page */}
           <form action={baseHref} method="get" className="flex items-center gap-2">
             {q ? <input type="hidden" name="q" value={q} /> : null}
-            <input type="hidden" name="page" value="1" />
-            <label htmlFor="perPage" className="sr-only">
+            <input type="hidden" name="p" value="1" />
+            <label htmlFor="pp" className="sr-only">
               Per page
             </label>
             <select
-              id="perPage"
-              name="perPage"
+              id="pp"
+              name="pp"
               defaultValue={String(perPage)}
               className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white"
             >
@@ -293,8 +326,8 @@ export default async function MtgSetsIndex({
 
           {/* Search */}
           <form action={baseHref} method="get" className="flex items-center gap-2">
-            <input type="hidden" name="perPage" value={String(perPage)} />
-            <input type="hidden" name="page" value="1" />
+            <input type="hidden" name="pp" value={String(perPage)} />
+            <input type="hidden" name="p" value="1" />
             <input
               name="q"
               defaultValue={q ?? ""}
@@ -310,7 +343,7 @@ export default async function MtgSetsIndex({
 
             {q ? (
               <Link
-                href={buildHref(baseHref, { perPage, page: 1 })}
+                href={clearHref}
                 className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-white hover:bg-white/15"
                 prefetch={false}
               >
@@ -380,7 +413,7 @@ export default async function MtgSetsIndex({
       {total > perPage ? (
         <nav className="mt-4 flex items-center justify-center gap-2 text-sm">
           <Link
-            href={buildHref(baseHref, { q, perPage, page: Math.max(1, page - 1) })}
+            href={buildHref(baseHref, { q, pp: perPage, p: Math.max(1, page - 1) })}
             aria-disabled={isFirst}
             className={`rounded-md border px-3 py-1 ${
               isFirst
@@ -397,7 +430,7 @@ export default async function MtgSetsIndex({
           </span>
 
           <Link
-            href={buildHref(baseHref, { q, perPage, page: Math.min(totalPages, page + 1) })}
+            href={buildHref(baseHref, { q, pp: perPage, p: Math.min(totalPages, page + 1) })}
             aria-disabled={isLast}
             className={`rounded-md border px-3 py-1 ${
               isLast
