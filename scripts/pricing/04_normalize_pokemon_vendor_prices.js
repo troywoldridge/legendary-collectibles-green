@@ -1,13 +1,24 @@
 #!/usr/bin/env node
+/* eslint-disable no-console */
 /**
- * Normalize Pokemon vendor price history into market_price_snapshots
+ * scripts/pricing/04_normalize_pokemon_vendor_prices.js
+ *
+ * Normalize Pokemon VENDOR PRICE HISTORY into market_price_snapshots
  *
  * Reads:
- *  - tcg_card_prices_tcgplayer_history
- *  - tcg_card_prices_cardmarket_history
+ *  - tcg_card_prices_tcgplayer_history (HYBRID: legacy columns + row-style variant rows)
+ *  - tcg_card_prices_cardmarket_history (column-style)
  *
  * Joins to market_items via:
- *  market_items(game='pokemon', canonical_source='tcgdex', canonical_id = tcg_cards.id)
+ *  market_items(game='pokemon', canonical_source='tcgdex', canonical_id = <card_id>)
+ *
+ * Writes:
+ *  market_price_snapshots
+ *
+ * Usage:
+ *  node scripts/pricing/04_normalize_pokemon_vendor_prices.js
+ *  node scripts/pricing/04_normalize_pokemon_vendor_prices.js --date 2026-01-01
+ *  node scripts/pricing/04_normalize_pokemon_vendor_prices.js --all-dates --since 2025-12-01
  *
  * Env:
  *  DATABASE_URL=postgres://...
@@ -15,143 +26,287 @@
 
 const pg = require("pg");
 
-async function getClient() {
-  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL not set");
-  const c = new pg.Client({ connectionString: process.env.DATABASE_URL });
-  await c.connect();
-  return c;
-}
-
-async function getColumns(client, table) {
-  const { rows } = await client.query(
-    `
-    SELECT column_name, data_type
-    FROM information_schema.columns
-    WHERE table_schema='public' AND table_name=$1
-    ORDER BY ordinal_position
-  `,
-    [table]
-  );
-  return rows; // [{column_name, data_type}, ...]
-}
-
-function pickFirst(set, candidates) {
-  for (const c of candidates) if (set.has(c)) return c;
-  return null;
-}
-
-function isDateType(dt) {
-  const t = (dt || "").toLowerCase();
-  return t === "date" || t.includes("timestamp");
-}
-
-function chooseDateColumn(cols) {
-  // Prefer columns that are clearly "as of" / "priced at" / "snapshot"
-  const preferredNames = [
-    "as_of_date",
-    "as_of",
-    "price_date",
-    "priced_at",
-    "snapshot_date",
-    "snapshot_at",
-    "captured_at",
-    "collected_at",
-    "observed_at",
-    "recorded_at",
-    "created_at",
-    "updated_at",
-    "date",
-    "day",
-  ];
-
-  const byName = new Map(cols.map((c) => [c.column_name, c.data_type]));
-  const nameSet = new Set(byName.keys());
-
-  for (const n of preferredNames) {
-    if (nameSet.has(n) && isDateType(byName.get(n))) return n;
+function parseArgs(argv) {
+  const args = { _: [] };
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("--")) {
+      const key = a.slice(2);
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) args[key] = true;
+      else {
+        args[key] = next;
+        i++;
+      }
+    } else args._.push(a);
   }
-
-  // Fallback: first date/timestamp column we can find
-  for (const c of cols) {
-    if (isDateType(c.data_type)) return c.column_name;
-  }
-
-  return null;
+  return args;
 }
 
-function priceTypeFor(col) {
-  const c = col.toLowerCase();
-  if (c.includes("low")) return "low";
-  if (c.includes("mid")) return "mid";
-  if (c.includes("high")) return "high";
-  if (c.includes("trend")) return "trend";
-  if (c.includes("market")) return "market";
+function mustEnv(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} not set`);
+  return v;
+}
+
+function quoteIdent(name) {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new Error(`Unsafe identifier: ${name}`);
+  return `"${name}"`;
+}
+
+function todayYmd() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function priceTypeFromMetricCol(col) {
+  if (col === "market_price") return "market";
+  if (col === "low_price") return "low";
+  if (col === "mid_price") return "mid";
+  if (col === "high_price") return "high";
   return col;
 }
 
-async function normalizeOneTable(client, table, sourceName) {
-  const cols = await getColumns(client, table);
-  const colSet = new Set(cols.map((c) => c.column_name));
+function priceTypeFromCardmarketCol(col) {
+  const c = col.toLowerCase();
+  if (c.includes("trend")) return "trend";
+  if (c.includes("low")) return "low";
+  if (c === "avg1" || c.includes("avg1")) return "avg_1d";
+  if (c === "avg7" || c.includes("avg7")) return "avg_7d";
+  if (c === "avg30" || c.includes("avg30")) return "avg_30d";
+  if (c.includes("suggested")) return "suggested";
+  // average_sell_price, reverse_holo_sell etc -> treat as market
+  return "market";
+}
 
-  const cardIdCol = pickFirst(colSet, ["card_id", "cardid", "tcg_card_id", "tcgcard_id", "id"]);
-  if (!cardIdCol) throw new Error(`${table}: cannot find card id column (tried card_id/cardid/tcg_card_id/id)`);
+function conditionFromLegacyTcgplayerCol(col) {
+  // legacy tcgplayer history columns represent “variant”
+  if (col === "normal") return "normal";
+  if (col === "holofoil") return "holofoil";
+  if (col === "reverse_holofoil") return "reverse_holofoil";
+  if (col === "first_edition_holofoil") return "first_edition_holofoil";
+  if (col === "first_edition_normal") return "first_edition_normal";
+  return null;
+}
 
-  const dateCol = chooseDateColumn(cols);
-  if (!dateCol) {
-    throw new Error(`${table}: cannot find any date/timestamp column. Add one or tell me its name.`);
+function conditionFromCardmarketCol(col) {
+  const c = col.toLowerCase();
+  // reverse holo columns should carry condition=reverse_holofoil
+  if (c.includes("reverse_holo")) return "reverse_holofoil";
+  return null; // everything else: condition null
+}
+
+async function normalizeTcgplayerHistory(client, opts) {
+  const table = "tcg_card_prices_tcgplayer_history";
+  const qTable = quoteIdent(table);
+
+  const allDates = !!opts.allDates;
+  const asOfDate = opts.date || todayYmd();
+  const since = opts.since || null;
+
+  const where = [];
+  const params = [];
+
+  // date filter uses source_updated_at when available, else captured_at
+  // but your schema has source_updated_at; we’ll key off that primarily, fallback to captured_at
+  const dateExpr = `COALESCE(h.source_updated_at, h.captured_at)::date`;
+
+  if (!allDates) {
+    params.push(asOfDate);
+    where.push(`${dateExpr} = $${params.length}::date`);
+  }
+  if (since) {
+    params.push(since);
+    where.push(`${dateExpr} >= $${params.length}::date`);
   }
 
-  // Price-ish columns: take anything that looks like a price (but exclude ids + timestamps)
-  const excluded = new Set([cardIdCol, dateCol, "id", "cardmarket_id", "tcgplayer_id", "oracle_id"]);
-  const priceCols = cols
-    .map((c) => c.column_name)
-    .filter((c) => !excluded.has(c))
-    .filter((c) => /price|market|low|mid|high|trend|avg|foil|etched/i.test(c));
+  const whereSql = where.length ? `AND ${where.join(" AND ")}` : "";
 
-  if (priceCols.length === 0) {
-    throw new Error(
-      `${table}: no recognizable price columns. I looked for columns containing price/market/low/mid/high/trend/avg/foil/etched.`
-    );
-  }
+  console.log(`\n🔎 ${table} (tcgplayer)`);
+  console.log(`   mode: HYBRID (row-style + legacy)`);
+  console.log(
+    `   filter: ${
+      allDates ? (since ? `ALL dates since ${since}` : "ALL dates") : `date=${asOfDate}`
+    }`,
+  );
 
-  console.log(`\n🔎 ${table}`);
-  console.log(`   card id col: ${cardIdCol}`);
-  console.log(`   date col:    ${dateCol}`);
-  console.log(`   price cols:  ${priceCols.slice(0, 12).join(", ")}${priceCols.length > 12 ? " …" : ""}`);
+  // --- PART A: Row-style rows (variant_type + low/mid/high/market)
+  const metricCols = ["low_price", "mid_price", "high_price", "market_price"];
+  const rowStyleUnions = metricCols
+    .map((mc) => {
+      const pt = priceTypeFromMetricCol(mc);
+      return `
+        SELECT
+          mi.id AS market_item_id,
+          'tcgplayer'::text AS source,
+          ${dateExpr} AS as_of_date,
+          COALESCE(h.currency::text, 'USD')::text AS currency,
+          '${pt}'::text AS price_type,
+          NULLIF(h.variant_type::text, '')::text AS condition,
+          h.${quoteIdent(mc)} AS raw_value,
+          '${mc}'::text AS raw_col,
+          'row_style'::text AS mode
+        FROM public.${qTable} h
+        JOIN public.market_items mi
+          ON mi.game='pokemon'
+         AND mi.canonical_source='tcgdex'
+         AND mi.canonical_id = h.card_id::text
+        WHERE h.card_id IS NOT NULL
+          AND (h.source_updated_at IS NOT NULL OR h.captured_at IS NOT NULL)
+          AND h.variant_type IS NOT NULL
+          AND h.${quoteIdent(mc)} IS NOT NULL
+          ${whereSql}
+      `;
+    })
+    .join("\nUNION ALL\n");
 
-  // Build UNION ALL rows so we can insert each price column as a normalized snapshot row.
-  const unions = priceCols
-    .map(
-      (col) => `
-      SELECT
-        market_item_id,
-        '${sourceName}'::text AS source,
-        as_of_date,
-        'USD'::text AS currency,
-        '${priceTypeFor(col)}'::text AS price_type,
-        NULL::text AS condition,
-        ${col} AS raw_value,
-        '${col}'::text AS raw_col
-      FROM src
-    `
-    )
-    .join("UNION ALL");
+  // --- PART B: Legacy rows (variant_type IS NULL) using legacy columns as “market” snapshots
+  const legacyCols = [
+    "normal",
+    "holofoil",
+    "reverse_holofoil",
+    "first_edition_holofoil",
+    "first_edition_normal",
+  ];
+
+  const legacyUnions = legacyCols
+    .map((lc) => {
+      const cond = conditionFromLegacyTcgplayerCol(lc);
+      return `
+        SELECT
+          mi.id AS market_item_id,
+          'tcgplayer'::text AS source,
+          ${dateExpr} AS as_of_date,
+          COALESCE(h.currency::text, 'USD')::text AS currency,
+          'market'::text AS price_type,
+          '${cond}'::text AS condition,
+          h.${quoteIdent(lc)} AS raw_value,
+          '${lc}'::text AS raw_col,
+          'legacy_cols'::text AS mode
+        FROM public.${qTable} h
+        JOIN public.market_items mi
+          ON mi.game='pokemon'
+         AND mi.canonical_source='tcgdex'
+         AND mi.canonical_id = h.card_id::text
+        WHERE h.card_id IS NOT NULL
+          AND (h.source_updated_at IS NOT NULL OR h.captured_at IS NOT NULL)
+          AND h.variant_type IS NULL
+          AND h.${quoteIdent(lc)} IS NOT NULL
+          ${whereSql}
+      `;
+    })
+    .join("\nUNION ALL\n");
 
   const sql = `
-    WITH src AS (
-      SELECT
-        mi.id AS market_item_id,
-        -- coerce timestamp/date into date
-        (h.${dateCol})::date AS as_of_date,
-        h.*
-      FROM public.${table} h
-      JOIN public.market_items mi
-        ON mi.game='pokemon'
-       AND mi.canonical_source='tcgdex'
-       AND mi.canonical_id = h.${cardIdCol}::text
-      WHERE h.${dateCol} IS NOT NULL
-    ),
-    rows AS (
+    WITH rows AS (
+      ${rowStyleUnions}
+      UNION ALL
+      ${legacyUnions}
+    )
+    INSERT INTO public.market_price_snapshots
+      (market_item_id, source, as_of_date, currency, price_type, condition, value_cents, raw)
+    SELECT
+      market_item_id,
+      source,
+      as_of_date,
+      currency,
+      price_type,
+      condition,
+      (NULLIF(regexp_replace(raw_value::text, '[^0-9.\\-]', '', 'g'), '')::numeric * 100)::integer AS value_cents,
+      jsonb_build_object(
+        'table', '${table}',
+        'column', raw_col,
+        'raw_value', raw_value,
+        'mode', mode
+      )
+    FROM rows
+    WHERE NULLIF(regexp_replace(raw_value::text, '[^0-9.\\-]', '', 'g'), '') IS NOT NULL
+    ON CONFLICT DO NOTHING
+  `;
+
+  const res = await client.query(sql, params);
+  console.log(`✅ inserted ${res.rowCount} snapshot rows from ${table}`);
+  return res.rowCount || 0;
+}
+
+async function normalizeCardmarketHistory(client, opts) {
+  const table = "tcg_card_prices_cardmarket_history";
+  const qTable = quoteIdent(table);
+
+  const allDates = !!opts.allDates;
+  const asOfDate = opts.date || todayYmd();
+  const since = opts.since || null;
+
+  const where = [];
+  const params = [];
+
+  const dateExpr = `COALESCE(h.source_updated_at, h.captured_at)::date`;
+
+  if (!allDates) {
+    params.push(asOfDate);
+    where.push(`${dateExpr} = $${params.length}::date`);
+  }
+  if (since) {
+    params.push(since);
+    where.push(`${dateExpr} >= $${params.length}::date`);
+  }
+
+  const whereSql = where.length ? `AND ${where.join(" AND ")}` : "";
+
+  console.log(`\n🔎 ${table} (cardmarket)`);
+  console.log(`   mode: column-style`);
+  console.log(
+    `   filter: ${
+      allDates ? (since ? `ALL dates since ${since}` : "ALL dates") : `date=${asOfDate}`
+    }`,
+  );
+
+  const priceCols = [
+    "average_sell_price",
+    "low_price",
+    "trend_price",
+    "german_pro_low",
+    "suggested_price",
+    "reverse_holo_sell",
+    "reverse_holo_low",
+    "reverse_holo_trend",
+    "low_price_ex_plus",
+    "avg1",
+    "avg7",
+    "avg30",
+    "reverse_holo_avg1",
+    "reverse_holo_avg7",
+    "reverse_holo_avg30",
+  ];
+
+  const unions = priceCols
+    .map((col) => {
+      const pt = priceTypeFromCardmarketCol(col);
+      const cond = conditionFromCardmarketCol(col);
+      return `
+        SELECT
+          mi.id AS market_item_id,
+          'cardmarket'::text AS source,
+          ${dateExpr} AS as_of_date,
+          'USD'::text AS currency,
+          '${pt}'::text AS price_type,
+          ${cond ? `'${cond}'::text` : "NULL::text"} AS condition,
+          h.${quoteIdent(col)} AS raw_value,
+          '${col}'::text AS raw_col
+        FROM public.${qTable} h
+        JOIN public.market_items mi
+          ON mi.game='pokemon'
+         AND mi.canonical_source='tcgdex'
+         AND mi.canonical_id = h.card_id::text
+        WHERE h.card_id IS NOT NULL
+          AND (h.source_updated_at IS NOT NULL OR h.captured_at IS NOT NULL)
+          AND h.${quoteIdent(col)} IS NOT NULL
+          ${whereSql}
+      `;
+    })
+    .join("\nUNION ALL\n");
+
+  const sql = `
+    WITH rows AS (
       ${unions}
     )
     INSERT INTO public.market_price_snapshots
@@ -163,34 +318,47 @@ async function normalizeOneTable(client, table, sourceName) {
       currency,
       price_type,
       condition,
-      -- parse numeric from raw_value (handles "$12.34", "12.34", 12.34, "1,234.56")
       (NULLIF(regexp_replace(raw_value::text, '[^0-9.\\-]', '', 'g'), '')::numeric * 100)::integer AS value_cents,
-      jsonb_build_object('table', $1::text, 'column', raw_col, 'raw_value', raw_value)
+      jsonb_build_object('table','${table}','column',raw_col,'raw_value',raw_value)
     FROM rows
-    WHERE raw_value IS NOT NULL
-      AND NULLIF(regexp_replace(raw_value::text, '[^0-9.\\-]', '', 'g'), '') IS NOT NULL
+    WHERE NULLIF(regexp_replace(raw_value::text, '[^0-9.\\-]', '', 'g'), '') IS NOT NULL
     ON CONFLICT DO NOTHING
   `;
 
-  const res = await client.query(sql, [table]);
+  const res = await client.query(sql, params);
   console.log(`✅ inserted ${res.rowCount} snapshot rows from ${table}`);
+  return res.rowCount || 0;
 }
 
 async function main() {
-  const client = await getClient();
+  const args = parseArgs(process.argv);
+  const DATABASE_URL = mustEnv("DATABASE_URL");
+
+  const opts = {
+    allDates: !!args["all-dates"],
+    date: args.date ? String(args.date) : null,
+    since: args.since ? String(args.since) : null,
+  };
+
+  if (!opts.allDates && !opts.date) opts.date = todayYmd();
+
+  const client = new pg.Client({ connectionString: DATABASE_URL });
+  await client.connect();
+
   try {
-    console.log("📥 Normalizing Pokémon price history into market_price_snapshots…");
+    console.log("📥 Normalizing Pokémon HISTORY vendor prices into market_price_snapshots…");
 
-    await normalizeOneTable(client, "tcg_card_prices_tcgplayer_history", "tcgplayer");
-    await normalizeOneTable(client, "tcg_card_prices_cardmarket_history", "cardmarket");
+    let total = 0;
+    total += await normalizeTcgplayerHistory(client, opts);
+    total += await normalizeCardmarketHistory(client, opts);
 
-    console.log("\n✅ Done.");
+    console.log(`\n✅ Done. Inserted ${total} total snapshot rows.`);
   } finally {
     await client.end();
   }
 }
 
 main().catch((e) => {
-  console.error("❌ Error:", e.message);
+  console.error("❌ Error:", e?.stack || e?.message || e);
   process.exit(1);
 });

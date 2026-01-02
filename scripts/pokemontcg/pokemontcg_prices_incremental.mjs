@@ -267,25 +267,16 @@ async function upsertCardmarketNow(client, rows) {
 async function insertTcgplayerHistory(client, rows) {
   if (!rows.length) return 0;
 
-  // best-effort dedupe: only insert if (card_id, source_updated_at) not already present
-  // NOTE: this is still fast at small daily volumes.
-  let inserted = 0;
+  // Filter bad rows (no timestamp)
+  const clean = rows.filter((r) => r.card_id && r.source_updated_at);
+  if (!clean.length) return 0;
 
-  for (const r of rows) {
-    const res = await client.query(
-      `
-      INSERT INTO tcg_card_prices_tcgplayer_history
-        (card_id, source_updated_at, currency, normal, holofoil, reverse_holofoil, first_edition_holofoil, first_edition_normal)
-      SELECT
-        $1, $2::timestamptz, $3, $4::numeric, $5::numeric, $6::numeric, $7::numeric, $8::numeric
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM tcg_card_prices_tcgplayer_history h
-        WHERE h.card_id = $1
-          AND h.source_updated_at IS NOT DISTINCT FROM $2::timestamptz
-      )
-      `,
-      [
+  const cols = 8;
+  const params = [];
+  const values = clean
+    .map((r, idx) => {
+      const b = idx * cols;
+      params.push(
         r.card_id,
         r.source_updated_at,
         r.currency,
@@ -293,41 +284,38 @@ async function insertTcgplayerHistory(client, rows) {
         r.holofoil,
         r.reverse_holofoil,
         r.first_edition_holofoil,
-        r.first_edition_normal,
-      ]
-    );
-    inserted += res.rowCount || 0;
-  }
+        r.first_edition_normal
+      );
+      return `($${b + 1},$${b + 2}::timestamptz,$${b + 3},$${b + 4}::numeric,$${b + 5}::numeric,$${b + 6}::numeric,$${b + 7}::numeric,$${b + 8}::numeric)`;
+    })
+    .join(",");
 
-  return inserted;
+  const res = await client.query(
+    `
+    INSERT INTO public.tcg_card_prices_tcgplayer_history
+      (card_id, source_updated_at, currency, normal, holofoil, reverse_holofoil, first_edition_holofoil, first_edition_normal)
+    VALUES ${values}
+    ON CONFLICT (card_id, source_updated_at) DO NOTHING
+    `,
+    params
+  );
+
+  return res.rowCount || 0;
 }
+
 
 async function insertCardmarketHistory(client, rows) {
   if (!rows.length) return 0;
 
-  let inserted = 0;
+  const clean = rows.filter((r) => r.card_id && r.source_updated_at);
+  if (!clean.length) return 0;
 
-  for (const r of rows) {
-    const res = await client.query(
-      `
-      INSERT INTO tcg_card_prices_cardmarket_history
-        (card_id, source_updated_at,
-         average_sell_price, low_price, trend_price, german_pro_low, suggested_price,
-         reverse_holo_sell, reverse_holo_low, reverse_holo_trend, low_price_ex_plus,
-         avg1, avg7, avg30, reverse_holo_avg1, reverse_holo_avg7, reverse_holo_avg30)
-      SELECT
-        $1, $2::timestamptz,
-        $3::numeric, $4::numeric, $5::numeric, $6::numeric, $7::numeric,
-        $8::numeric, $9::numeric, $10::numeric, $11::numeric,
-        $12::numeric, $13::numeric, $14::numeric, $15::numeric, $16::numeric, $17::numeric
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM tcg_card_prices_cardmarket_history h
-        WHERE h.card_id = $1
-          AND h.source_updated_at IS NOT DISTINCT FROM $2::timestamptz
-      )
-      `,
-      [
+  const cols = 17;
+  const params = [];
+  const values = clean
+    .map((r, idx) => {
+      const b = idx * cols;
+      params.push(
         r.card_id,
         r.source_updated_at,
         r.average_sell_price,
@@ -344,14 +332,28 @@ async function insertCardmarketHistory(client, rows) {
         r.avg30,
         r.reverse_holo_avg1,
         r.reverse_holo_avg7,
-        r.reverse_holo_avg30,
-      ]
-    );
-    inserted += res.rowCount || 0;
-  }
+        r.reverse_holo_avg30
+      );
+      return `($${b + 1},$${b + 2}::timestamptz,$${b + 3}::numeric,$${b + 4}::numeric,$${b + 5}::numeric,$${b + 6}::numeric,$${b + 7}::numeric,$${b + 8}::numeric,$${b + 9}::numeric,$${b + 10}::numeric,$${b + 11}::numeric,$${b + 12}::numeric,$${b + 13}::numeric,$${b + 14}::numeric,$${b + 15}::numeric,$${b + 16}::numeric,$${b + 17}::numeric)`;
+    })
+    .join(",");
 
-  return inserted;
+  const res = await client.query(
+    `
+    INSERT INTO public.tcg_card_prices_cardmarket_history
+      (card_id, source_updated_at,
+       average_sell_price, low_price, trend_price, german_pro_low, suggested_price,
+       reverse_holo_sell, reverse_holo_low, reverse_holo_trend, low_price_ex_plus,
+       avg1, avg7, avg30, reverse_holo_avg1, reverse_holo_avg7, reverse_holo_avg30)
+    VALUES ${values}
+    ON CONFLICT (card_id, source_updated_at) DO NOTHING
+    `,
+    params
+  );
+
+  return res.rowCount || 0;
 }
+
 
 /* ---------------- Transform helpers ---------------- */
 
@@ -472,7 +474,7 @@ async function runForQuery({ client, q, label }) {
   let totalFetched = 0;
 
   // batch upserts to keep it fast
-  const NOW_BATCH = 800;
+  const NOW_BATCH = 5000;
 
   let tcgNow = [];
   let cmNow = [];

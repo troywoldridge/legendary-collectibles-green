@@ -18,6 +18,9 @@ import { site } from "@/config/site";
 import type { PokemonVariants } from "@/components/pokemon/VariantChips";
 import VariantPickerAdd from "@/components/pokemon/VariantPickerAdd";
 
+import PriceAlertBell from "@/components/alerts/PriceAlertBell";
+import { getUserPlan, canUsePriceAlerts } from "@/lib/plans";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -75,6 +78,11 @@ type CardRow = {
   cardmarket_updated_at: string | null;
 };
 
+type MarketItemRow = {
+  id: string; // uuid
+  display_name: string | null;
+};
+
 /* ------------------------------------------------
    SEO: Dynamic metadata (per card)
 ------------------------------------------------- */
@@ -113,7 +121,7 @@ async function getCardMeta(cardId: string): Promise<CardMetaRow | null> {
 function absBase() {
   return (
     process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
-    site?.url ||
+    (site?.url ? site.url.replace(/\/+$/, "") : "") ||
     "https://legendary-collectibles.com"
   );
 }
@@ -138,7 +146,7 @@ export async function generateMetadata({
   const card = await getCardMeta(raw);
 
   const canonical = absUrl(
-    `/categories/pokemon/cards/${encodeURIComponent(card?.id ?? raw)}`,
+    `/categories/pokemon/cards/${encodeURIComponent(card?.id ?? raw)}`
   );
 
   if (!card) {
@@ -166,7 +174,7 @@ export async function generateMetadata({
     .concat(".");
 
   const ogImage = absMaybe(
-    card.large_image || card.small_image || site.ogImage || "/og-image.png",
+    card.large_image || card.small_image || site.ogImage || "/og-image.png"
   );
 
   return {
@@ -250,8 +258,6 @@ function normalizeCurrency(cur?: string | null): "USD" | "EUR" | string {
 }
 
 function parseUpdatedAtToIso(updatedAt?: string | null): string | null {
-  // Your column is TEXT, and could be various formats.
-  // We'll try a very safe parse: accept YYYY-MM-DD only.
   const s = (updatedAt ?? "").trim();
   if (!s) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
@@ -286,13 +292,12 @@ function pickBestOffer(rows: OfferRow[]): {
     const mid = toNum(r.mid_price);
     const low = toNum(r.low_price);
     const high = toNum(r.high_price);
-    const price = (market ?? mid ?? low ?? high ?? null);
+    const price = market ?? mid ?? low ?? high ?? null;
     return { r, price };
   });
 
-  // Prefer a "normal" variant if it has a usable price
   const normal = withNum.find(
-    (x) => (x.r.variant_type ?? "").toLowerCase() === "normal" && x.price != null && x.price > 0,
+    (x) => (x.r.variant_type ?? "").toLowerCase() === "normal" && x.price != null && x.price > 0
   );
   const any = withNum.find((x) => x.price != null && x.price > 0) ?? null;
 
@@ -308,10 +313,20 @@ function pickBestOffer(rows: OfferRow[]): {
   };
 }
 
-/**
- * ✅ Source of truth for Pokémon: tcg_card_prices_tcgplayer
- * We fetch all variant rows for card_id and select the best representative Offer.
- */
+async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | null> {
+  return (
+    (
+      await db.execute<MarketItemRow>(sql`
+        SELECT id, display_name
+        FROM public.market_items
+        WHERE game = 'pokemon'
+          AND canonical_id::text = ${cardId}::text
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null
+  );
+}
+
 async function getSchemaOfferFromTcgplayer(cardId: string) {
   const rows =
     (
@@ -488,6 +503,7 @@ export default async function PokemonCardDetailPage({
   const display = readDisplay(sp);
   const id = decodeURIComponent(rawId ?? "").trim();
 
+  // Always needed:
   const [card, variants, offer] = await Promise.all([
     getCardById(id),
     getVariantsByCardId(id),
@@ -523,16 +539,16 @@ export default async function PokemonCardDetailPage({
     );
   }
 
+  const cardName = (card.name ?? card.id).trim();
   const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card.id)}`);
   const cover = bestImage(card);
   const coverAbs = cover ? absMaybe(cover) : null;
 
   const pricesHref = `/categories/pokemon/cards/${encodeURIComponent(card.id)}/prices`;
 
-    // Prefer set_id for URLs; only fall back to set_name when it's non-empty
+  // Prefer set_id for URLs; only fall back to set_name when it's non-empty
   const setSlug = (card.set_id ?? "").trim() || (card.set_name ?? "").trim();
   const setHref = setSlug ? `/categories/pokemon/sets/${encodeURIComponent(setSlug)}` : null;
-
 
   const ownedCounts = await getOwnedVariantCounts(userId ?? null, card.id);
 
@@ -541,10 +557,27 @@ export default async function PokemonCardDetailPage({
   const retreat = parseTextList(card.retreat_cost);
   const pokedexNums = parseTextList(card.national_pokedex_numbers);
 
+  // Alerts: only fetch plan + market item if signed-in
+  let canUseAlerts = false;
+  let marketItemId: string | null = null;
+
+  if (userId) {
+    const plan = await getUserPlan(userId);
+    canUseAlerts = canUsePriceAlerts(plan);
+
+    if (canUseAlerts) {
+      const marketItem = await getMarketItemForPokemon(card.id);
+      marketItemId = marketItem?.id ?? null;
+    }
+  }
+
+  const marketUsd =
+    offer.price != null && Number.isFinite(offer.price) && offer.price > 0 ? offer.price : null;
+
   // ---------------------------
   // JSON-LD: Breadcrumbs + Product (+Offer if price exists)
   // ---------------------------
-  const productName = (card.name ?? card.id).trim();
+  const productName = cardName;
   const sku = card.id;
 
   const breadcrumbsJsonLd = {
@@ -596,7 +629,7 @@ export default async function PokemonCardDetailPage({
   };
 
   if (offer.price != null && offer.price > 0) {
-    const offerJson: any = {
+    productJsonLd.offers = {
       "@type": "Offer",
       url: canonical,
       priceCurrency: offer.currency || "USD",
@@ -609,18 +642,7 @@ export default async function PokemonCardDetailPage({
         url: absBase(),
       },
     };
-
-    // optional: if updated_at is parseable, set a safe validity horizon
-    // (helps crawlers understand recency without lying)
-    if (offer.updatedAtIso) {
-      offerJson.priceValidUntil = offer.updatedAtIso;
-    }
-
-    productJsonLd.offers = offerJson;
   }
-
-  // empty-safe AggregateRating (only add when you have real values)
-  // productJsonLd.aggregateRating = { ... }  // later when you actually have them
 
   const webPageJsonLd = {
     "@context": "https://schema.org",
@@ -769,10 +791,44 @@ export default async function PokemonCardDetailPage({
                   canSave={canSave}
                   game="pokemon"
                   cardId={card.id}
-                  cardName={card.name ?? card.id}
+                  cardName={cardName}
                   setName={card.set_name ?? undefined}
                   imageUrl={cover ?? undefined}
                 />
+
+                {/* ✅ Pro-gated alerts */}
+                {userId ? (
+                  canUseAlerts ? (
+                    marketItemId ? (
+                      <PriceAlertBell
+                        game="pokemon"
+                        marketItemId={marketItemId}
+                        label={cardName}
+                        currentUsd={marketUsd}
+                      />
+                    ) : (
+                      <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
+                        🔔 Alerts unavailable
+                      </span>
+                    )
+                  ) : (
+                    <Link
+                      href="/pricing"
+                      className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                      prefetch={false}
+                    >
+                      🔔 Price alerts (Pro)
+                    </Link>
+                  )
+                ) : (
+                  <Link
+                    href="/sign-in"
+                    className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                    prefetch={false}
+                  >
+                    🔔 Sign in for alerts
+                  </Link>
+                )}
 
                 <Link href={pricesHref} className="text-sky-300 hover:underline">
                   View prices →

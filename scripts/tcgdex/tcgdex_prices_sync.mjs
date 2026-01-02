@@ -3,28 +3,32 @@
 /**
  * scripts/tcgdex/tcgdex_variant_prices_sync.mjs
  *
- * Pull ONLY variant prices from TCGdex for all Pokémon cards and upsert into:
- *   public.tcg_card_prices_tcgplayer (card_id, variant_type) unique
+ * Pull ONLY variant prices from TCGdex and upsert into tcg_card_prices_tcgplayer.
  *
- * We intentionally skip "normal" because PokemonTCG already supplies normal pricing.
- *
- * Env:
- *   DATABASE_URL (required)
+ * ✅ Safe concurrency via pg.Pool (no shared Client).
+ * ✅ Schema-aware:
+ *    - If table has column "variant_type": uses multi-row schema (card_id, variant_type) unique
+ *    - Else: uses legacy single-row schema (card_id unique) and only updates holofoil/reverse_holofoil
+ * ✅ Skips "normal" on purpose.
  *
  * Usage:
  *   node scripts/tcgdex/tcgdex_variant_prices_sync.mjs
  *   node scripts/tcgdex/tcgdex_variant_prices_sync.mjs --limit 5000
- *   node scripts/tcgdex/tcgdex_variant_prices_sync.mjs --concurrency 8 .... node scripts/tcgdex/tcgdex_prices_sync.mjs --concurrency 6
+ *   node scripts/tcgdex/tcgdex_variant_prices_sync.mjs --concurrency 8
+ *   node scripts/tcgdex/tcgdex_variant_prices_sync.mjs --batch 250
+ *
+ * Env:
+ *   DATABASE_URL (required)
  */
 
 import "dotenv/config";
 import pg from "pg";
 
-const { Client } = pg;
+const { Pool } = pg;
 
 const DB_URL = process.env.DATABASE_URL;
 if (!DB_URL) {
-  console.error("Missing DATABASE_URL");
+  console.error("❌ Missing DATABASE_URL");
   process.exit(1);
 }
 
@@ -41,46 +45,24 @@ const BATCH = Math.max(50, Math.min(2000, Number(argValue("--batch", "500")) || 
 
 const API_BASE = "https://api.tcgdex.net/v2/en/cards";
 
-/**
- * Map TCGdex pricing keys -> your DB variant_type strings.
- * We skip normal on purpose.
- */
-function mapKeyToVariantType(key) {
-  const k = String(key || "").trim().toLowerCase();
-
-  // TCGdex commonly shows: normal, reverse, holo (and sometimes promo/firstEdition variants)
-  if (k === "reverse") return "reverse_holofoil";
-  if (k === "holo" || k === "holofoil") return "holofoil";
-
-  // If tcgdex ever returns these keys, map them too:
-  if (k === "firstedition" || k === "first_edition") return "first_edition";
-  if (k === "promo" || k === "wpromo" || k === "w_promo") return "promo";
-
-  // Ignore "normal" and unknown keys for this script
-  return null;
-}
-
-function numOrNull(v) {
-  if (v === null || v === undefined) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchJsonWithRetry(url, tries = 4) {
+async function fetchJsonWithRetry(url, tries = 6) {
   let lastErr = null;
   for (let i = 0; i < tries; i++) {
     try {
-      const res = await fetch(url, {
-        headers: { "accept": "application/json" },
-      });
+      const res = await fetch(url, { headers: { accept: "application/json" } });
 
       if (res.status === 429) {
-        // rate limit
-        const wait = 750 + i * 500;
+        const wait = 800 + i * 600;
+        await sleep(wait);
+        continue;
+      }
+
+      if (res.status >= 500) {
+        const wait = 600 + i * 500;
         await sleep(wait);
         continue;
       }
@@ -93,21 +75,66 @@ async function fetchJsonWithRetry(url, tries = 4) {
       return await res.json();
     } catch (e) {
       lastErr = e;
-      await sleep(300 + i * 400);
+      await sleep(300 + i * 450);
     }
   }
   throw lastErr ?? new Error("fetch failed");
 }
 
+function numOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Map TCGdex pricing keys -> your DB variant_type strings.
+ * We skip normal on purpose.
+ */
+function mapKeyToVariantType(key) {
+  const k = String(key || "").trim().toLowerCase();
+
+  if (k === "reverse") return "reverse_holofoil";
+  if (k === "holo" || k === "holofoil") return "holofoil";
+
+  // Optional future mappings
+  if (k === "firstedition" || k === "first_edition") return "first_edition";
+  if (k === "promo" || k === "wpromo" || k === "w_promo") return "promo";
+
+  return null;
+}
+
+async function tableColumns(pool, tableName) {
+  const res = await pool.query(
+    `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema='public' AND table_name=$1
+  `,
+    [tableName],
+  );
+  return new Set(res.rows.map((r) => r.column_name));
+}
+
 async function main() {
-  const client = new Client({ connectionString: DB_URL });
-  await client.connect();
+  const pool = new Pool({
+    connectionString: DB_URL,
+    max: Math.max(4, CONCURRENCY + 2),
+  });
 
   console.log(`[tcgdex] start: concurrency=${CONCURRENCY} batch=${BATCH} limit=${LIMIT || "ALL"}`);
 
-  // Pull all pokemon card ids from your DB
-  // (tcgdex card ids are like "swsh3-136", "me1-1", etc — same pattern)
-  const idsRes = await client.query(
+  const cols = await tableColumns(pool, "tcg_card_prices_tcgplayer");
+  const hasVariantType = cols.has("variant_type");
+
+  console.log(
+    `[tcgdex] tcg_card_prices_tcgplayer schema = ${
+      hasVariantType ? "MULTI-ROW (card_id, variant_type)" : "LEGACY (single row per card)"
+    }`,
+  );
+
+  // Pull ids from tcg_cards
+  const idsRes = await pool.query(
     `
     SELECT id
     FROM public.tcg_cards
@@ -117,7 +144,6 @@ async function main() {
   `,
     LIMIT ? [LIMIT] : [],
   );
-
   const ids = idsRes.rows.map((r) => String(r.id));
   console.log(`[tcgdex] cards to process: ${ids.length}`);
 
@@ -126,8 +152,146 @@ async function main() {
   let skippedNoPricing = 0;
   let errors = 0;
 
-  // Worker pool
   let cursor = 0;
+
+  async function processOneCard(cardId) {
+    const url = `${API_BASE}/${encodeURIComponent(cardId)}`;
+    const card = await fetchJsonWithRetry(url);
+
+    const pricing = card?.pricing?.tcgplayer;
+    if (!pricing || typeof pricing !== "object") return { didAny: false };
+
+    const updated = pricing.updated ? String(pricing.updated) : null;
+    const unit = pricing.unit ? String(pricing.unit) : "USD";
+
+    const variantEntries = Object.entries(pricing).filter(
+      ([k, v]) => typeof v === "object" && v !== null,
+    );
+
+    if (!variantEntries.length) return { didAny: false };
+
+    if (hasVariantType) {
+      // MULTI-ROW schema: insert many rows in one upsert
+      const rows = [];
+
+      for (const [k, v] of variantEntries) {
+        const variantType = mapKeyToVariantType(k);
+        if (!variantType) continue;
+
+        const low = numOrNull(v.lowPrice ?? v.low ?? null);
+        const mid = numOrNull(v.midPrice ?? v.mid ?? null);
+        const high = numOrNull(v.highPrice ?? v.high ?? null);
+        const market = numOrNull(v.marketPrice ?? v.market ?? null);
+
+        if (low == null && mid == null && high == null && market == null) continue;
+
+        rows.push({
+          card_id: cardId,
+          variant_type: variantType,
+          updated_at: updated,
+          currency: unit,
+          low_price: low,
+          mid_price: mid,
+          high_price: high,
+          market_price: market,
+        });
+      }
+
+      if (!rows.length) return { didAny: false };
+
+      // Build VALUES list
+      const params = [];
+      const valuesSql = rows
+        .map((r, i) => {
+          const b = i * 8;
+          params.push(
+            r.card_id,
+            r.variant_type,
+            r.updated_at,
+            r.currency,
+            r.low_price,
+            r.mid_price,
+            r.high_price,
+            r.market_price,
+          );
+          return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8})`;
+        })
+        .join(",");
+
+      await pool.query(
+        `
+        INSERT INTO public.tcg_card_prices_tcgplayer
+          (card_id, variant_type, updated_at, currency, low_price, mid_price, high_price, market_price)
+        VALUES ${valuesSql}
+        ON CONFLICT (card_id, variant_type)
+        DO UPDATE SET
+          updated_at   = EXCLUDED.updated_at,
+          currency     = EXCLUDED.currency,
+          low_price    = EXCLUDED.low_price,
+          mid_price    = EXCLUDED.mid_price,
+          high_price   = EXCLUDED.high_price,
+          market_price = EXCLUDED.market_price
+      `,
+        params,
+      );
+
+      return { didAny: true, upsertCount: rows.length };
+    }
+
+    // LEGACY schema: update only holofoil + reverse_holofoil fields (market/mid/low preference)
+    // We never touch "normal".
+    const pickLegacyPrice = (obj) => {
+      if (!obj || typeof obj !== "object") return null;
+      return numOrNull(obj.marketPrice ?? obj.market ?? obj.midPrice ?? obj.mid ?? obj.lowPrice ?? obj.low ?? null);
+    };
+
+    let holo = null;
+    let rev = null;
+
+    for (const [k, v] of variantEntries) {
+      const vt = mapKeyToVariantType(k);
+      if (vt === "holofoil") holo = pickLegacyPrice(v);
+      if (vt === "reverse_holofoil") rev = pickLegacyPrice(v);
+    }
+
+    if (holo == null && rev == null) return { didAny: false };
+
+    // Best-effort: only update columns if they exist
+    const sets = [];
+    const params = [cardId];
+    let p = 2;
+
+    if (cols.has("holofoil") && holo != null) {
+      sets.push(`holofoil = $${p++}`);
+      params.push(String(holo));
+    }
+    if (cols.has("reverse_holofoil") && rev != null) {
+      sets.push(`reverse_holofoil = $${p++}`);
+      params.push(String(rev));
+    }
+    if (cols.has("updated_at") && updated) {
+      sets.push(`updated_at = $${p++}`);
+      params.push(updated);
+    }
+    if (cols.has("currency") && unit) {
+      sets.push(`currency = $${p++}`);
+      params.push(unit);
+    }
+
+    if (!sets.length) return { didAny: false };
+
+    await pool.query(
+      `
+      INSERT INTO public.tcg_card_prices_tcgplayer (card_id)
+      VALUES ($1)
+      ON CONFLICT (card_id) DO UPDATE SET
+        ${sets.join(", ")}
+    `,
+      params,
+    );
+
+    return { didAny: true, upsertCount: 1 };
+  }
 
   async function worker(workerId) {
     while (true) {
@@ -136,83 +300,21 @@ async function main() {
       const slice = ids.slice(start, start + BATCH);
       if (!slice.length) return;
 
-      // Process slice sequentially (but workers are parallel)
       for (const cardId of slice) {
         try {
-          const url = `${API_BASE}/${encodeURIComponent(cardId)}`;
-          const card = await fetchJsonWithRetry(url);
+          const r = await processOneCard(cardId);
 
-          const pricing = card?.pricing?.tcgplayer;
-          if (!pricing || typeof pricing !== "object") {
-            skippedNoPricing++;
-            processed++;
-            continue;
-          }
+          if (r.didAny) upserts += r.upsertCount || 1;
+          else skippedNoPricing++;
 
-          const updated = pricing.updated ? String(pricing.updated) : null;
-          const unit = pricing.unit ? String(pricing.unit) : "USD";
-
-          // tcgdex pricing keys are objects like:
-          // pricing.tcgplayer.reverse.lowPrice, marketPrice, etc
-          // pricing.tcgplayer.holo.marketPrice, etc
-          //
-          // We skip "normal" on purpose.
-          const variantEntries = Object.entries(pricing)
-            .filter(([k, v]) => typeof v === "object" && v !== null);
-
-          let didAny = false;
-
-          for (const [k, v] of variantEntries) {
-            const variantType = mapKeyToVariantType(k);
-            if (!variantType) continue;
-
-            const low = numOrNull(v.lowPrice ?? v.low ?? null);
-            const mid = numOrNull(v.midPrice ?? v.mid ?? null);
-            const high = numOrNull(v.highPrice ?? v.high ?? null);
-            const market = numOrNull(v.marketPrice ?? v.market ?? null);
-
-            // If it's all nulls, don't spam the table
-            if (low == null && mid == null && high == null && market == null) continue;
-
-            // Upsert
-            await client.query(
-              `
-              INSERT INTO public.tcg_card_prices_tcgplayer (
-                card_id,
-                variant_type,
-                updated_at,
-                currency,
-                low_price,
-                mid_price,
-                high_price,
-                market_price
-              )
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-              ON CONFLICT (card_id, variant_type)
-              DO UPDATE SET
-                updated_at   = EXCLUDED.updated_at,
-                currency     = EXCLUDED.currency,
-                low_price    = EXCLUDED.low_price,
-                mid_price    = EXCLUDED.mid_price,
-                high_price   = EXCLUDED.high_price,
-                market_price = EXCLUDED.market_price
-            `,
-              [cardId, variantType, updated, unit, low, mid, high, market],
-            );
-
-            upserts++;
-            didAny = true;
-          }
-
-          if (!didAny) skippedNoPricing++;
           processed++;
 
-          // tiny pacing to reduce 429s
-          if (processed % 50 === 0) await sleep(100);
+          // gentle pacing
+          if (processed % 50 === 0) await sleep(80);
         } catch (e) {
           errors++;
           processed++;
-          if (errors < 25) {
+          if (errors <= 25) {
             console.warn(`[tcgdex] worker ${workerId} error card=${cardId}:`, e?.message || e);
           }
         }
@@ -233,10 +335,10 @@ async function main() {
     `[tcgdex] done processed=${processed} upserts=${upserts} skipped=${skippedNoPricing} errors=${errors}`,
   );
 
-  await client.end();
+  await pool.end();
 }
 
 main().catch((e) => {
-  console.error("fatal:", e);
+  console.error("❌ fatal:", e?.stack || e?.message || e);
   process.exit(1);
 });

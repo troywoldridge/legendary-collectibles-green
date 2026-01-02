@@ -10,26 +10,41 @@ export type Plan = {
   id: PlanId;
   name: string;
   badge?: string;
-  priceLabel: string; // "Free", "$7/mo", "$29.99/mo"
-  priceMonthlyCents: number; // 0, 700, 2999
+  priceLabel: string;
+  priceMonthlyCents: number;
   description: string;
 
   limits: {
-    maxCollections: number | null; // null = unlimited
-    maxItemsTotal: number | null; // null = unlimited
+    maxCollections: number | null;
+    maxItemsTotal: number | null;
   };
 
   features: {
+    // Commerce / monetization
     amazonCtas: boolean;
-    pricechartingTopLists: boolean; // “Top {category} by PriceCharting”
-    trendsAndMovers: boolean; // trends, top gainers/losers
-    csvExports: boolean; // downloadable price sheets / collection CSV
-    insuranceReports: boolean; // collection valuation for insurance
-    advancedLtvTools: boolean; // ROI tools, etc
+    ebayCtas: boolean;
+    affiliateLinks: boolean;
+
+    // Lists / discovery
+    pricechartingTopLists: boolean; // legacy
+    tcgplayerTopLists: boolean; // current
+    trendsAndMovers: boolean;
+
+    // Pricing + alerts
+    priceAlerts: boolean;
+    liveMarketPricing: boolean;
+    ebayCompsAndSnapshots: boolean;
+
+    // Reporting / exports
+    csvExports: boolean;
+    insuranceReports: boolean;
+
+    // Analytics
+    collectionValuations: boolean;
+    advancedLtvTools: boolean;
   };
 };
 
-// canonical order for “at least Collector”, “at least Pro”, etc.
 export const PLAN_ORDER: PlanId[] = ["free", "collector", "pro"];
 
 export const PLANS: Record<PlanId, Plan> = {
@@ -46,14 +61,31 @@ export const PLANS: Record<PlanId, Plan> = {
       maxItemsTotal: 500,
     },
     features: {
+      // Commerce / monetization
       amazonCtas: true,
+      ebayCtas: true,
+      affiliateLinks: true,
+
+      // Lists / discovery
       pricechartingTopLists: false,
+      tcgplayerTopLists: false,
       trendsAndMovers: false,
+
+      // Pricing + alerts
+      priceAlerts: false,
+      liveMarketPricing: true, // OK to keep on for everyone
+      ebayCompsAndSnapshots: true,
+
+      // Reporting / exports
       csvExports: false,
       insuranceReports: false,
+
+      // Analytics
+      collectionValuations: false,
       advancedLtvTools: false,
     },
   },
+
   collector: {
     id: "collector",
     name: "Collector",
@@ -61,20 +93,37 @@ export const PLANS: Record<PlanId, Plan> = {
     priceLabel: "$7 / month",
     priceMonthlyCents: 700,
     description:
-      "For serious collectors who want trends, leaderboards, and deep PriceCharting insights.",
+      "For serious collectors who want trends, leaderboards, and deep pricing insights.",
     limits: {
       maxCollections: 5,
       maxItemsTotal: 5000,
     },
     features: {
+      // Commerce / monetization
       amazonCtas: true,
-      pricechartingTopLists: true,
+      ebayCtas: true,
+      affiliateLinks: true,
+
+      // Lists / discovery
+      pricechartingTopLists: true, // keep true until legacy UI is gone
+      tcgplayerTopLists: true,
       trendsAndMovers: true,
+
+      // Pricing + alerts
+      priceAlerts: false, // Pro-only
+      liveMarketPricing: true,
+      ebayCompsAndSnapshots: true,
+
+      // Reporting / exports
       csvExports: false,
       insuranceReports: false,
+
+      // Analytics
+      collectionValuations: true,
       advancedLtvTools: false,
     },
   },
+
   pro: {
     id: "pro",
     name: "Pro Collector",
@@ -82,17 +131,33 @@ export const PLANS: Record<PlanId, Plan> = {
     priceLabel: "$29.99 / month",
     priceMonthlyCents: 2999,
     description:
-      "High-volume collectors, stores, and investors. Full exports, valuations, and advanced tools.",
+      "For high-volume collectors, stores, and investors. Price alerts, live market pricing, eBay comps, exports, valuations, and pro-grade analytics.",
     limits: {
       maxCollections: null,
       maxItemsTotal: null,
     },
     features: {
+      // Commerce / monetization
       amazonCtas: true,
+      ebayCtas: true,
+      affiliateLinks: true,
+
+      // Lists / discovery
       pricechartingTopLists: true,
+      tcgplayerTopLists: true,
       trendsAndMovers: true,
+
+      // Pricing + alerts
+      priceAlerts: true,
+      liveMarketPricing: true,
+      ebayCompsAndSnapshots: true,
+
+      // Reporting / exports
       csvExports: true,
       insuranceReports: true,
+
+      // Analytics
+      collectionValuations: true,
       advancedLtvTools: true,
     },
   },
@@ -104,10 +169,6 @@ type DbPlanRow = {
   plan_id: string | null;
 };
 
-/**
- * Ensure a user has a plan row. Safe to call repeatedly.
- * Call this on first login / post-auth / dashboard load if you want.
- */
 export async function ensureUserPlanRow(userId: string) {
   if (!userId) return;
 
@@ -122,9 +183,6 @@ export async function ensureUserPlanRow(userId: string) {
   }
 }
 
-/**
- * Load user's plan. If missing/invalid/unavailable → returns Free.
- */
 export async function getUserPlan(userId: string | null): Promise<Plan> {
   if (!userId) return PLANS.free;
 
@@ -137,9 +195,7 @@ export async function getUserPlan(userId: string | null): Promise<Plan> {
     `);
 
     const raw = res.rows?.[0]?.plan_id ?? "free";
-    const pid: PlanId =
-      raw === "collector" || raw === "pro" || raw === "free" ? raw : "free";
-
+    const pid: PlanId = raw === "collector" || raw === "pro" || raw === "free" ? raw : "free";
     return PLANS[pid] ?? PLANS.free;
   } catch (err) {
     console.error("[getUserPlan] failed, defaulting to free", err);
@@ -150,39 +206,19 @@ export async function getUserPlan(userId: string | null): Promise<Plan> {
 /* ---------- Plan hierarchy helpers ---------- */
 
 export function planRank(id: PlanId): number {
-  return PLAN_ORDER.indexOf(id);
+  const idx = PLAN_ORDER.indexOf(id);
+  return idx >= 0 ? idx : 0;
 }
 
 export function isPlanAtLeast(current: PlanId, required: PlanId): boolean {
   return planRank(current) >= planRank(required);
 }
 
-/**
- * “Capabilities” object you can use in UI and backend.
- */
-export function planCapabilities(plan: Plan) {
-  return {
-    // analytics
-    canSeeBasicAnalytics: true,
-    canSeeFullAnalytics: isPlanAtLeast(plan.id, "collector"),
+/* ---------- Feature gating (single-source-of-truth) ---------- */
 
-    // feature flags
-    canSeePricechartingTopLists: plan.features.pricechartingTopLists,
-    canSeeTrendsAndMovers: plan.features.trendsAndMovers,
-    canExportCsv: plan.features.csvExports,
-    canGenerateInsuranceReport: plan.features.insuranceReports,
-    canUseAdvancedLtvTools: plan.features.advancedLtvTools,
-
-    // limits
-    maxCollections: plan.limits.maxCollections,
-    maxItemsTotal: plan.limits.maxItemsTotal,
-  };
-}
-
-/* ---------- Simple helpers for gating ---------- */
-
-export function canSeePricechartingTop(plan: Plan): boolean {
-  return plan.features.pricechartingTopLists;
+// Legacy + new top lists
+export function canSeeTopLists(plan: Plan): boolean {
+  return plan.features.tcgplayerTopLists || plan.features.pricechartingTopLists;
 }
 
 export function canSeeTrends(plan: Plan): boolean {
@@ -200,6 +236,70 @@ export function canSeeInsuranceReports(plan: Plan): boolean {
 export function canUseAdvancedLtvTools(plan: Plan): boolean {
   return plan.features.advancedLtvTools;
 }
+
+export function canUsePriceAlerts(plan: Plan): boolean {
+  return plan.features.priceAlerts;
+}
+
+export function canShowAmazonCtas(plan: Plan): boolean {
+  return plan.features.amazonCtas;
+}
+
+export function canShowEbayCtas(plan: Plan): boolean {
+  return plan.features.ebayCtas;
+}
+
+export function canUseAffiliateLinks(plan: Plan): boolean {
+  return plan.features.affiliateLinks;
+}
+
+export function canSeeEbayComps(plan: Plan): boolean {
+  return plan.features.ebayCompsAndSnapshots;
+}
+
+export function canSeeLiveMarketPricing(plan: Plan): boolean {
+  return plan.features.liveMarketPricing;
+}
+
+export function canSeeCollectionValuations(plan: Plan): boolean {
+  return plan.features.collectionValuations;
+}
+
+/* ---------- Capabilities object (nice for UI) ---------- */
+
+export function planCapabilities(plan: Plan) {
+  return {
+    // analytics tiers
+    canSeeBasicAnalytics: true,
+    canSeeFullAnalytics: isPlanAtLeast(plan.id, "collector"),
+
+    // features
+    canSeeTopLists: canSeeTopLists(plan),
+    canSeeTrendsAndMovers: canSeeTrends(plan),
+    canExportCsv: canExportCsv(plan),
+    canGenerateInsuranceReport: canSeeInsuranceReports(plan),
+    canUseAdvancedLtvTools: canUseAdvancedLtvTools(plan),
+    canUsePriceAlerts: canUsePriceAlerts(plan),
+    canShowAmazonCtas: canShowAmazonCtas(plan),
+    canShowEbayCtas: canShowEbayCtas(plan),
+    canUseAffiliateLinks: canUseAffiliateLinks(plan),
+    canSeeEbayComps: canSeeEbayComps(plan),
+    canSeeLiveMarketPricing: canSeeLiveMarketPricing(plan),
+    canSeeCollectionValuations: canSeeCollectionValuations(plan),
+
+    // limits
+    maxCollections: plan.limits.maxCollections,
+    maxItemsTotal: plan.limits.maxItemsTotal,
+  };
+}
+
+/* ---------- Backwards-compatible export name ---------- */
+
+export function canSeePricechartingTop(plan: Plan): boolean {
+  return canSeeTopLists(plan);
+}
+
+/* ---------- Limits ---------- */
 
 export function canAddCollection(plan: Plan, currentCollections: number): boolean {
   if (plan.limits.maxCollections == null) return true;

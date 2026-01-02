@@ -1,3 +1,4 @@
+// src/app/categories/yugioh/cards/[id]/page.tsx
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import "server-only";
 
@@ -7,21 +8,25 @@ import Image from "next/image";
 import Link from "next/link";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import YgoCardSearch from "@/components/ygo/YgoCardSearch";
-
-/* Plan + collection */
 import { auth } from "@clerk/nextjs/server";
+
+import YgoCardSearch from "@/components/ygo/YgoCardSearch";
 import CardActions from "@/components/collection/CardActions";
 
-/* ★ Marketplace CTAs */
+/* Alerts */
+import PriceAlertBell from "@/components/alerts/PriceAlertBell";
+import { getUserPlan, canUsePriceAlerts } from "@/lib/plans";
+
+/* Marketplace CTAs */
 import CardAmazonCTA from "@/components/CardAmazonCTA";
-import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
+import { getAffiliateLinkForCard } from "@/lib/affiliate";
 
 import { site } from "@/config/site";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 /* ---------------- Types ---------------- */
 type CardRow = {
@@ -60,6 +65,8 @@ type SetEntry = {
   set_price: string | null;
 };
 
+type MarketItemRow = { id: string };
+
 /* ---------------- Helpers ---------------- */
 function money(v: number | string | null | undefined) {
   if (v == null) return "—";
@@ -83,7 +90,7 @@ function absBase() {
 }
 
 function absUrl(path: string) {
-  const base = absBase();
+  const base = absBase().replace(/\/+$/, "");
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
@@ -108,6 +115,30 @@ function pickUsdPriceFromPrices(prices: PriceRow | null): number | null {
     if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
   }
   return null;
+}
+
+function PriceBox({ label, value }: { label: string; value: number | null | undefined }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+      <div className="text-sm font-medium text-white">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-white">{money(value ?? null)}</div>
+    </div>
+  );
+}
+
+/* ---------------- Alerts / market item ---------------- */
+async function getMarketItemForYugioh(cardId: string): Promise<MarketItemRow | null> {
+  return (
+    (
+      await db.execute<MarketItemRow>(sql`
+        SELECT id::text AS id
+        FROM public.market_items
+        WHERE game = 'yugioh'
+          AND canonical_id::text = ${cardId}::text
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null
+  );
 }
 
 /* ---------------- Data loaders ---------------- */
@@ -138,7 +169,7 @@ async function getCard(param: string): Promise<{
           c.linkval,
           c.scale,
           c.linkmarkers
-        FROM ygo_cards c
+        FROM public.ygo_cards c
         WHERE c.card_id = ${id}
         LIMIT 1
       `)
@@ -148,10 +179,11 @@ async function getCard(param: string): Promise<{
     (
       await db.execute<ImageRow>(sql`
         SELECT i.image_url_small AS small, i.image_url AS large
-        FROM ygo_card_images i
+        FROM public.ygo_card_images i
         WHERE i.card_id = ${id}
-        ORDER BY (CASE WHEN i.image_url IS NOT NULL THEN 0 ELSE 1 END),
-                 i.image_url_small NULLS LAST
+        ORDER BY
+          (CASE WHEN i.image_url IS NOT NULL THEN 0 ELSE 1 END),
+          i.image_url_small NULLS LAST
         LIMIT 6
       `)
     ).rows ?? [];
@@ -236,8 +268,9 @@ export async function generateMetadata({ params }: { params: { id: string } }): 
         SELECT i.image_url AS large, i.image_url_small AS small
         FROM public.ygo_card_images i
         WHERE i.card_id = ${id}
-        ORDER BY (CASE WHEN i.image_url IS NOT NULL THEN 0 ELSE 1 END),
-                 i.image_url_small NULLS LAST
+        ORDER BY
+          (CASE WHEN i.image_url IS NOT NULL THEN 0 ELSE 1 END),
+          i.image_url_small NULLS LAST
         LIMIT 1
       `)
     ).rows?.[0] ?? null;
@@ -323,20 +356,37 @@ export default async function YugiohCardDetailPage({
 
   const firstSet = sets[0]?.set_name ?? null;
 
-  // Amazon affiliate link (server-side)
+  // Auth gate
+  const { userId } = await auth();
+  const canSave = !!userId;
+
+  // Alerts gate (Pro-only)
+  let canUseAlerts = false;
+  let marketItemId: string | null = null;
+
+  if (userId) {
+    const plan = await getUserPlan(userId);
+    canUseAlerts = canUsePriceAlerts(plan);
+
+    if (canUseAlerts) {
+      const marketItem = await getMarketItemForYugioh(card.id);
+      marketItemId = marketItem?.id ?? null;
+    }
+  }
+
+  // currentUsd for alert context
+  const offerPrice = pickUsdPriceFromPrices(prices);
+  const currentUsd =
+    offerPrice != null && Number.isFinite(offerPrice) && offerPrice > 0 ? offerPrice : null;
+
+  // Amazon affiliate link (server-side) — ok for all users, but only after card exists
   const amazonLink = await getAffiliateLinkForCard({
     category: "yugioh",
     cardId: card.id,
     marketplace: "amazon",
   });
 
-  // Auth gate: signed-in users can save
-  const { userId } = await auth();
-  const canSave = !!userId;
-
-  // SEO/JSON-LD Offer
-  const offerPrice = pickUsdPriceFromPrices(prices);
-
+  // JSON-LD
   const breadcrumbsJsonLd = {
     "@context": "https://schema.org",
     "@type": "BreadcrumbList",
@@ -345,7 +395,14 @@ export default async function YugiohCardDetailPage({
       { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
       { "@type": "ListItem", position: 3, name: "Yu-Gi-Oh!", item: absUrl(baseCards) },
       ...(firstSet
-        ? [{ "@type": "ListItem", position: 4, name: firstSet, item: absUrl(`${baseSets}/${encodeURIComponent(firstSet)}`) }]
+        ? [
+            {
+              "@type": "ListItem",
+              position: 4,
+              name: firstSet,
+              item: absUrl(`${baseSets}/${encodeURIComponent(firstSet)}`),
+            },
+          ]
         : []),
       {
         "@type": "ListItem",
@@ -374,16 +431,9 @@ export default async function YugiohCardDetailPage({
     ]
       .filter(Boolean)
       .join(" • "),
-    additionalProperty: [
-      card.type ? { "@type": "PropertyValue", name: "Type", value: card.type } : null,
-      card.attribute ? { "@type": "PropertyValue", name: "Attribute", value: card.attribute } : null,
-      card.race ? { "@type": "PropertyValue", name: "Race", value: card.race } : null,
-      card.archetype ? { "@type": "PropertyValue", name: "Archetype", value: card.archetype } : null,
-      firstSet ? { "@type": "PropertyValue", name: "Set (example)", value: firstSet } : null,
-    ].filter(Boolean),
   };
 
-  if (offerPrice != null) {
+  if (offerPrice != null && offerPrice > 0) {
     productJsonLd.offers = {
       "@type": "Offer",
       url: canonical,
@@ -450,15 +500,14 @@ export default async function YugiohCardDetailPage({
         </div>
       </nav>
 
-      {/* Quick search at the top */}
+      {/* Quick search */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <div className="mb-2 text-sm font-semibold text-white">Find another card</div>
         <YgoCardSearch initialQuery={card.name} />
       </div>
 
-      {/* Top: image left, info right */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* Left: card image */}
+        {/* Image */}
         <div className="lg:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="relative mx-auto w-full max-w-md" style={{ aspectRatio: "3 / 4" }}>
@@ -476,41 +525,97 @@ export default async function YugiohCardDetailPage({
                 <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
               )}
             </div>
+
+            {card.ygoprodeck_url ? (
+              <div className="mt-3 text-xs">
+                <a className="text-sky-300 hover:underline" href={card.ygoprodeck_url} target="_blank" rel="noreferrer">
+                  View on YGOPRODeck →
+                </a>
+              </div>
+            ) : null}
           </div>
         </div>
 
-        {/* Right: title + meta → CTAs → stats → actions → prices */}
+        {/* Details */}
         <div className="lg:col-span-7 space-y-4">
-          {/* Main info + marketplace CTAs + stats */}
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h1 className="text-2xl font-bold text-white">{card.name}</h1>
+            <h1 className="text-2xl font-bold text-white">{card.name}</h1>
 
-                <div className="mt-1 text-sm text-white/80">
-                  {card.type ? <span className="mr-3">Type: {card.type}</span> : null}
-                  {card.attribute ? <span className="mr-3">Attribute: {card.attribute}</span> : null}
-                  {card.race ? <span className="mr-3">Race: {card.race}</span> : null}
-                  {card.archetype ? <span>Archetype: {card.archetype}</span> : null}
-                </div>
-
-                {offerPrice != null ? (
-                  <div className="mt-2 text-sm text-white/80">
-                    <span className="text-white/60">Market reference:</span>{" "}
-                    <span className="font-semibold text-white">${offerPrice.toFixed(2)}</span>
-                  </div>
-                ) : null}
-              </div>
+            <div className="mt-2 text-sm text-white/80">
+              {card.type ? <span className="mr-3">Type: {card.type}</span> : null}
+              {card.attribute ? <span className="mr-3">Attribute: {card.attribute}</span> : null}
+              {card.race ? <span className="mr-3">Race: {card.race}</span> : null}
+              {card.archetype ? <span>Archetype: {card.archetype}</span> : null}
             </div>
+
+            {offerPrice != null ? (
+              <div className="mt-3 text-sm text-white/80">
+                <span className="text-white/60">Market reference:</span>{" "}
+                <span className="font-semibold text-white">${offerPrice.toFixed(2)}</span>
+              </div>
+            ) : null}
 
             {/* CTAs */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <CardEbayCTA card={{ id: card.id, name: card.name, set_name: firstSet ?? null }} game="Yu-Gi-Oh!" variant="pill" />
+              <CardEbayCTA
+                card={{ id: card.id, name: card.name, set_name: firstSet ?? null }}
+                game="Yu-Gi-Oh!"
+                variant="pill"
+              />
               <CardAmazonCTA url={amazonLink?.url} label={card.name} />
             </div>
 
-            {/* Stat grid */}
-            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {/* Actions + Alerts */}
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <CardActions
+                canSave={canSave}
+                game="yugioh"
+                cardId={card.id}
+                cardName={card.name}
+                setName={firstSet ?? undefined}
+                imageUrl={cover ?? undefined}
+              />
+
+              {/* ✅ Pro-gated alerts */}
+              {userId ? (
+                canUseAlerts ? (
+                  marketItemId ? (
+                    <PriceAlertBell
+                      game="yugioh"
+                      marketItemId={marketItemId}
+                      label={card.name}
+                      currentUsd={currentUsd}
+                    />
+                  ) : (
+                    <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
+                      🔔 Alerts unavailable
+                    </span>
+                  )
+                ) : (
+                  <Link
+                    href="/pricing"
+                    className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                    prefetch={false}
+                  >
+                    🔔 Price alerts (Pro)
+                  </Link>
+                )
+              ) : (
+                <Link
+                  href="/sign-in"
+                  className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                  prefetch={false}
+                >
+                  🔔 Sign in for alerts
+                </Link>
+              )}
+            </div>
+          </div>
+
+          {/* Stats */}
+          <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+            <h2 className="text-lg font-semibold text-white">Stats</h2>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <div className="text-xs uppercase tracking-wide text-white/60">ATK / DEF</div>
                 <div className="mt-1 text-lg font-semibold text-white">
@@ -519,10 +624,8 @@ export default async function YugiohCardDetailPage({
               </div>
 
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                <div className="text-xs uppercase tracking-wide text-white/60">Level / Scale / Link</div>
-                <div className="mt-1 text-lg font-semibold text-white">
-                  {card.level ?? 0} / {card.scale ?? 0} / {card.linkval ?? 0}
-                </div>
+                <div className="text-xs uppercase tracking-wide text-white/60">Level</div>
+                <div className="mt-1 text-lg font-semibold text-white">{card.level ?? "—"}</div>
               </div>
 
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
@@ -530,37 +633,31 @@ export default async function YugiohCardDetailPage({
                 <div className="mt-1 text-lg font-semibold text-white">{card.id}</div>
               </div>
             </div>
-          </div>
 
-          {/* Collection & Wishlist actions */}
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <CardActions
-              canSave={canSave}
-              game="yugioh"
-              cardId={card.id}
-              cardName={card.name}
-              setName={firstSet ?? undefined}
-              imageUrl={cover ?? undefined}
-            />
+            {(card.scale != null || card.linkval != null) && (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <div className="text-xs uppercase tracking-wide text-white/60">Scale</div>
+                  <div className="mt-1 text-lg font-semibold text-white">{card.scale ?? "—"}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <div className="text-xs uppercase tracking-wide text-white/60">Link</div>
+                  <div className="mt-1 text-lg font-semibold text-white">{card.linkval ?? "—"}</div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Prices */}
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-white">Market Prices</h2>
-              <div className="text-xs text-white/60">USD reference (best available source)</div>
-            </div>
+            <h2 className="text-lg font-semibold text-white">Market Prices</h2>
 
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <div className="space-y-3">
-                <PriceBox label="TCGplayer" value={prices?.tcgplayer} />
-                <PriceBox label="eBay" value={prices?.ebay} />
-                <PriceBox label="CoolStuffInc" value={prices?.coolstuffinc} />
-              </div>
-              <div className="space-y-3">
-                <PriceBox label="Cardmarket" value={prices?.cardmarket} />
-                <PriceBox label="Amazon" value={prices?.amazon} />
-              </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <PriceBox label="TCGplayer" value={prices?.tcgplayer} />
+              <PriceBox label="eBay" value={prices?.ebay} />
+              <PriceBox label="CoolStuffInc" value={prices?.coolstuffinc} />
+              <PriceBox label="Cardmarket" value={prices?.cardmarket} />
+              <PriceBox label="Amazon" value={prices?.amazon} />
             </div>
           </div>
         </div>
@@ -568,26 +665,28 @@ export default async function YugiohCardDetailPage({
 
       {/* Sets */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-        <div className="mb-2 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">Sets</h2>
-        </div>
+        <h2 className="text-lg font-semibold text-white">Sets</h2>
 
         {sets.length === 0 ? (
-          <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-white/80">
+          <div className="mt-3 rounded-lg border border-white/10 bg-white/5 p-3 text-white/80">
             No set appearances recorded for this card.
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {sets.map((s) => {
               const href = `/categories/yugioh/sets/${encodeURIComponent(s.set_name)}`;
               return (
                 <Link
-                  key={`${s.set_name}::${s.set_code ?? ""}`}
+                  key={`${s.set_name}::${s.set_code ?? ""}::${s.set_rarity ?? ""}`}
                   href={href}
                   className="rounded-xl border border-white/10 bg-white/5 p-3 transition hover:border-white/20 hover:bg-white/10"
                 >
                   <div className="text-sm font-medium text-white line-clamp-1">{s.set_name}</div>
-                  <div className="mt-1 text-xs text-white/70">{s.set_rarity ?? "—"}</div>
+                  <div className="mt-1 text-xs text-white/70">
+                    {s.set_code ? `${s.set_code} • ` : ""}
+                    {s.set_rarity ?? "—"}
+                    {s.set_price ? ` • ${s.set_price}` : ""}
+                  </div>
                 </Link>
               );
             })}
@@ -595,18 +694,21 @@ export default async function YugiohCardDetailPage({
         )}
       </div>
 
-      {/* Card text / effect */}
+      {/* Card text / effect + banlist */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <h2 className="text-lg font-semibold text-white">Card Text</h2>
         <p className="mt-2 whitespace-pre-wrap text-white/90">{card.desc || "—"}</p>
 
-        {banlist && (
-          <div className="mt-3 text-sm text-white/80">
-            <span className="mr-3">Banlist (TCG): {banlist.tcg ?? "—"}</span>
-            <span className="mr-3">OCG: {banlist.ocg ?? "—"}</span>
-            <span>GOAT: {banlist.goat ?? "—"}</span>
+        {banlist ? (
+          <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-3 text-sm text-white/80">
+            <div className="font-medium text-white">Banlist</div>
+            <div className="mt-1">
+              <span className="mr-4">TCG: {banlist.tcg ?? "—"}</span>
+              <span className="mr-4">OCG: {banlist.ocg ?? "—"}</span>
+              <span>GOAT: {banlist.goat ?? "—"}</span>
+            </div>
           </div>
-        )}
+        ) : null}
       </div>
 
       {/* Footer nav */}
@@ -614,22 +716,12 @@ export default async function YugiohCardDetailPage({
         <Link href={baseCards} className="text-sky-300 hover:underline">
           ← Back to cards
         </Link>
-        {firstSet && (
+        {firstSet ? (
           <Link href={`/categories/yugioh/sets/${encodeURIComponent(firstSet)}`} className="text-sky-300 hover:underline">
             ← Back to set
           </Link>
-        )}
+        ) : null}
       </div>
     </section>
-  );
-}
-
-function PriceBox({ label, value }: { label: string; value: number | null | undefined }) {
-  return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-      <div className="text-sm font-medium text-white">{label}</div>
-      <div className="text-white/80">Price</div>
-      <div className="mt-1 text-lg font-semibold text-white">{money(value ?? null)}</div>
-    </div>
   );
 }

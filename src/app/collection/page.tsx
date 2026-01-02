@@ -6,7 +6,12 @@ import Image from "next/image";
 import { auth } from "@clerk/nextjs/server";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { getUserPlan } from "@/lib/plans";
+import {
+  getUserPlan,
+  canExportCsv,
+  canSeeInsuranceReports,
+  canSeeTrends,
+} from "@/lib/plans";
 import CollectionDashboardClient from "@/components/collection/CollectionDashboardClient";
 
 import CollectionTableBody, {
@@ -30,7 +35,7 @@ function formatMoneyFromCents(cents: number | null | undefined): string {
 }
 
 function formatGameLabel(game: string | null | undefined): string {
-  switch (game) {
+  switch (String(game ?? "").toLowerCase()) {
     case "pokemon":
       return "Pokémon";
     case "mtg":
@@ -44,7 +49,6 @@ function formatGameLabel(game: string | null | undefined): string {
   }
 }
 
-// Small helper for BIGINT / numeric values coming back as string
 function toNumber(v: unknown): number {
   if (v == null) return 0;
   if (typeof v === "number") return v;
@@ -54,7 +58,6 @@ function toNumber(v: unknown): number {
   return 0;
 }
 
-// Build a tiny SVG sparkline path for value array
 function buildSparklinePath(
   values: number[],
   width = 120,
@@ -75,7 +78,7 @@ function buildSparklinePath(
         n === 1
           ? width / 2
           : padX + ((width - padX * 2) * idx) / (n - 1);
-      const norm = (v - min) / span; // 0..1
+      const norm = (v - min) / span;
       const y = height - padY - norm * (height - padY * 2);
       return `${idx === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
     })
@@ -105,15 +108,14 @@ export default async function CollectionPage({
   }
 
   const plan = await getUserPlan(userId);
+
   const isPro = plan.id === "pro";
   const isCollector = plan.id === "collector";
-  const isFree = !isPro && !isCollector;
+  const planLabel = isPro ? "Pro Collector" : isCollector ? "Collector" : "Free";
 
-  const planLabel = isPro
-    ? "Pro Collector"
-    : isCollector
-    ? "Collector"
-    : "Free";
+  const canCsv = canExportCsv(plan);
+  const canInsurance = canSeeInsuranceReports(plan);
+  const canMovers = canSeeTrends(plan); // trends + movers flag
 
   // ---- Filters from query string ----
   const sort = first(sp.sort) ?? "date";
@@ -150,13 +152,14 @@ export default async function CollectionPage({
         OR set_name ILIKE '%' || ${query} || '%'
       )
     ORDER BY
-      CASE WHEN ${sort} = 'date' THEN created_at END DESC,
-      CASE WHEN ${sort} = 'name' THEN card_name END ASC
+      CASE WHEN ${sort} = 'date' THEN created_at END DESC NULLS LAST,
+      CASE WHEN ${sort} = 'name' THEN card_name END ASC NULLS LAST,
+      created_at DESC
   `);
 
   const items = rowsRes.rows ?? [];
 
-  // ---- Distinct set / folder options (for dropdowns) ----
+  // Build dropdown options (safe + stable)
   const setOptions = Array.from(
     new Set(
       items
@@ -173,29 +176,23 @@ export default async function CollectionPage({
     ),
   ).sort((a, b) => a.localeCompare(b));
 
-  // ---- Analytics summary for this view ----
+  // Summary numbers
   const distinctItems = items.length;
-  const totalCopies = items.reduce(
-    (sum, r) => sum + (r.quantity ?? 0),
-    0,
-  );
+  const totalCopies = items.reduce((sum, r) => sum + (r.quantity ?? 0), 0);
 
   const totalCostCents = items.reduce((sum, r) => {
     const qty = r.quantity ?? 0;
-    const cost = r.cost_cents ?? 0;
-    return sum + qty * cost;
+    const costEach = r.cost_cents ?? 0;
+    return sum + qty * costEach;
   }, 0);
 
   const estValueCents = items.reduce((sum, r) => {
     const qty = r.quantity ?? 0;
-    const value = r.last_value_cents ?? 0;
-    return sum + qty * value;
+    const valueEach = r.last_value_cents ?? 0;
+    return sum + qty * valueEach;
   }, 0);
 
-  const byGameMap = new Map<
-    string,
-    { copies: number; valueCents: number }
-  >();
+  const byGameMap = new Map<string, { copies: number; valueCents: number }>();
 
   for (const r of items) {
     const g = r.game ?? "other";
@@ -205,13 +202,11 @@ export default async function CollectionPage({
     byGameMap.set(g, entry);
   }
 
-  const byGame = Array.from(byGameMap.entries()).map(
-    ([gameKey, data]) => ({
-      game: gameKey,
-      copies: data.copies,
-      valueCents: data.valueCents,
-    }),
-  );
+  const byGame = Array.from(byGameMap.entries()).map(([gameKey, data]) => ({
+    game: gameKey,
+    copies: data.copies,
+    valueCents: data.valueCents,
+  }));
 
   const hasValueData = items.some(
     (r) => r.last_value_cents != null && r.last_value_cents > 0,
@@ -219,11 +214,9 @@ export default async function CollectionPage({
 
   const portfolioGainCents = estValueCents - totalCostCents;
   const portfolioGainPct =
-    totalCostCents > 0
-      ? (portfolioGainCents / totalCostCents) * 100
-      : null;
+    totalCostCents > 0 ? (portfolioGainCents / totalCostCents) * 100 : null;
 
-  // ---- Value history for sparkline (last ~60 days) ----
+  // Valuation sparkline history (never crashes the page)
   const historyRes = await db.execute<{
     as_of_date: string;
     total_value_cents: number | string | null;
@@ -247,7 +240,7 @@ export default async function CollectionPage({
     sparklinePoints.map((p) => p.value),
   );
 
-  // ---- Recently added (ignores filters, just last 5 overall) ----
+  // Recently added
   const recentRes = await db.execute<CollectionItem>(sql`
     SELECT
       id,
@@ -278,8 +271,8 @@ export default async function CollectionPage({
         <div>
           <h1 className="text-3xl font-bold">My Collection</h1>
           <p className="mt-1 text-sm text-white/80">
-            Manage your personal collection across Pokémon, Magic, and
-            Yu-Gi-Oh!. Filters, summary, and analytics update live.
+            Manage your personal collection across Pokémon, Magic, and Yu-Gi-Oh!.
+            Filters, summary, and analytics update live.
           </p>
           <p className="mt-1 text-sm text-white/70">
             View detailed charts and historical valuations on the{" "}
@@ -296,12 +289,8 @@ export default async function CollectionPage({
         <div className="flex flex-col items-start gap-2 sm:items-end">
           {/* Plan pill */}
           <div className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/5 px-3 py-1 text-xs">
-            <span className="uppercase tracking-wide text-white/50">
-              Plan
-            </span>
-            <span className="font-semibold text-white">
-              {planLabel}
-            </span>
+            <span className="uppercase tracking-wide text-white/50">Plan</span>
+            <span className="font-semibold text-white">{planLabel}</span>
           </div>
 
           {/* Actions */}
@@ -313,9 +302,10 @@ export default async function CollectionPage({
               View analytics
             </Link>
 
-            {isPro ? (
+            {/* ✅ CSV export */}
+            {canCsv ? (
               <a
-                href="/api/collection/export"
+                href="/api/pro/exports/collection"
                 className="rounded-lg border border-emerald-400/50 bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-50 hover:bg-emerald-500/30"
               >
                 Download collection CSV
@@ -328,6 +318,45 @@ export default async function CollectionPage({
                 Upgrade to Pro for CSV exports
               </Link>
             )}
+
+            {/* ✅ Pro tools goes to REAL page, not an API endpoint */}
+            {(canCsv || canMovers || canInsurance) && (
+              <Link
+                href="/pro"
+                className="rounded-lg border border-sky-400/40 bg-sky-500/15 px-3 py-1.5 text-xs font-medium text-sky-100 hover:bg-sky-500/25"
+              >
+                Pro tools
+              </Link>
+            )}
+
+            {/* ✅ Movers button should go to /pro/movers (real UI page),
+                and CSV is available with format=csv */}
+            {canMovers && (
+              <>
+                <Link
+                  href="/pro/movers"
+                  className="rounded-lg border border-white/25 bg-white/10 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/20"
+                >
+                  Movers
+                </Link>
+                <a
+                  href="/api/pro/exports/movers?days=7&limit=200&format=csv"
+                  className="rounded-lg border border-white/25 bg-white/10 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/20"
+                >
+                  Movers CSV (7d)
+                </a>
+              </>
+            )}
+
+            {/* ✅ Insurance CSV must pass format=csv */}
+            {canInsurance && (
+              <a
+                href="/api/pro/insurance?format=csv&threshold=250"
+                className="rounded-lg border border-white/25 bg-white/10 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/20"
+              >
+                Insurance CSV
+              </a>
+            )}
           </div>
         </div>
       </header>
@@ -336,50 +365,41 @@ export default async function CollectionPage({
 
       {/* Analytics row */}
       <div className="grid gap-3 md:grid-cols-4">
-        {/* Distinct items */}
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
           <div className="text-xs uppercase tracking-wide text-white/60">
             Distinct items
           </div>
-          <div className="mt-1 text-2xl font-semibold">
-            {distinctItems}
-          </div>
+          <div className="mt-1 text-2xl font-semibold">{distinctItems}</div>
           <div className="mt-1 text-[11px] text-white/60">
             Filtered by your current view.
           </div>
         </div>
 
-        {/* Total copies */}
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
           <div className="text-xs uppercase tracking-wide text-white/60">
             Total copies
           </div>
-          <div className="mt-1 text-2xl font-semibold">
-            {totalCopies}
-          </div>
+          <div className="mt-1 text-2xl font-semibold">{totalCopies}</div>
           <div className="mt-1 text-[11px] text-white/60">
             Sum of all quantities in this view.
           </div>
         </div>
 
-        {/* Portfolio value + sparkline */}
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
           <div className="text-xs uppercase tracking-wide text-white/60">
             Est. collection value
           </div>
           <div className="mt-1 text-2xl font-semibold">
-            {hasValueData
-              ? formatMoneyFromCents(estValueCents)
-              : "—"}
+            {hasValueData ? formatMoneyFromCents(estValueCents) : "—"}
           </div>
           <div className="mt-1 text-[11px] text-white/60">
             Based on latest price × quantity.
           </div>
+
           {hasValueData && (
             <>
               <div className="mt-2 text-xs text-white/70">
-                Cost basis:{" "}
-                <span>{formatMoneyFromCents(totalCostCents)}</span>
+                Cost basis: <span>{formatMoneyFromCents(totalCostCents)}</span>
                 {portfolioGainPct != null && (
                   <span
                     className={
@@ -420,7 +440,6 @@ export default async function CollectionPage({
           )}
         </div>
 
-        {/* By game */}
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
           <div className="flex items-center justify-between text-xs">
             <span className="uppercase tracking-wide text-white/60">
@@ -440,20 +459,13 @@ export default async function CollectionPage({
                   0,
                 );
                 const sharePct =
-                  totalForGame > 0
-                    ? (g.valueCents / totalForGame) * 100
-                    : 0;
+                  totalForGame > 0 ? (g.valueCents / totalForGame) * 100 : 0;
 
                 return (
-                  <div
-                    key={g.game}
-                    className="space-y-0.5 text-xs"
-                  >
+                  <div key={g.game} className="space-y-0.5 text-xs">
                     <div className="flex items-center justify-between">
                       <span>{label}</span>
-                      <span className="text-white/70">
-                        {g.copies}x
-                      </span>
+                      <span className="text-white/70">{g.copies}x</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
@@ -462,10 +474,7 @@ export default async function CollectionPage({
                           style={{
                             width: `${Math.max(
                               8,
-                              Math.min(
-                                100,
-                                sharePct || 0,
-                              ),
+                              Math.min(100, sharePct || 0),
                             )}%`,
                           }}
                         />
@@ -495,25 +504,17 @@ export default async function CollectionPage({
 
         {recent.length === 0 ? (
           <div className="rounded-lg border border-dashed border-white/20 bg-black/40 p-4 text-sm text-white/70">
-            When you add cards to your collection, they’ll show up here
-            for quick access.
+            When you add cards to your collection, they’ll show up here for quick
+            access.
           </div>
         ) : (
           <ul className="divide-y divide-white/10">
             {recent.map((r) => {
-              const dt =
-                r.created_at != null
-                  ? new Date(r.created_at)
-                  : null;
-              const when = dt
-                ? dt.toLocaleDateString()
-                : "";
+              const dt = r.created_at != null ? new Date(r.created_at) : null;
+              const when = dt ? dt.toLocaleDateString() : "";
 
               return (
-                <li
-                  key={r.id}
-                  className="flex items-center gap-3 py-2"
-                >
+                <li key={r.id} className="flex items-center gap-3 py-2">
                   <div className="relative h-14 w-10 shrink-0 overflow-hidden rounded border border-white/20 bg-black/40">
                     {r.image_url ? (
                       <Image
@@ -535,15 +536,12 @@ export default async function CollectionPage({
                       {r.card_name ?? r.card_id ?? "Unknown card"}
                     </div>
                     <div className="text-xs text-white/60">
-                      {r.set_name ?? "—"} •{" "}
-                      {formatGameLabel(r.game)}
+                      {r.set_name ?? "—"} • {formatGameLabel(r.game)}
                     </div>
                   </div>
                   <div className="text-right text-xs text-white/60">
                     <div>{when}</div>
-                    {r.quantity != null && (
-                      <div>{r.quantity}x</div>
-                    )}
+                    {r.quantity != null && <div>{r.quantity}x</div>}
                   </div>
                 </li>
               );
@@ -555,7 +553,6 @@ export default async function CollectionPage({
       {/* Filter bar */}
       <div className="rounded-2xl border border-white/20 bg-black/40 p-4 backdrop-blur-sm">
         <form className="flex flex-wrap items-center gap-3">
-          {/* Sort */}
           <select
             name="sort"
             defaultValue={sort}
@@ -565,7 +562,6 @@ export default async function CollectionPage({
             <option value="name">Name</option>
           </select>
 
-          {/* Game */}
           <select
             name="game"
             defaultValue={game}
@@ -577,7 +573,6 @@ export default async function CollectionPage({
             <option value="yugioh">Yu-Gi-Oh!</option>
           </select>
 
-          {/* Set */}
           <select
             name="set"
             defaultValue={setName}
@@ -591,7 +586,6 @@ export default async function CollectionPage({
             ))}
           </select>
 
-          {/* Folder */}
           <select
             name="folder"
             defaultValue={folder}
@@ -605,7 +599,6 @@ export default async function CollectionPage({
             ))}
           </select>
 
-          {/* Search */}
           <input
             type="text"
             name="q"
@@ -614,7 +607,10 @@ export default async function CollectionPage({
             className="flex-1 rounded-md bg-white/10 px-3 py-2 text-sm"
           />
 
-          <button className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-700">
+          <button
+            type="submit"
+            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-700"
+          >
             Filter
           </button>
         </form>

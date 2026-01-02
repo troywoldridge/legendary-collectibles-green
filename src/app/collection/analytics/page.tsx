@@ -1,3 +1,4 @@
+// src/app/collection/analytics/page.tsx
 import "server-only";
 
 import Link from "next/link";
@@ -5,15 +6,24 @@ import Image from "next/image";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
-import { getUserPlan } from "@/lib/plans";
+import {
+  getUserPlan,
+  canExportCsv,
+  canSeeInsuranceReports,
+  canSeeTrends,
+  canUseAdvancedLtvTools,
+} from "@/lib/plans";
 import CardSparkline from "@/components/collection/CardSparkline";
+import MoversInlinePanel from "@/components/collection/MoversInlinePanel";
+import InsuranceInlinePanel from "@/components/collection/InsuranceInlinePanel";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 type DailyValRow = {
-  as_of_date: string; // date
+  as_of_date: string;
   total_quantity: number;
   distinct_items: number;
   total_cost_cents: string | null;
@@ -29,7 +39,7 @@ type GameBreakdownRow = {
 type RecentItemRow = {
   id: string;
   game: string;
-  card_id: string; // NOT NULL in DB
+  card_id: string;
   card_name: string | null;
   set_name: string | null;
   image_url: string | null;
@@ -89,6 +99,8 @@ function buildSparklinePoints(
     .join(" ");
 }
 
+
+
 export default async function CollectionAnalyticsPage() {
   const { userId } = await auth();
   if (!userId) {
@@ -106,6 +118,10 @@ export default async function CollectionAnalyticsPage() {
   }
 
   const plan = await getUserPlan(userId);
+  const canCsv = canExportCsv(plan);
+  const canMovers = canSeeTrends(plan);
+  const canInsurance = canSeeInsuranceReports(plan);
+  const canLtv = canUseAdvancedLtvTools(plan);
 
   // ----- Load daily valuations -----
   const dailyRes = await db.execute<DailyValRow>(sql`
@@ -127,13 +143,11 @@ export default async function CollectionAnalyticsPage() {
   const latestValueCents = latest ? Number(latest.total_value_cents ?? 0) : 0;
   const prevValueCents = prev ? Number(prev.total_value_cents ?? 0) : 0;
   const changeCents = latestValueCents - prevValueCents;
-  const changePct =
-    prevValueCents > 0 ? (changeCents / prevValueCents) * 100 : null;
+  const changePct = prevValueCents > 0 ? (changeCents / prevValueCents) * 100 : null;
 
   const costCents = latest ? Number(latest.total_cost_cents ?? 0) : null;
   const unrealizedCents = costCents != null ? latestValueCents - costCents : null;
 
-  // History for portfolio chart
   const history = daily.map((d) => ({
     date: d.as_of_date,
     valueCents: Number(d.total_value_cents ?? 0),
@@ -160,7 +174,7 @@ export default async function CollectionAnalyticsPage() {
     }))
     .sort((a, b) => b.valueCents - a.valueCents);
 
-  // ----- Recently added (include card_id for sparklines) -----
+  // ----- Recently added -----
   const recentRes = await db.execute<RecentItemRow>(sql`
     SELECT
       id,
@@ -179,48 +193,153 @@ export default async function CollectionAnalyticsPage() {
   `);
   const recent = recentRes.rows ?? [];
 
-  const isPro = plan.id === "pro";
-
   return (
     <section className="max-w-6xl mx-auto px-4 py-6 text-white space-y-8">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Collection analytics</h1>
           <p className="mt-1 text-sm text-white/80">
-            Track your portfolio value, daily changes, and where your money is
-            concentrated.
+            Track your portfolio value, daily changes, and where your money is concentrated.
           </p>
         </div>
+
         <div className="flex flex-col items-end gap-2 sm:items-end">
           <Link href="/collection" className="text-sm text-sky-300 hover:underline">
             ← Back to collection
           </Link>
 
-          {isPro ? (
-            <a
-              href="/api/collection/export"
-              className="inline-flex items-center rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10"
-            >
-              Download collection CSV
-            </a>
-          ) : (
-            <Link
-              href="/pricing"
-              className="inline-flex items-center rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/20"
-            >
-              Upgrade to Pro for CSV exports
-            </Link>
-          )}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {canCsv ? (
+              <a
+                href="/api/pro/exports/collection"
+                className="inline-flex items-center rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10"
+              >
+                Download collection CSV
+              </a>
+            ) : (
+              <Link
+                href="/pricing"
+                className="inline-flex items-center rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/20"
+              >
+                Upgrade to Pro for CSV exports
+              </Link>
+            )}
+
+            {(canCsv || canMovers || canInsurance || canLtv) && (
+              <Link
+                href="/pro"
+                className="inline-flex items-center rounded-lg border border-sky-400/40 bg-sky-500/15 px-3 py-1.5 text-xs font-medium text-sky-100 hover:bg-sky-500/25"
+              >
+                Pro tools
+              </Link>
+            )}
+
+            {canMovers && (
+              <a
+                href="/api/pro/exports/movers?days=7&limit=200"
+                className="inline-flex items-center rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10"
+              >
+                Movers (7d)
+              </a>
+            )}
+
+            {canInsurance && (
+              <a
+                href="/api/pro/insurance?format=csv"
+                className="inline-flex items-center rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10"
+              >
+                Insurance CSV
+              </a>
+            )}
+          </div>
         </div>
       </header>
 
+      {/* ✅ Pro upgrades surfaced in-page */}
+      {(canMovers || canInsurance || canLtv || canCsv) && (
+        <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-white">Pro upgrades</div>
+              <div className="text-xs text-white/60">
+                Your plan unlocks power tools — movers, insurance exports, and advanced analytics.
+              </div>
+            </div>
+            <div className="text-xs text-white/50">
+              Tip: these downloads are “portfolio-grade” (great for taxes, resale, and insurance).
+            </div>
+          </div>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {canMovers && (
+              <>
+                <a
+                  href="/api/pro/exports/movers?days=7&limit=200"
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white hover:border-white/20 hover:bg-white/10"
+                >
+                  Movers (7d) CSV
+                  <div className="text-xs text-white/60">Biggest short-term swings</div>
+                </a>
+                <a
+                  href="/api/pro/exports/movers?days=30&limit=200"
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white hover:border-white/20 hover:bg-white/10"
+                >
+                  Movers (30d) CSV
+                  <div className="text-xs text-white/60">Longer trend shifts</div>
+                </a>
+              </>
+            )}
+
+            {canInsurance && (
+              <>
+                <a
+                  href="/api/pro/insurance?format=csv"
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white hover:border-white/20 hover:bg-white/10"
+                >
+                  Insurance CSV
+                  <div className="text-xs text-white/60">High-value items list</div>
+                </a>
+                <a
+                  href="/api/pro/insurance"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white hover:border-white/20 hover:bg-white/10"
+                >
+                  Insurance JSON
+                  <div className="text-xs text-white/60">Totals + breakdown</div>
+                </a>
+              </>
+            )}
+
+            {canLtv && (
+              <a
+                href="/api/pro/ltv"
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white hover:border-white/20 hover:bg-white/10"
+              >
+                Advanced LTV JSON
+                <div className="text-xs text-white/60">ROI + concentration stats</div>
+              </a>
+            )}
+
+            {canCsv && (
+              <Link
+                href="/pro"
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white hover:border-white/20 hover:bg-white/10"
+              >
+                Pro exports hub
+                <div className="text-xs text-white/60">Tax lots + high-value + backups</div>
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* --- Top summary cards --- */}
       <div className="grid gap-4 md:grid-cols-3">
-        {/* Total value */}
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-          <div className="text-xs uppercase tracking-wide text-white/60">
-            Portfolio value
-          </div>
+          <div className="text-xs uppercase tracking-wide text-white/60">Portfolio value</div>
           <div className="mt-2 text-2xl font-semibold">{fmtMoney(latestValueCents)}</div>
 
           {latest && <div className="mt-1 text-xs text-white/60">As of {fmtDate(latest.as_of_date)}</div>}
@@ -249,7 +368,6 @@ export default async function CollectionAnalyticsPage() {
           )}
         </div>
 
-        {/* Cost basis / PnL */}
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm space-y-2">
           <div className="text-xs uppercase tracking-wide text-white/60">Cost basis & PnL</div>
 
@@ -288,7 +406,6 @@ export default async function CollectionAnalyticsPage() {
           )}
         </div>
 
-        {/* By game */}
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
           <div className="text-xs uppercase tracking-wide text-white/60">Breakdown by game</div>
 
@@ -316,19 +433,18 @@ export default async function CollectionAnalyticsPage() {
         </div>
       </div>
 
+{canMovers && <MoversInlinePanel days={7} limit={8} />}
+{canInsurance && <InsuranceInlinePanel previewCount={5} />}
+
       {/* --- Portfolio chart --- */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <div className="flex items-center justify-between mb-2">
           <div>
             <h2 className="text-lg font-semibold text-white">Portfolio value over time</h2>
-            <p className="text-xs text-white/70">
-              Based on daily snapshots from the revalue script.
-            </p>
+            <p className="text-xs text-white/70">Based on daily snapshots from the revalue script.</p>
           </div>
           <div className="text-xs text-white/60">
-            {history.length > 1
-              ? `${history.length} day${history.length === 1 ? "" : "s"}`
-              : "Waiting for more history"}
+            {history.length > 1 ? `${history.length} day${history.length === 1 ? "" : "s"}` : "Waiting for more history"}
           </div>
         </div>
 
@@ -348,12 +464,7 @@ export default async function CollectionAnalyticsPage() {
                 strokeWidth="0.5"
                 className="text-white/20"
               />
-              <polyline
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                points={buildSparklinePoints(history, 260, 100)}
-              />
+              <polyline fill="none" stroke="currentColor" strokeWidth="2" points={buildSparklinePoints(history, 260, 100)} />
             </svg>
           </div>
         )}
@@ -373,8 +484,7 @@ export default async function CollectionAnalyticsPage() {
         ) : (
           <ul className="divide-y divide-white/10">
             {recent.map((r) => {
-              const valueCents =
-                r.last_value_cents != null ? r.last_value_cents * r.quantity : null;
+              const valueCents = r.last_value_cents != null ? r.last_value_cents * r.quantity : null;
 
               return (
                 <li key={r.id} className="flex items-center gap-3 py-2">
@@ -398,20 +508,15 @@ export default async function CollectionAnalyticsPage() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                       <div className="truncate">
-                        <div className="truncate text-sm font-medium">
-                          {r.card_name ?? "Unnamed card"}
-                        </div>
+                        <div className="truncate text-sm font-medium">{r.card_name ?? "Unnamed card"}</div>
                         <div className="truncate text-xs text-white/60">
                           {gameLabel(r.game)} {r.set_name ? `• ${r.set_name}` : ""}
                         </div>
 
-                        {/* Per-card sparkline (requires card_id) */}
                         <CardSparkline cardId={r.card_id} game={r.game} />
                       </div>
 
-                      <div className="text-right text-xs text-white/60">
-                        {fmtDate(r.created_at)}
-                      </div>
+                      <div className="text-right text-xs text-white/60">{fmtDate(r.created_at)}</div>
                     </div>
 
                     <div className="mt-1 flex items-center justify-between text-xs text-white/70">

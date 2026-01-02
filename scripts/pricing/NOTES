@@ -1,0 +1,21 @@
+Daily run (normal production)
+
+node scripts/pokemontcg/pokemontcg_prices_incremental.mjs
+node scripts/scryfall/scryfall_bulk_cards_sync.mjs
+node scripts/tcgdex/tcgdex_variant_prices_sync.mjs --concurrency 8
+node scripts/ygo/syncYgoFromYGOPRODeck.mjs
+
+node scripts/pricing/02_normalize_scryfall_prices.js
+node scripts/pricing/04_normalize_pokemon_vendor_prices.js
+node scripts/pricing/04b_normalize_pokemon_current_vendor_prices.js
+
+node scripts/pricing/03_build_market_price_daily.js --date $(date -u +%F) --currency USD
+
+
+
+Backfill / rebuild everything
+
+node scripts/pricing/02_normalize_scryfall_prices.js
+node scripts/pricing/04_normalize_pokemon_vendor_prices.js
+node scripts/pricing/04b_normalize_pokemon_current_vendor_prices.js
+node scripts/pricing/03_build_market_price_daily.js --all-dates --currency USD

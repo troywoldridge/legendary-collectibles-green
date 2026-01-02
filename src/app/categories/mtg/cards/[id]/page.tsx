@@ -1,3 +1,4 @@
+// src/app/categories/mtg/cards/[id]/page.tsx
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
 
@@ -19,6 +20,9 @@ import CardAmazonCTA from "@/components/CardAmazonCTA";
 import { getAffiliateLinkForCard } from "@/lib/affiliate";
 import CardEbayCTA from "@/components/CardEbayCTA";
 import CardActions from "@/components/collection/CardActions";
+
+import PriceAlertBell from "@/components/alerts/PriceAlertBell";
+import { getUserPlan, canUsePriceAlerts } from "@/lib/plans";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,13 +79,23 @@ type SetRow = {
   released_at: string | null;
 };
 
+type MarketItemRow = { id: string };
+
 /* ---------------- URL helpers ---------------- */
+function absBase() {
+  return (
+    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+    site?.url?.replace(/\/+$/, "") ||
+    "https://legendary-collectibles.com"
+  );
+}
+
 function absUrl(path: string) {
-  const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+  const base = absBase();
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
-function absMaybe(urlOrPath: string) {
+function absMaybe(urlOrPath?: string | null) {
   if (!urlOrPath) return absUrl("/og-image.png");
   if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
   return absUrl(urlOrPath);
@@ -151,6 +165,21 @@ async function resolveScryfallId(rawParam: string): Promise<string | null> {
 }
 
 /* ---------------- Pricing helpers ---------------- */
+async function getMarketItemForMtg(scryfallId: string): Promise<MarketItemRow | null> {
+  return (
+    (
+      await db.execute<MarketItemRow>(sql`
+        SELECT id::text AS id
+        FROM public.market_items
+        WHERE game = 'mtg'
+          AND canonical_source = 'scryfall'
+          AND canonical_id = ${scryfallId}::text
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null
+  );
+}
+
 function money(s?: string | null) {
   if (!s) return null;
   const n = Number(s);
@@ -164,16 +193,22 @@ function fmtCurrency(nStr: string | null, currency: Currency) {
   return `${currency === "EUR" ? "€" : "$"}${n}`;
 }
 
-function fmtTix(v?: string | null) {
-  if (!v) return "—";
+function tixNumber(v?: string | null): number | null {
+  if (!v) return null;
   const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return "—";
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+function fmtTix(v?: string | null) {
+  const n = tixNumber(v);
+  if (n == null) return "—";
   return n.toFixed(2);
 }
 
 /* ---------------- Meta fetch ---------------- */
 async function getMtgMeta(foundId: string): Promise<MtgMetaRow | null> {
-  const row =
+  return (
     (
       await db.execute<MtgMetaRow>(sql`
         SELECT
@@ -195,9 +230,8 @@ async function getMtgMeta(foundId: string): Promise<MtgMetaRow | null> {
         WHERE c.id::text = ${foundId}
         LIMIT 1
       `)
-    ).rows?.[0] ?? null;
-
-  return row;
+    ).rows?.[0] ?? null
+  );
 }
 
 /**
@@ -221,7 +255,6 @@ export async function generateMetadata({
 
   const foundId = await resolveScryfallId(rawParam);
 
-  // not found => noindex, but stable canonical
   if (!foundId) {
     const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(rawParam)}`);
     return {
@@ -233,7 +266,6 @@ export async function generateMetadata({
   }
 
   const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(foundId)}`);
-
   const meta = await getMtgMeta(foundId);
 
   const name = meta?.name ?? foundId;
@@ -255,12 +287,9 @@ export async function generateMetadata({
 
   const description = `${descBits.join(" • ")}.`;
 
-  const imgRaw =
-    (meta?.image_url ?? "").replace(/^http:\/\//, "https://") ||
-    site.ogImage ||
-    "/og-image.png";
-
-  const ogImage = absMaybe(imgRaw);
+  const ogImage = absMaybe(
+    (meta?.image_url ?? "").replace(/^http:\/\//, "https://") || site.ogImage || "/og-image.png",
+  );
 
   return {
     title,
@@ -325,11 +354,7 @@ function ManaSymbol({ t }: { t: string }) {
     const c1 = hexFor(a);
     const c2 = hexFor(b === "P" ? "B" : b);
     return (
-      <span
-        className="mana mana--hybrid"
-        style={{ ["--c1" as any]: c1, ["--c2" as any]: c2 }}
-        title={`Mana: ${up}`}
-      >
+      <span className="mana mana--hybrid" style={{ ["--c1" as any]: c1, ["--c2" as any]: c2 }} title={`Mana: ${up}`}>
         {up}
       </span>
     );
@@ -376,7 +401,7 @@ export default async function MtgCardDetailPage({
   const foundId = await resolveScryfallId(rawParam);
   if (!foundId) notFound();
 
-  // STEP 2: load card row (FACE-SAFE fields + correct market tables)
+  // Load card row
   const rowRes = await db.execute<CardRow>(sql`
     SELECT
       c.id::text AS id,
@@ -476,14 +501,62 @@ export default async function MtgCardDetailPage({
         ).rows?.[0] ?? null
       : null;
 
-  // kick off ebay snapshot updater (non-fatal)
+  // Scryfall image
+  const hero = (card.image_url ?? "").replace(/^http:\/\//, "https://") || null;
+  const heroAbs = absMaybe(hero);
+
+  // Primary-price presence
+  const hasPrimaryPrice =
+    !!money(card.usd) ||
+    !!money(card.usd_foil) ||
+    !!money(card.usd_etched) ||
+    !!money(card.eur) ||
+    tixNumber(card.tix) != null;
+
+  // Server eBay fallback (from market tables)
+  const serverEbayPrice = typeof card.ebay_usd_cents === "number" ? card.ebay_usd_cents / 100 : null;
+  const serverEbayUrl = card.ebay_url || null;
+
+  // currentUsd for alerts context
+  const currentUsd = (() => {
+    const s = money(card.usd);
+    if (s) return Number(s);
+    if (serverEbayPrice != null && Number.isFinite(serverEbayPrice)) return serverEbayPrice;
+    return null;
+  })();
+
+  // Pro-gated alerts
+  let canUseAlerts = false;
+  let marketItemId: string | null = null;
+  if (userId) {
+    const plan = await getUserPlan(userId);
+    canUseAlerts = canUsePriceAlerts(plan);
+
+    if (canUseAlerts) {
+      const marketItem = await getMarketItemForMtg(foundId);
+      marketItemId = marketItem?.id ?? null;
+    }
+  }
+
+  // non-fatal ebay snapshot updater (best-effort)
   try {
     await getLatestEbaySnapshot({ category: "mtg", cardId: card.id, segment: "all" });
   } catch (err) {
     console.error("[ebay snapshot failed]", err);
   }
 
-  const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(card.id)}`);
+  // Affiliate link
+  const amazonLink = await getAffiliateLinkForCard({
+    category: "mtg",
+    cardId: card.id,
+    marketplace: "amazon",
+  });
+
+  const setHref = card.set_code ? `/categories/mtg/sets/${encodeURIComponent(card.set_code)}` : null;
+  const baseHref = `/categories/mtg/cards/${encodeURIComponent(card.id)}`;
+
+  // JSON-LD
+  const canonical = absUrl(baseHref);
 
   const breadcrumbsJsonLd = {
     "@context": "https://schema.org",
@@ -496,37 +569,74 @@ export default async function MtgCardDetailPage({
     ],
   };
 
-  const hero = (card.image_url ?? "").replace(/^http:\/\//, "https://") || null;
-  const setHref = card.set_code ? `/categories/mtg/sets/${encodeURIComponent(card.set_code)}` : null;
+  const productJsonLd: any = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    "@id": `${canonical}#product`,
+    name: card.name ?? card.id,
+    sku: card.id,
+    url: canonical,
+    image: heroAbs ? [heroAbs] : undefined,
+    category: "Magic: The Gathering Trading Card",
+    brand: { "@type": "Brand", name: "Magic: The Gathering" },
+    description: [
+      card.type_line ? card.type_line : null,
+      card.rarity ? `Rarity: ${card.rarity}` : null,
+      card.set_code ? `Set: ${card.set_code.toUpperCase()}` : null,
+      card.collector_number ? `Collector #: ${card.collector_number}` : null,
+    ]
+      .filter(Boolean)
+      .join(" • "),
+  };
 
-  const hasPrimaryPrice =
-    !!money(card.usd) ||
-    !!money(card.usd_foil) ||
-    !!money(card.usd_etched) ||
-    !!money(card.eur) ||
-    !!fmtTix(card.tix).replace("—", "");
+  if (currentUsd != null && currentUsd > 0) {
+    productJsonLd.offers = {
+      "@type": "Offer",
+      url: canonical,
+      priceCurrency: "USD",
+      price: currentUsd.toFixed(2),
+      availability: "https://schema.org/InStock",
+      itemCondition: "https://schema.org/UsedCondition",
+      seller: {
+        "@type": "Organization",
+        name: site.name ?? "Legendary Collectibles",
+        url: absBase(),
+      },
+    };
+  }
 
-  const serverEbayPrice = typeof card.ebay_usd_cents === "number" ? card.ebay_usd_cents / 100 : null;
-  const serverEbayUrl = card.ebay_url || null;
+  const webPageJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "@id": `${canonical}#webpage`,
+    url: canonical,
+    name: `${card.name ?? card.id} — MTG Card`,
+    isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: absBase() },
+    primaryImageOfPage: heroAbs ? { "@type": "ImageObject", url: heroAbs } : undefined,
+    mainEntity: { "@id": `${canonical}#product` },
+  };
 
   const ebayQ = [card.name ?? "", card.set_code || setRow?.name || "", card.collector_number || "", "MTG"]
     .filter(Boolean)
     .join(" ");
 
-  const amazonLink = await getAffiliateLinkForCard({
-    category: "mtg",
-    cardId: card.id,
-    marketplace: "amazon",
-  });
-
-  const baseHref = `/categories/mtg/cards/${encodeURIComponent(card.id)}`;
-
   return (
     <section className="space-y-8">
+      {/* JSON-LD */}
+      <Script
+        id="mtg-card-webpage-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
+      />
       <Script
         id="mtg-card-breadcrumbs-jsonld"
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }}
+      />
+      <Script
+        id="mtg-card-product-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
       />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -610,7 +720,7 @@ export default async function MtgCardDetailPage({
 
             <ManaCost cost={card.mana_cost} />
 
-            <div className="mt-4">
+            <div className="mt-4 flex flex-wrap items-center gap-2">
               <CardActions
                 game="mtg"
                 cardId={card.id}
@@ -619,6 +729,40 @@ export default async function MtgCardDetailPage({
                 imageUrl={hero ?? undefined}
                 canSave={canSave}
               />
+
+              {/* ✅ Pro-gated alerts */}
+              {userId ? (
+                canUseAlerts ? (
+                  marketItemId ? (
+                    <PriceAlertBell
+                      game="mtg"
+                      marketItemId={marketItemId}
+                      label={card.name ?? card.id}
+                      currentUsd={currentUsd}
+                    />
+                  ) : (
+                    <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
+                      🔔 Alerts unavailable
+                    </span>
+                  )
+                ) : (
+                  <Link
+                    href="/pricing"
+                    className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                    prefetch={false}
+                  >
+                    🔔 Price alerts (Pro)
+                  </Link>
+                )
+              ) : (
+                <Link
+                  href="/sign-in"
+                  className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                  prefetch={false}
+                >
+                  🔔 Sign in for alerts
+                </Link>
+              )}
             </div>
 
             <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -632,7 +776,7 @@ export default async function MtgCardDetailPage({
                 }}
                 game="Magic: The Gathering"
               />
-              <CardAmazonCTA url={amazonLink?.url} label={card.name} />
+              <CardAmazonCTA url={amazonLink?.url} label={card.name ?? undefined} />
             </div>
           </div>
 
@@ -646,7 +790,6 @@ export default async function MtgCardDetailPage({
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-              {/* Show both rows, but format using chosen currency where relevant */}
               <div>
                 <div className="text-sm text-white/70">USD</div>
                 <div className="text-lg font-semibold text-white">{fmtCurrency(card.usd, "USD")}</div>
@@ -659,12 +802,10 @@ export default async function MtgCardDetailPage({
                 <div className="text-sm text-white/70">USD Etched</div>
                 <div className="text-lg font-semibold text-white">{fmtCurrency(card.usd_etched, "USD")}</div>
               </div>
-
               <div>
                 <div className="text-sm text-white/70">EUR</div>
                 <div className="text-lg font-semibold text-white">{fmtCurrency(card.eur, "EUR")}</div>
               </div>
-
               <div>
                 <div className="text-sm text-white/70">TIX</div>
                 <div className="text-lg font-semibold text-white">{fmtTix(card.tix)}</div>
@@ -697,19 +838,16 @@ export default async function MtgCardDetailPage({
           </section>
 
           {/* Rules text */}
-          {card.oracle_text ? (
-            <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-              <h2 className="text-lg font-semibold text-white">Rules Text</h2>
+          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+            <h2 className="text-lg font-semibold text-white">Rules Text</h2>
+            {card.oracle_text ? (
               <div className="mt-2 text-sm text-white/85">{nl2p(card.oracle_text)}</div>
-            </section>
-          ) : (
-            <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-              <h2 className="text-lg font-semibold text-white">Rules Text</h2>
+            ) : (
               <div className="mt-2 text-sm text-white/60">
                 No rules text available for this item (common for art cards, tokens, or special prints).
               </div>
-            </section>
-          )}
+            )}
+          </section>
         </div>
       </div>
     </section>
