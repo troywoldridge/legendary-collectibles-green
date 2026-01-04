@@ -9,6 +9,10 @@ import {
   productTags,
 } from "@/lib/db/schema/shop";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+
 // ---- helpers ----
 function toBool(v: string | null): boolean | null {
   if (v === null) return null;
@@ -27,7 +31,8 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-const ALLOWED_GAMES = new Set(["pokemon", "yugioh", "mtg" ]);
+const ALLOWED_GAMES = new Set(["pokemon", "yugioh", "mtg", "sports"]);
+
 const ALLOWED_FORMATS = new Set(["single", "pack", "box", "bundle", "lot", "accessory"]);
 const ALLOWED_GRADERS = new Set(["psa", "bgs", "cgc", "sgc"]);
 const ALLOWED_CONDITIONS = new Set(["nm", "lp", "mp", "hp", "dmg"]);

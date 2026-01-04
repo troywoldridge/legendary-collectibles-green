@@ -1,4 +1,5 @@
 import "server-only";
+
 import Link from "next/link";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
@@ -7,7 +8,7 @@ import { site } from "@/config/site";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type DeptKey = "pokemon" | "yugioh" | "mtg" | "accessories";
+type DeptKey = "pokemon" | "yugioh" | "mtg" | "sports" | "accessories";
 
 type Dept = {
   name: string;
@@ -55,6 +56,19 @@ const DEPTS: Record<DeptKey, Dept> = {
     ],
   },
 
+  sports: {
+    name: "Sports Cards",
+    desc: "Singles, lots, sealed product and supplies.",
+    categories: [
+      { key: "singles", name: "Singles", desc: "Raw sports card singles" },
+      { key: "graded", name: "Graded", desc: "PSA/BGS/SGC graded sports cards" },
+      { key: "packs", name: "Packs", desc: "Sealed packs" },
+      { key: "boxes", name: "Boxes", desc: "Sealed boxes" },
+      { key: "bundles", name: "Bundles", desc: "Bundles and sealed collections" },
+      { key: "accessories", name: "Accessories", desc: "Supplies for sports collecting" },
+    ],
+  },
+
   accessories: {
     name: "Accessories",
     desc: "Sleeves, binders, deck boxes, storage and more.",
@@ -66,7 +80,11 @@ function norm(s: string) {
   return (s || "").trim().toLowerCase();
 }
 
-export async function generateMetadata({ params }: { params: { department: string } }): Promise<Metadata> {
+export async function generateMetadata({
+  params,
+}: {
+  params: { department: string };
+}): Promise<Metadata> {
   const d = norm(params.department) as DeptKey;
   const dept = DEPTS[d];
   const canonical = `${site.url}/shop/${encodeURIComponent(params.department)}`;

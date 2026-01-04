@@ -1,5 +1,6 @@
 // src/app/shop/[game]/[format]/page.tsx
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import ProductGrid from "@/components/shop/ProductGrid";
 import ShopFilters from "@/components/shop/ShopFilters";
@@ -26,6 +27,7 @@ function formatLabel(format: string) {
       return format.toUpperCase();
   }
 }
+
 function gameLabel(game: string) {
   switch (game) {
     case "pokemon":
@@ -40,6 +42,27 @@ function gameLabel(game: string) {
       return game.toUpperCase();
   }
 }
+
+async function resolveBaseUrl() {
+  const envUrl =
+    process.env.NEXT_PUBLIC_APP_URL ??
+    process.env.APP_URL ??
+    process.env.VERCEL_URL ??
+    process.env.VERCEL_PROJECT_PRODUCTION_URL ??
+    site.url;
+
+  if (envUrl) {
+    const withProtocol = envUrl.startsWith("http") ? envUrl : `https://${envUrl}`;
+    return withProtocol.replace(/\/$/, "");
+  }
+
+  const hdrs = await headers();
+  const host = hdrs.get("x-forwarded-host") || hdrs.get("host");
+  const proto = hdrs.get("x-forwarded-proto") || "https";
+
+  return host ? `${proto}://${host}` : "http://127.0.0.1:3001";
+}
+
 
 async function fetchProducts(args: {
   game: string;
@@ -71,8 +94,7 @@ async function fetchProducts(args: {
     if (typeof v === "string" && v.length) query.set(k, v);
   }
 
-  // Use site.url server-side so it matches production.
-  const base = (site?.url ?? "http://localhost:3000").replace(/\/$/, "");
+  const base = resolveBaseUrl();
   const res = await fetch(`${base}/api/shop/products?${query.toString()}`, { cache: "no-store" });
 
   if (!res.ok) throw new Error("Failed to load products");

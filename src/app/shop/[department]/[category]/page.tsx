@@ -1,5 +1,7 @@
+// src/app/shop/[department]/[category]/page.tsx
 import "server-only";
 
+import type { Metadata } from "next";
 import Link from "next/link";
 import Image from "next/image";
 import { notFound } from "next/navigation";
@@ -8,7 +10,7 @@ import AddToCartButton from "@/components/shop/AddToCartButton";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type DeptKey = "pokemon" | "yugioh" | "mtg" | "accessories";
+type DeptKey = "pokemon" | "yugioh" | "mtg" | "sports" | "accessories";
 
 function norm(v: unknown) {
   const s = String(v ?? "").trim();
@@ -32,23 +34,72 @@ function deptLabel(d: DeptKey) {
       return "Yu-Gi-Oh!";
     case "mtg":
       return "Magic: The Gathering";
+    case "sports":
+      return "Sports Cards";
     case "accessories":
       return "Accessories";
   }
 }
 
 type ApiQuery = {
-  game?: "pokemon" | "yugioh" | "mtg";
+  game?: "pokemon" | "yugioh" | "mtg" | "sports";
   format?: "single" | "pack" | "box" | "bundle" | "lot" | "accessory";
   sealed?: boolean;
   graded?: boolean;
 };
 
-function categoryToApi(dept: DeptKey, category: string): { label: string; api: ApiQuery } | null {
+function normalizeCategorySlug(raw: string): string {
+  // Accept a bunch of friendly URLs and normalize to a stable set.
+  // You can add more aliases as you create more categories.
+  switch (raw) {
+    case "single":
+    case "singles":
+      return "single";
+
+    case "graded":
+    case "slabs":
+      return "graded";
+
+    case "pack":
+    case "packs":
+      return "pack";
+
+    case "box":
+    case "boxes":
+      return "box";
+
+    case "bundle":
+    case "bundles":
+    case "etb":
+    case "etbs":
+      return "bundle";
+
+    case "lot":
+    case "lots":
+      return "lot";
+
+    case "accessory":
+    case "accessories":
+      return "accessory";
+
+    case "all":
+      return "all";
+
+    default:
+      return raw;
+  }
+}
+
+function categoryToApi(
+  dept: DeptKey,
+  categoryRaw: string
+): { label: string; api: ApiQuery } | null {
+  const category = normalizeCategorySlug(categoryRaw);
+
   // Accessories department = accessories across *all* games
   if (dept === "accessories") {
     if (category === "all") return { label: "All Accessories", api: { format: "accessory" } };
-    // optional: support subcategories later like sleeves/toploaders with tag=...
+    if (category === "accessory") return { label: "Accessories", api: { format: "accessory" } };
     return null;
   }
 
@@ -56,25 +107,22 @@ function categoryToApi(dept: DeptKey, category: string): { label: string; api: A
   const game = dept;
 
   switch (category) {
-    case "singles":
+    case "single":
       return { label: "Singles", api: { game, format: "single" } };
 
     case "graded":
-      // Your API supports graded=true (and your products table has is_graded)
       return { label: "Graded Singles", api: { game, format: "single", graded: true } };
 
-    case "packs":
-      // Your DB sample uses format=pack and sealed=true for packs
+    case "pack":
       return { label: "Booster Packs", api: { game, format: "pack", sealed: true } };
 
-    case "boxes":
+    case "box":
       return { label: "Booster Boxes", api: { game, format: "box", sealed: true } };
 
-    case "bundles":
+    case "bundle":
       return { label: "Bundles / ETBs", api: { game, format: "bundle", sealed: true } };
 
-    case "accessories":
-      // accessories tied to a game (pokemon accessories etc.)
+    case "accessory":
       return { label: "Accessories", api: { game, format: "accessory" } };
 
     default:
@@ -82,7 +130,10 @@ function categoryToApi(dept: DeptKey, category: string): { label: string; api: A
   }
 }
 
-async function fetchShopProducts(api: ApiQuery, searchParams: Record<string, string | string[] | undefined>) {
+async function fetchShopProducts(
+  api: ApiQuery,
+  searchParams: Record<string, string | string[] | undefined>
+) {
   const qs = new URLSearchParams();
 
   if (api.game) qs.set("game", api.game);
@@ -91,7 +142,18 @@ async function fetchShopProducts(api: ApiQuery, searchParams: Record<string, str
   if (typeof api.graded === "boolean") qs.set("graded", api.graded ? "true" : "false");
 
   // Pass-through a few supported query params (optional)
-  const passthrough = ["q", "sort", "page", "limit", "priceMin", "priceMax", "grader", "gradeMin", "condition", "tag"];
+  const passthrough = [
+    "q",
+    "sort",
+    "page",
+    "limit",
+    "priceMin",
+    "priceMax",
+    "grader",
+    "gradeMin",
+    "condition",
+    "tag",
+  ];
   for (const key of passthrough) {
     const v = searchParams[key];
     if (typeof v === "string" && v.trim()) qs.set(key, v.trim());
@@ -110,6 +172,27 @@ async function fetchShopProducts(api: ApiQuery, searchParams: Record<string, str
   return res.json() as Promise<{ items: any[]; total: number; page: number; limit: number }>;
 }
 
+export async function generateMetadata({
+  params,
+}: {
+  params: { department: string; category: string };
+}): Promise<Metadata> {
+  const dept = norm(params.department) as DeptKey;
+  const category = norm(params.category);
+
+  const validDept =
+    dept === "pokemon" || dept === "yugioh" || dept === "mtg" || dept === "sports" || dept === "accessories";
+  if (!validDept) return { title: "Shop • Legendary Collectibles" };
+
+  const cfg = categoryToApi(dept, category);
+  if (!cfg) return { title: `Shop • ${deptLabel(dept)} • Legendary Collectibles` };
+
+  return {
+    title: `Shop • ${deptLabel(dept)} • ${cfg.label} • Legendary Collectibles`,
+    description: `Browse ${cfg.label} in ${deptLabel(dept)}.`,
+  };
+}
+
 export default async function ShopCategoryPage({
   params,
   searchParams,
@@ -120,13 +203,16 @@ export default async function ShopCategoryPage({
   const dept = norm(params.department) as DeptKey;
   const category = norm(params.category);
 
-  const validDept = dept === "pokemon" || dept === "yugioh" || dept === "mtg" || dept === "accessories";
+  const validDept =
+    dept === "pokemon" || dept === "yugioh" || dept === "mtg" || dept === "sports" || dept === "accessories";
   if (!validDept) return notFound();
 
   const cfg = categoryToApi(dept, category);
   if (!cfg) return notFound();
 
   const data = await fetchShopProducts(cfg.api, searchParams);
+
+  const canonicalCategory = normalizeCategorySlug(category);
 
   return (
     <main className="shopShell">
@@ -150,13 +236,22 @@ export default async function ShopCategoryPage({
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          <Link className="chip" href={{ pathname: `/shop/${dept}/${category}`, query: { ...searchParams, sort: "new" } }}>
+          <Link
+            className="chip"
+            href={{ pathname: `/shop/${dept}/${canonicalCategory}`, query: { ...searchParams, sort: "new" } }}
+          >
             Newest
           </Link>
-          <Link className="chip" href={{ pathname: `/shop/${dept}/${category}`, query: { ...searchParams, sort: "price_asc" } }}>
+          <Link
+            className="chip"
+            href={{ pathname: `/shop/${dept}/${canonicalCategory}`, query: { ...searchParams, sort: "price_asc" } }}
+          >
             Price ↑
           </Link>
-          <Link className="chip" href={{ pathname: `/shop/${dept}/${category}`, query: { ...searchParams, sort: "price_desc" } }}>
+          <Link
+            className="chip"
+            href={{ pathname: `/shop/${dept}/${canonicalCategory}`, query: { ...searchParams, sort: "price_desc" } }}
+          >
             Price ↓
           </Link>
         </div>
@@ -173,7 +268,7 @@ export default async function ShopCategoryPage({
             {data.items.map((p: any) => {
               const imgUrl = p?.image?.url || null;
               const imgAlt = p?.image?.alt || p?.title || "Product image";
-              const href = `/product/${p.slug}`; // change to /products/${p.slug} if that's your route
+              const href = `/product/${p.slug}`; // change if your product route differs
 
               return (
                 <div key={p.id} className="overflow-hidden rounded-2xl border border-white/10 bg-white/5">
@@ -189,7 +284,9 @@ export default async function ShopCategoryPage({
                           priority={false}
                         />
                       ) : (
-                        <div className="absolute inset-0 flex items-center justify-center text-white/40 text-sm">No image</div>
+                        <div className="absolute inset-0 flex items-center justify-center text-white/40 text-sm">
+                          No image
+                        </div>
                       )}
                     </div>
                   </Link>
@@ -213,7 +310,11 @@ export default async function ShopCategoryPage({
                     <div className="mt-4 flex items-center justify-between gap-3">
                       <div className="text-white font-bold">{dollars(p.priceCents)}</div>
                       <div className="text-xs text-white/50">
-                        {typeof p.quantity === "number" ? (p.quantity > 0 ? `${p.quantity} in stock` : "Out of stock") : ""}
+                        {typeof p.quantity === "number"
+                          ? p.quantity > 0
+                            ? `${p.quantity} in stock`
+                            : "Out of stock"
+                          : ""}
                       </div>
                     </div>
 
