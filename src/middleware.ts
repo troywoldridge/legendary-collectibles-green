@@ -1,11 +1,13 @@
 // src/middleware.ts
-import { NextResponse } from "next/server";
+import "server-only";
+
+import { NextResponse, type NextRequest } from "next/server";
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { getClerkMiddlewareConfig } from "@/lib/clerk/config";
 
 /**
- * Public routes (your original):
- * Anything not matched here is protected by Clerk.
+ * Public routes:
+ * Anything NOT matched here is protected by Clerk.
  */
 const isPublicRoute = createRouteMatcher([
   // Public pages
@@ -44,15 +46,19 @@ const isPublicRoute = createRouteMatcher([
 const clerkEnv = getClerkMiddlewareConfig();
 
 export default clerkMiddleware(
+  async (auth, req: NextRequest) => {
+    if (isPublicRoute(req)) return NextResponse.next();
+
+    // Protect everything else
+    await auth.protect();
+
+    return NextResponse.next();
+  },
   {
+    // Clerk "dynamic keys" for server-side helpers
     publishableKey: clerkEnv.publishableKey,
     secretKey: clerkEnv.secretKey,
     proxyUrl: clerkEnv.proxyUrl,
-  },
-  async (auth, req) => {
-    if (isPublicRoute(req)) return NextResponse.next();
-
-    await auth.protect();
   },
 );
 
