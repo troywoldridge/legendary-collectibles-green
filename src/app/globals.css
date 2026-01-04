@@ -193,9 +193,12 @@ body::after {
 
 /* Shop */
 .shopShell { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+.shopShell--wide { max-width: 1280px; }
 .shopHeader { margin-bottom: 18px; }
 .shopTitle { font-size: 28px; margin: 0; }
 .shopSubtitle { opacity: .85; margin: 6px 0 0; }
+.shopAccent { margin-top: 6px; color: #a5b4fc; font-weight: 600; }
+.eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: 11px; opacity: .8; margin-bottom: 4px; }
 
 .shopSection { margin-top: 18px; }
 .shopH2 { font-size: 18px; margin: 0 0 10px; }
@@ -204,12 +207,21 @@ body::after {
 .tile { display: block; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 14px; text-decoration: none; }
 .tile:hover { border-color: rgba(255,255,255,.22); }
 .tileSmall { padding: 12px; }
+.tileLarge { padding: 16px; position: relative; overflow: hidden; }
+.tileBadge { position: absolute; top: 12px; right: 12px; padding: 6px 10px; border-radius: 999px; background: rgba(255,255,255,.12); font-size: 12px; }
 .tileTitle { font-weight: 700; }
 .tileDesc { opacity: .8; margin-top: 6px; font-size: 14px; }
 .tileCta { margin-top: 10px; opacity: .9; font-size: 14px; }
 
 .chipRow { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip { border: 1px solid rgba(255,255,255,.14); border-radius: 999px; padding: 8px 12px; text-decoration: none; font-size: 14px; }
+
+.shopMeta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.12); font-size: 12px; }
+.pillGhost { background: rgba(255,255,255,.05); }
+
+.shopSortRow { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sortLabel { font-size: 12px; opacity: .75; text-transform: uppercase; letter-spacing: .08em; }
 
 .shopLayout { display: grid; grid-template-columns: 280px 1fr; gap: 16px; margin-top: 14px; }
 .shopSidebar { border: 1px solid rgba(255,255,255,.10); border-radius: 14px; padding: 14px; }
@@ -254,6 +266,28 @@ body::after {
   .shopLayout { grid-template-columns: 1fr; }
   .productGrid { grid-template-columns: 1fr; }
 }
+
+/* New ecommerce polish */
+.emptyState { margin-top: 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 16px; padding: 18px; background: rgba(255,255,255,.04); }
+.emptyTitle { font-weight: 800; }
+.emptySubtitle { opacity: .8; margin-top: 4px; }
+.emptyError { margin-top: 8px; font-size: 12px; opacity: .6; }
+
+.productMasonry { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 10px; }
+.productTile { border: 1px solid rgba(255,255,255,.12); border-radius: 16px; overflow: hidden; background: rgba(255,255,255,.04); display: flex; flex-direction: column; }
+.productTile__media { position: relative; display: block; }
+.productTile__imgWrap { position: relative; aspect-ratio: 4/3; background: rgba(255,255,255,.05); }
+.productTile__placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,.6); font-size: 13px; }
+.productTile__badge { position: absolute; top: 10px; left: 10px; padding: 6px 10px; border-radius: 12px; border: 1px solid rgba(255,255,255,.16); background: rgba(0,0,0,.55); font-size: 12px; }
+.productTile__body { padding: 14px; display: grid; gap: 8px; flex: 1; }
+.productTile__title { font-weight: 700; }
+.productTile__subtitle { opacity: .8; font-size: 13px; min-height: 32px; }
+.productTile__priceRow { display: flex; gap: 8px; align-items: baseline; }
+.productTile__price { font-weight: 800; font-size: 18px; }
+.productTile__compare { text-decoration: line-through; opacity: .6; font-size: 13px; }
+.productTile__meta { font-size: 12px; opacity: .75; }
+.productTile__actions { display: flex; gap: 8px; }
+.btnInline { width: 100%; text-align: center; }
 
 /* Admin Token Gate */
 .adminGate {
@@ -583,4 +617,3 @@ body::after {
 .shopHeader::after {
   pointer-events: none;
 }
-
