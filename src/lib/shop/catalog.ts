@@ -176,40 +176,58 @@ export function getCategoryConfig(
   return cfg ?? null;
 }
 
-export function categoryToApi(dept: DepartmentKey, category: CategorySlug): { label: string; api: ShopApiQuery } | null {
+/**
+ * ShopApiQuery's `game` only supports the collectible departments.
+ * Accessories is treated as a special "format" query (no `game`).
+ */
+type GameDepartmentKey = Exclude<DepartmentKey, "accessories">;
+
+export function categoryToApi(
+  dept: DepartmentKey,
+  category: CategorySlug
+): { label: string; api: ShopApiQuery } | null {
+  // Accessories department is special: never set api.game
+  if (dept === "accessories") {
+    switch (category) {
+      case "all":
+      case "accessories":
+        return { label: "Accessories", api: { format: "accessory" } };
+      default:
+        // These categories don't make sense for accessories
+        return null;
+    }
+  }
+
+  // From here down, dept is a valid game key for ShopApiQuery.game
+  const game = dept as GameDepartmentKey;
+
   switch (category) {
     case "all":
-      return {
-        label: `${DEPARTMENTS[dept].name} — All`,
-        api: dept === "accessories" ? { format: "accessory" } : { game: dept },
-      };
+      return { label: `${DEPARTMENTS[dept].name} — All`, api: { game } };
 
     case "singles":
-      return { label: "Singles", api: { game: dept, format: "single" } };
+      return { label: "Singles", api: { game, format: "single" } };
 
     case "graded":
-      return { label: "Graded Singles", api: { game: dept, format: "single", graded: true } };
+      return { label: "Graded Singles", api: { game, format: "single", graded: true } };
 
     case "packs":
-      return { label: "Packs", api: { game: dept, format: "pack", sealed: true } };
+      return { label: "Packs", api: { game, format: "pack", sealed: true } };
 
     case "boxes":
-      return { label: "Boxes", api: { game: dept, format: "box", sealed: true } };
+      return { label: "Boxes", api: { game, format: "box", sealed: true } };
 
     case "bundles":
-      return { label: "Bundles", api: { game: dept, format: "bundle", sealed: true } };
+      return { label: "Bundles", api: { game, format: "bundle", sealed: true } };
 
     case "lots":
-      return { label: "Lots", api: { game: dept, format: "lot" } };
+      return { label: "Lots", api: { game, format: "lot" } };
 
     case "accessories":
-      return {
-        label: "Accessories",
-        api: dept === "accessories" ? { format: "accessory" } : { game: dept, format: "accessory" },
-      };
+      // Accessories within a game department (eg Pokémon accessories)
+      return { label: "Accessories", api: { game, format: "accessory" } };
 
     default:
       return null;
   }
 }
-

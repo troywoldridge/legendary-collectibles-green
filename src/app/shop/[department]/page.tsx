@@ -2,12 +2,9 @@ import "server-only";
 
 import Link from "next/link";
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { site } from "@/config/site";
-import {
-  getDepartmentConfig,
-  normalizeDepartmentSlug,
-} from "@/lib/shop/catalog";
+import { getDepartmentConfig, normalizeDepartmentSlug } from "@/lib/shop/catalog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,9 +14,12 @@ export async function generateMetadata({
 }: {
   params: { department: string };
 }): Promise<Metadata> {
-  const d = normalizeDepartmentSlug(params.department);
-  const dept = d ? getDepartmentConfig(d) : null;
-  const canonical = `${site.url}/shop/${encodeURIComponent(params.department)}`;
+  const deptKey = normalizeDepartmentSlug(params.department);
+  const dept = deptKey ? getDepartmentConfig(deptKey) : null;
+
+  const canonical = deptKey
+    ? `${site.url}/shop/${encodeURIComponent(deptKey)}`
+    : `${site.url}/shop/${encodeURIComponent(params.department)}`;
 
   if (!dept) {
     return {
@@ -37,9 +37,15 @@ export async function generateMetadata({
 }
 
 export default function DepartmentPage({ params }: { params: { department: string } }) {
-  const d = normalizeDepartmentSlug(params.department);
-  const dept = d ? getDepartmentConfig(d) : null;
-  if (!dept) return notFound();
+  const deptKey = normalizeDepartmentSlug(params.department);
+  const dept = deptKey ? getDepartmentConfig(deptKey) : null;
+  if (!deptKey || !dept) return notFound();
+
+  // Canonicalize /shop/yugi -> /shop/yugioh (and any casing weirdness)
+  const raw = String(params.department ?? "").trim().toLowerCase();
+  if (raw !== deptKey) {
+    redirect(`/shop/${deptKey}`);
+  }
 
   return (
     <main className="shopShell">
@@ -59,7 +65,7 @@ export default function DepartmentPage({ params }: { params: { department: strin
       <section className="shopSection">
         <div className="tileGrid">
           {dept.categories.map((c) => (
-            <Link key={c.slug} href={`/shop/${d}/${c.slug}`} className="tile tileLarge">
+            <Link key={c.slug} href={`/shop/${deptKey}/${c.slug}`} className="tile tileLarge">
               <div className="tileTitle">{c.name}</div>
               <div className="tileDesc">{c.description}</div>
               <div className="tileCta">Browse →</div>

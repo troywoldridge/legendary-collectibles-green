@@ -1,4 +1,5 @@
 import "server-only";
+
 import Link from "next/link";
 import type { Metadata } from "next";
 import { site } from "@/config/site";
