@@ -11,6 +11,7 @@ import ConsoleBinder from "@/components/ConsoleBinder";
 import { site } from "@/config/site";
 import { cfUrl } from "@/lib/cf";
 import { ClerkProvider } from "@clerk/nextjs";
+import { getClerkFrontendConfig } from "@/lib/clerk/config";
 
 // Fonts
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
@@ -136,6 +137,8 @@ export const viewport: Viewport = {
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  const clerk = getClerkFrontendConfig();
+
   // JSON-LD structured data (Organization + WebSite)
   // Keep it conservative and valid.
   const ldOrg = {
@@ -196,7 +199,10 @@ export default function RootLayout({
   const bgSrc = cfUrl(HERO_BG_CF_ID, "hero") ?? undefined;
 
   return (
-    <ClerkProvider>
+    <ClerkProvider
+      publishableKey={clerk.publishableKey}
+      proxyUrl={clerk.proxyUrl}
+    >
       <html lang="en" className={inter.variable} suppressHydrationWarning>
         <head>
           {/* Perf: preconnect */}

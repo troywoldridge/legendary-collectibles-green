@@ -1,6 +1,7 @@
 // src/middleware.ts
 import { NextResponse } from "next/server";
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { getClerkMiddlewareConfig } from "@/lib/clerk/config";
 
 /**
  * Public routes (your original):
@@ -40,11 +41,20 @@ const isPublicRoute = createRouteMatcher([
   "/api/webhooks/stripe",
 ]);
 
-export default clerkMiddleware(async (auth, req) => {
-  if (isPublicRoute(req)) return NextResponse.next();
+const clerkEnv = getClerkMiddlewareConfig();
 
-  await auth.protect();
-});
+export default clerkMiddleware(
+  {
+    publishableKey: clerkEnv.publishableKey,
+    secretKey: clerkEnv.secretKey,
+    proxyUrl: clerkEnv.proxyUrl,
+  },
+  async (auth, req) => {
+    if (isPublicRoute(req)) return NextResponse.next();
+
+    await auth.protect();
+  },
+);
 
 export const config = {
   matcher: ["/((?!_next|.*\\..*).*)", "/", "/(api|trpc)(.*)"],
