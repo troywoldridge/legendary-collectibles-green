@@ -21,6 +21,7 @@ export async function GET() {
   const now = new Date().toISOString();
 
   const sitemaps = [
+    `${BASE}/sitemap-pages.xml`,
     `${BASE}/sitemap-pokemon.xml`,
     `${BASE}/sitemap-ygo.xml`,
     `${BASE}/sitemap-mtg-1.xml`,

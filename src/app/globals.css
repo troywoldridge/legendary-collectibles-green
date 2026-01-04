@@ -482,3 +482,105 @@ body::after {
   opacity: 0.7;
   font-size: 12px;
 }
+
+/* PSA UI */
+.psaWrap { display: flex; flex-direction: column; gap: 6px; }
+
+.psaBadges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+.psaBadge {
+  padding: 4px 8px;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.psaCert {
+  font-size: 12px;
+  opacity: 0.85;
+}
+.psaCertMissing { opacity: 0.55; }
+
+.psaStatus {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid rgba(255,255,255,0.18);
+}
+.psaStatusOk { opacity: 0.95; }
+.psaStatusNo { opacity: 0.7; }
+
+.psaActions { display: flex; flex-direction: column; gap: 6px; }
+
+.psaBtn {
+  width: fit-content;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.06);
+  cursor: pointer;
+}
+.psaBtn:disabled { opacity: 0.6; cursor: default; }
+
+.psaError { font-size: 12px; opacity: 0.9; }
+/* PSA inline controls inside Collection table */
+.psaInline { display: flex; flex-direction: column; gap: 6px; }
+
+.psaInlineRow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+.psaChip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.06);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.psaGrade { font-size: 12px; opacity: 0.9; }
+
+.psaCert { font-size: 11px; opacity: 0.85; }
+.psaCertMissing { opacity: 0.55; }
+
+.psaStatus {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.18);
+  font-size: 11px;
+}
+.psaStatusOk { opacity: 0.95; }
+.psaStatusNo { opacity: 0.7; }
+
+.psaBtn {
+  width: fit-content;
+  padding: 4px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.06);
+  font-size: 12px;
+  cursor: pointer;
+}
+.psaBtn:disabled { opacity: 0.6; cursor: default; }
+
+.psaMsg { font-size: 11px; opacity: 0.85; }
+
+/* Shop: prevent decorative overlays from eating clicks */
+.shopShell,
+.shopHeader,
+.shopSection,
+.shopLayout,
+.shopSidebar,
+.shopMain {
+  position: relative;
+  z-index: 5;
+}
+
+.shopShell::before,
+.shopShell::after,
+.shopHeader::before,
+.shopHeader::after {
+  pointer-events: none;
+}
+

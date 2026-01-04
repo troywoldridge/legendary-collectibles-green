@@ -182,9 +182,7 @@ async function lookupPokemonDbPrice(cardId: string, variantType: CanonVariant) {
     FROM public.tcg_card_prices_tcgplayer
     WHERE card_id = ${cardId}
     ORDER BY
-      -- Prefer exact variant_type match when present
       CASE WHEN variant_type = ${variantType} THEN 0 ELSE 1 END,
-      -- Prefer rows that actually have a usable wide value for the requested variant
       CASE
         WHEN ${variantType} = 'normal' AND normal IS NOT NULL AND btrim(normal) <> '' THEN 0
         WHEN ${variantType} = 'holofoil' AND holofoil IS NOT NULL AND btrim(holofoil) <> '' THEN 0
@@ -214,6 +212,24 @@ async function lookupPokemonDbPrice(cardId: string, variantType: CanonVariant) {
   return null;
 }
 
+/**
+ * Enqueue a per-user revalue job (deduped by your partial unique index).
+ * This is what makes dashboards update shortly after adding cards.
+ */
+async function enqueueRevalueJob(userId: string) {
+  try {
+    await db.execute(sql`
+      INSERT INTO public.user_revalue_jobs (user_id, status)
+      VALUES (${userId}, 'queued')
+      ON CONFLICT ON CONSTRAINT ux_user_revalue_jobs_active_user
+      DO NOTHING
+    `);
+  } catch (err) {
+    // Never block add() if queue insert fails
+    console.warn("enqueueRevalueJob failed (continuing)", err);
+  }
+}
+
 export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -233,8 +249,9 @@ export async function POST(req: Request) {
   const setName = body.setName?.trim() ?? null;
   const imageUrl = body.imageUrl?.trim() ?? null;
 
-  const gradingCompany = (body.grading_company ?? "UNGR").trim().toUpperCase();
-  const gradeLabel = (body.grade_label ?? "Ungraded").trim();
+  // IMPORTANT: match DB defaults (''), not "UNGR"/"Ungraded"
+  const gradingCompany = (body.grading_company ?? "").trim().toUpperCase();
+  const gradeLabel = (body.grade_label ?? "").trim();
 
   const certNumber = (body.cert_number ?? "").toString().trim();
   const purchaseDate = body.purchase_date ?? null;
@@ -367,41 +384,40 @@ export async function POST(req: Request) {
   let priceCurrency: string | null = null;
 
   try {
-  if (gameNorm === "pokemon") {
-    // 1️⃣ DB-first lookup (authoritative)
-    const dbPrice = await lookupPokemonDbPrice(cardId, variantType);
+    if (gameNorm === "pokemon") {
+      // 1️⃣ DB-first lookup (authoritative)
+      const dbPrice = await lookupPokemonDbPrice(cardId, variantType);
 
-    if (dbPrice) {
-      unitPriceCents = dbPrice.unitPriceCents;
-      priceSource = dbPrice.source;
-      priceConfidence = dbPrice.confidence;
-      priceCurrency = dbPrice.currency ?? "USD";
+      if (dbPrice) {
+        unitPriceCents = dbPrice.unitPriceCents;
+        priceSource = dbPrice.source;
+        priceConfidence = dbPrice.confidence;
+        priceCurrency = dbPrice.currency ?? "USD";
+      } else {
+        // 2️⃣ Live fallback ONLY if DB has nothing usable
+        const livePrice = await getLivePriceForCard("pokemon", cardId, variantType);
+
+        if (livePrice) {
+          unitPriceCents = Math.round(livePrice.amount * 100);
+          priceSource = livePrice.source;
+          priceConfidence = "live_fallback";
+          priceCurrency = livePrice.currency ?? "USD";
+        }
+      }
     } else {
-      // 2️⃣ Live fallback ONLY if DB has nothing usable
-      const livePrice = await getLivePriceForCard("pokemon", cardId, variantType);
+      // Non-Pokémon paths unchanged
+      const livePrice = await getLivePriceForCard(gameNorm as GameId, cardId);
 
       if (livePrice) {
         unitPriceCents = Math.round(livePrice.amount * 100);
         priceSource = livePrice.source;
-        priceConfidence = "live_fallback";
+        priceConfidence = "live";
         priceCurrency = livePrice.currency ?? "USD";
       }
     }
-  } else {
-    // Non-Pokémon paths unchanged
-    const livePrice = await getLivePriceForCard(gameNorm as GameId, cardId);
-
-    if (livePrice) {
-      unitPriceCents = Math.round(livePrice.amount * 100);
-      priceSource = livePrice.source;
-      priceConfidence = "live";
-      priceCurrency = livePrice.currency ?? "USD";
-    }
+  } catch (err) {
+    console.warn("collection/add price lookup failed (continuing)", err);
   }
-} catch (err) {
-  console.warn("collection/add price lookup failed (continuing)", err);
-}
-
 
   const asOfDate = todayISODate();
 
@@ -438,6 +454,9 @@ export async function POST(req: Request) {
           quantity: newQty,
           card_id: cardId,
           variant_type: variantType,
+          grading_company: gradingCompany || null,
+          grade_label: gradeLabel || null,
+          cert_number: certNumber || null,
           currency: priceCurrency ?? "USD",
         });
 
@@ -478,6 +497,9 @@ export async function POST(req: Request) {
           console.warn("valuation snapshot failed (continuing)", err);
         }
       }
+
+      // ✅ enqueue per-user revalue (debounced by partial unique index)
+      await enqueueRevalueJob(userId);
 
       return NextResponse.json({
         ok: true,
@@ -543,6 +565,9 @@ export async function POST(req: Request) {
         quantity,
         card_id: cardId,
         variant_type: variantType,
+        grading_company: gradingCompany || null,
+        grade_label: gradeLabel || null,
+        cert_number: certNumber || null,
         currency: priceCurrency ?? "USD",
       });
 
@@ -583,6 +608,9 @@ export async function POST(req: Request) {
         console.warn("valuation snapshot failed (continuing)", err);
       }
     }
+
+    // ✅ enqueue per-user revalue (debounced by partial unique index)
+    await enqueueRevalueJob(userId);
 
     return NextResponse.json({
       ok: true,

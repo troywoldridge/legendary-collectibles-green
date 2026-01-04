@@ -194,6 +194,10 @@ export default function Header() {
               <DropdownLink href="/categories/mtg/cards">MTG Cards</DropdownLink>
             </NavDropdown>
 
+            <NavLink href="/psa" active={isActive("/psa")}>
+              PSA
+            </NavLink>
+
             <NavLink href="/shop" active={isActive("/shop")}>
               Shop
             </NavLink>

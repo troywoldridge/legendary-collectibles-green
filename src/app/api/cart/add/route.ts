@@ -1,12 +1,16 @@
+// src/app/api/cart/add/route.ts
 import "server-only";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
 import { carts, cartLines } from "@/lib/db/schema/cart";
 import { products } from "@/lib/db/schema/shop";
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
+
+secure: process.env.NODE_ENV === "production"
+
 
 const CART_COOKIE = "lc_cart_id";
 
@@ -27,7 +31,6 @@ async function getOrCreateCartId(): Promise<string> {
     if (row.length) return existingId;
   }
 
-  // ✅ Drizzle in your repo: returning() takes NO args
   const created = await db.insert(carts).values({ status: "open" as any }).returning();
   const cartId = (created as any)?.[0]?.id as string | undefined;
   if (!cartId) throw new Error("Failed to create cart");
@@ -35,7 +38,7 @@ async function getOrCreateCartId(): Promise<string> {
   jar.set(CART_COOKIE, cartId, {
     httpOnly: true,
     sameSite: "lax",
-    secure: true,
+    secure: process.env.NODE_ENV === "production", // ✅ dev-safe
     path: "/",
     maxAge: 60 * 60 * 24 * 30,
   });

@@ -3,7 +3,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import CardSparkline from "@/components/collection/CardSparkline";
 
 export type CollectionItem = {
@@ -13,9 +13,15 @@ export type CollectionItem = {
   card_name: string | null;
   set_name: string | null;
   image_url: string | null;
+
   grading_company: string | null;
   grade_label: string | null;
   cert_number: string | null;
+
+  // ✅ PSA verification fields (new)
+  is_verified: boolean | null;
+  verified_at: string | null;
+
   quantity: number | null;
   folder: string | null;
   cost_cents: number | null;
@@ -67,10 +73,7 @@ function formatGameLabel(game: string | null | undefined): string {
 }
 
 // Detail URL per game
-function detailHrefFor(
-  game: string | null,
-  cardId: string | null,
-): string | null {
+function detailHrefFor(game: string | null, cardId: string | null): string | null {
   if (!cardId) return null;
 
   switch (game) {
@@ -88,17 +91,12 @@ function detailHrefFor(
 }
 
 // Price history URL per game
-function priceHistoryHrefFor(
-  game: string | null,
-  cardId: string | null,
-): string | null {
+function priceHistoryHrefFor(game: string | null, cardId: string | null): string | null {
   if (!cardId) return null;
 
   switch (game) {
     case "pokemon":
-      return `/categories/pokemon/cards/${encodeURIComponent(
-        cardId,
-      )}/prices`;
+      return `/categories/pokemon/cards/${encodeURIComponent(cardId)}/prices`;
     case "mtg":
     case "magic":
       return `/categories/mtg/cards/${encodeURIComponent(cardId)}/prices`;
@@ -115,10 +113,7 @@ export default function CollectionTableBody({ items }: Props) {
     return (
       <tbody>
         <tr>
-          <td
-            colSpan={8}
-            className="p-6 text-center text-sm text-white/70"
-          >
+          <td colSpan={8} className="p-6 text-center text-sm text-white/70">
             No items found.
           </td>
         </tr>
@@ -142,8 +137,7 @@ function CollectionRow({ item }: { item: CollectionItem }) {
   // compute total value (price × qty) once
   const qty = item.quantity ?? 1;
   const perCopy = item.last_value_cents ?? null;
-  const totalValueCents =
-    perCopy != null ? perCopy * qty : null;
+  const totalValueCents = perCopy != null ? perCopy * qty : null;
 
   return (
     <tr className="border-b border-white/10 hover:bg-white/5">
@@ -171,10 +165,7 @@ function CollectionRow({ item }: { item: CollectionItem }) {
       <td className="p-2 align-top">
         <div className="text-sm font-semibold">
           {detailHref ? (
-            <Link
-              href={detailHref}
-              className="hover:text-sky-300 hover:underline"
-            >
+            <Link href={detailHref} className="hover:text-sky-300 hover:underline">
               {item.card_name ?? item.card_id ?? "Unknown card"}
             </Link>
           ) : (
@@ -186,19 +177,19 @@ function CollectionRow({ item }: { item: CollectionItem }) {
         </div>
         {priceHref && (
           <div className="mt-1 text-[11px]">
-            <Link
-              href={priceHref}
-              className="text-sky-300 hover:underline"
-            >
+            <Link href={priceHref} className="text-sky-300 hover:underline">
               Price history
             </Link>
           </div>
         )}
       </td>
 
-      {/* Grade dropdown */}
+      {/* Grade dropdown + PSA verify */}
       <td className="p-2 align-top">
-        <GradeSelect item={item} />
+        <div className="space-y-2">
+          <GradeSelect item={item} />
+          <PsaVerifyInline item={item} />
+        </div>
       </td>
 
       {/* Quantity */}
@@ -218,33 +209,20 @@ function CollectionRow({ item }: { item: CollectionItem }) {
 
       {/* Total value + sparkline */}
       <td className="p-2 align-top text-sm">
-        <div className="font-semibold text-blue-300">
-          {formatMoneyFromCents(totalValueCents)}
-        </div>
+        <div className="font-semibold text-blue-300">{formatMoneyFromCents(totalValueCents)}</div>
         <div className="mt-1 h-6">
-          {item.card_id ? (
-            <CardSparkline
-              game={item.game ?? "pokemon"}
-              cardId={item.card_id}
-            />
-          ) : null}
+          {item.card_id ? <CardSparkline game={item.game ?? "pokemon"} cardId={item.card_id} /> : null}
         </div>
       </td>
 
       {/* Actions */}
       <td className="p-2 align-top space-y-1 text-sm">
         {detailHref && (
-          <Link
-            href={detailHref}
-            className="block text-sky-300 hover:underline"
-          >
+          <Link href={detailHref} className="block text-sky-300 hover:underline">
             View
           </Link>
         )}
-        <Link
-          href={`/collection/edit/${item.id}`}
-          className="block text-sky-300 hover:underline"
-        >
+        <Link href={`/collection/edit/${item.id}`} className="block text-sky-300 hover:underline">
           Edit
         </Link>
         <RemoveButton id={item.id} />
@@ -254,26 +232,99 @@ function CollectionRow({ item }: { item: CollectionItem }) {
 }
 
 /* ------------------------------------------------------------------------------------
+   PSA Inline Verify UI
+------------------------------------------------------------------------------------ */
+
+function PsaVerifyInline({ item }: { item: CollectionItem }) {
+  const initialIsVerified = !!item.is_verified;
+  const [isVerified, setIsVerified] = useState<boolean>(initialIsVerified);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const grader = (item.grading_company || "").trim().toUpperCase();
+  const cert = (item.cert_number || "").trim();
+
+  const isPsa = grader === "PSA";
+  const canVerify = isPsa && cert.length > 0 && !isVerified;
+
+  // Keep label compact
+  const statusLabel = useMemo(() => {
+    if (!isPsa) return null;
+    if (!cert) return "Add cert # to verify";
+    return isVerified ? "Verified" : "Not verified";
+  }, [isPsa, cert, isVerified]);
+
+  if (!isPsa) return null;
+
+  async function verify() {
+    setMsg(null);
+    setLoading(true);
+    try {
+      const res = await fetch("/api/psa/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ itemId: item.id }),
+      });
+
+      const json = await res.json().catch(() => null);
+
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || "Verification failed");
+      }
+
+      // Convention: your route should return { ok, verified, ... }
+      if (json?.verified) {
+        setIsVerified(true);
+        setMsg("Verified ✅");
+      } else {
+        setIsVerified(false);
+        setMsg(json?.message || "PSA could not verify this cert.");
+      }
+    } catch (e: any) {
+      setMsg(e?.message || "Verification failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="psaInline">
+      <div className="psaInlineRow">
+        <span className="psaChip">PSA</span>
+        {item.grade_label ? <span className="psaGrade">{item.grade_label}</span> : null}
+        {cert ? <span className="psaCert">Cert {cert}</span> : <span className="psaCert psaCertMissing">No cert #</span>}
+        {statusLabel ? (
+          <span className={isVerified ? "psaStatus psaStatusOk" : "psaStatus psaStatusNo"}>
+            {statusLabel}
+          </span>
+        ) : null}
+      </div>
+
+      {canVerify ? (
+        <button type="button" className="psaBtn" onClick={verify} disabled={loading}>
+          {loading ? "Verifying..." : "Verify"}
+        </button>
+      ) : null}
+
+      {msg ? <div className="psaMsg">{msg}</div> : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------------------------
    CLIENT CONTROLS (Grade dropdown / qty / folder / cost / remove)
 ------------------------------------------------------------------------------------ */
 
 function GradeSelect({ item }: { item: CollectionItem }) {
-  const initialCompany: GradeCompany =
-    (item.grading_company as GradeCompany | null) ?? "UNGR";
-  const initialGrade =
-    item.grade_label ??
-    GRADE_OPTIONS[initialCompany]?.[0] ??
-    "Ungraded";
+  const initialCompany: GradeCompany = (item.grading_company as GradeCompany | null) ?? "UNGR";
+  const initialGrade = item.grade_label ?? GRADE_OPTIONS[initialCompany]?.[0] ?? "Ungraded";
 
-  const [company, setCompany] =
-    useState<GradeCompany>(initialCompany);
+  const [company, setCompany] = useState<GradeCompany>(initialCompany);
   const [grade, setGrade] = useState<string>(initialGrade);
+
   const grades = GRADE_OPTIONS[company];
 
-  async function update(
-    nextCompany: GradeCompany,
-    nextGrade: string,
-  ) {
+  async function update(nextCompany: GradeCompany, nextGrade: string) {
     setCompany(nextCompany);
     setGrade(nextGrade);
 
@@ -388,17 +439,13 @@ function FolderInput({ item }: { item: CollectionItem }) {
 }
 
 function CostInput({ item }: { item: CollectionItem }) {
-  const initialCost =
-    item.cost_cents != null ? item.cost_cents / 100 : "";
+  const initialCost = item.cost_cents != null ? item.cost_cents / 100 : "";
   const [cost, setCost] = useState<string | number>(initialCost);
 
   async function update(val: string) {
     setCost(val);
 
-    const n =
-      val.trim() === ""
-        ? null
-        : Math.round(Number(val) * 100);
+    const n = val.trim() === "" ? null : Math.round(Number(val) * 100);
 
     await fetch("/api/collection/update", {
       method: "POST",
@@ -432,16 +479,11 @@ function RemoveButton({ id }: { id: string }) {
       body: JSON.stringify({ id }),
     });
 
-    // simple reload is fine here
     window.location.reload();
   }
 
   return (
-    <button
-      type="button"
-      onClick={remove}
-      className="text-red-400 hover:underline"
-    >
+    <button type="button" onClick={remove} className="text-red-400 hover:underline">
       Remove
     </button>
   );

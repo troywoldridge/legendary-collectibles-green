@@ -1,14 +1,52 @@
-import { NextRequest } from "next/server";
+// src/lib/adminAuth.ts
+import "server-only";
 
-export function requireAdmin(req: NextRequest) {
-  const token = req.headers.get("x-admin-token") || "";
-  const expected = process.env.ADMIN_API_TOKEN || "";
+import type { NextRequest } from "next/server";
 
+type AdminAuthResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+function readHeader(req: Request, name: string) {
+  try {
+    return req.headers.get(name);
+  } catch {
+    return null;
+  }
+}
+
+function getTokenFromRequest(req: Request): string | null {
+  // 1) Authorization: Bearer xxx
+  const auth = readHeader(req, "authorization") || readHeader(req, "Authorization");
+  if (auth) {
+    const m = auth.match(/^\s*Bearer\s+(.+)\s*$/i);
+    if (m?.[1]) return m[1].trim();
+  }
+
+  // 2) x-admin-token
+  const x = readHeader(req, "x-admin-token") || readHeader(req, "X-Admin-Token");
+  if (x) return x.trim();
+
+  // 3) ?token= (nice for quick manual tests)
+  try {
+    const url = new URL((req as any).url || "");
+    const t = url.searchParams.get("token");
+    if (t) return t.trim();
+  } catch {}
+
+  return null;
+}
+
+export function requireAdmin(req: NextRequest | Request): AdminAuthResult {
+  const expected = (process.env.ADMIN_API_TOKEN || "").trim();
   if (!expected) {
-    return { ok: false as const, error: "ADMIN_API_TOKEN not set on server" };
+    return { ok: false, error: "ADMIN_API_TOKEN is not configured" };
   }
-  if (!token || token !== expected) {
-    return { ok: false as const, error: "Unauthorized" };
-  }
-  return { ok: true as const };
+
+  const token = getTokenFromRequest(req as Request);
+  if (!token) return { ok: false, error: "Missing admin token" };
+
+  if (token !== expected) return { ok: false, error: "Invalid admin token" };
+
+  return { ok: true };
 }

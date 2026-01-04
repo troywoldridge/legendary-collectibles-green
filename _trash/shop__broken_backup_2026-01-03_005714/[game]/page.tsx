@@ -4,11 +4,18 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { site } from "@/config/site";
 
+function normParam(s: string) {
+  try {
+    return decodeURIComponent(s).trim().toLowerCase();
+  } catch {
+    return String(s).trim().toLowerCase();
+  }
+}
+
 const GAMES: Record<string, { name: string; desc: string }> = {
   pokemon: { name: "Pokémon", desc: "Singles, graded cards, sealed product, and deals." },
   yugioh: { name: "Yu-Gi-Oh!", desc: "Singles, graded cards, sealed product, and deals." },
   mtg: { name: "Magic: The Gathering", desc: "Singles, graded cards, sealed product, and deals." },
-  sports: { name: "Sports Cards", desc: "Singles, graded cards, sealed product, and deals." },
 };
 
 const FORMAT_TILES = [
@@ -17,6 +24,7 @@ const FORMAT_TILES = [
   { key: "box", title: "Boxes", desc: "Booster & display boxes" },
   { key: "bundle", title: "Bundles", desc: "ETBs, collections, premium boxes" },
   { key: "lot", title: "Lots", desc: "Bulk, bundles, mystery" },
+  { key: "accessory", title: "Accessories", desc: "Sleeves, binders, storage" },
 ];
 
 export async function generateMetadata({
@@ -24,7 +32,7 @@ export async function generateMetadata({
 }: {
   params: { game: string };
 }): Promise<Metadata> {
-  const game = params.game;
+  const game = normParam(params.game);
   const meta = GAMES[game];
   const canonical = `${site.url}/shop/${encodeURIComponent(game)}`;
 
@@ -50,8 +58,9 @@ export async function generateMetadata({
 }
 
 export default function GameHubPage({ params }: { params: { game: string } }) {
-  const game = params.game;
+  const game = normParam(params.game);
   const meta = GAMES[game];
+
   if (!meta) return notFound();
 
   return (

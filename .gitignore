@@ -85,3 +85,4 @@ legendary_neon.sql
 !drizzle/
 !drizzle/**
 
+.env*

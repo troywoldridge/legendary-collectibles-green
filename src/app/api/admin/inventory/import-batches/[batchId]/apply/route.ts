@@ -1,3 +1,6 @@
+// src/app/api/admin/inventory/import-batches/[batchId]/apply/route.ts
+import "server-only";
+
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/adminAuth";
 import { db } from "@/lib/db";
@@ -7,6 +10,9 @@ import {
   inventoryStockMovements,
 } from "@/lib/db/schema/inventory";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function genSku() {
   return (
@@ -21,7 +27,7 @@ type ItemLite = { id: string; sku: string | null; onHand: number };
 
 export async function POST(
   req: NextRequest,
-  context: { params: Promise<{ batchId: string }> }
+  context: { params: Promise<{ batchId: string }> },
 ) {
   const auth = requireAdmin(req);
   if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: 401 });
@@ -29,9 +35,7 @@ export async function POST(
   const { batchId } = await context.params;
 
   const body = await req.json().catch(() => ({} as any));
-  const onlyRowIds: string[] | null = Array.isArray(body?.rowIds)
-    ? body.rowIds
-    : null;
+  const onlyRowIds: string[] | null = Array.isArray(body?.rowIds) ? body.rowIds : null;
 
   const rows = await db
     .select()
@@ -40,8 +44,8 @@ export async function POST(
       and(
         eq(inventoryImportRows.batchId, batchId),
         eq(inventoryImportRows.status, "pending"),
-        onlyRowIds ? inArray(inventoryImportRows.id, onlyRowIds) : sql`true`
-      )
+        onlyRowIds ? inArray(inventoryImportRows.id, onlyRowIds) : sql`true`,
+      ),
     )
     .orderBy(desc(inventoryImportRows.createdAt));
 
@@ -55,8 +59,7 @@ export async function POST(
     });
   }
 
-  const applied: { rowId: string; itemId?: string; sku?: string; title?: string }[] =
-    [];
+  const applied: { rowId: string; itemId?: string; sku?: string; title?: string }[] = [];
   const failed: { rowId: string; error: string }[] = [];
 
   await db.transaction(async (tx) => {
@@ -103,7 +106,7 @@ export async function POST(
               costBasisCents: r.costBasisCents ?? 0,
               meta: {},
             })
-            .returning(); // <-- NO ARGS (compatible)
+            .returning(); // NO ARGS
 
           const c0: any = created?.[0];
           if (!c0?.id) throw new Error("Failed to create item");
@@ -116,16 +119,12 @@ export async function POST(
         } else {
           // Conservative updates if provided
           const updates: any = { updatedAt: sql`now()` };
-          if (r.priceCents !== null && r.priceCents !== undefined)
-            updates.priceCents = r.priceCents;
+          if (r.priceCents !== null && r.priceCents !== undefined) updates.priceCents = r.priceCents;
           if (r.costBasisCents !== null && r.costBasisCents !== undefined)
             updates.costBasisCents = r.costBasisCents;
           if (r.condition) updates.condition = r.condition;
 
-          await tx
-            .update(inventoryItems)
-            .set(updates)
-            .where(eq(inventoryItems.id, item.id));
+          await tx.update(inventoryItems).set(updates).where(eq(inventoryItems.id, item.id));
         }
 
         // Insert movement

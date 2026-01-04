@@ -115,7 +115,7 @@ export default async function CollectionPage({
 
   const canCsv = canExportCsv(plan);
   const canInsurance = canSeeInsuranceReports(plan);
-  const canMovers = canSeeTrends(plan); // trends + movers flag
+  const canMovers = canSeeTrends(plan);
 
   // ---- Filters from query string ----
   const sort = first(sp.sort) ?? "date";
@@ -136,6 +136,8 @@ export default async function CollectionPage({
       grading_company,
       grade_label,
       cert_number,
+      is_verified,
+      verified_at,
       quantity,
       folder,
       cost_cents,
@@ -252,6 +254,8 @@ export default async function CollectionPage({
       grading_company,
       grade_label,
       cert_number,
+      is_verified,
+      verified_at,
       quantity,
       folder,
       cost_cents,
@@ -302,7 +306,6 @@ export default async function CollectionPage({
               View analytics
             </Link>
 
-            {/* ✅ CSV export */}
             {canCsv ? (
               <a
                 href="/api/pro/exports/collection"
@@ -319,7 +322,6 @@ export default async function CollectionPage({
               </Link>
             )}
 
-            {/* ✅ Pro tools goes to REAL page, not an API endpoint */}
             {(canCsv || canMovers || canInsurance) && (
               <Link
                 href="/pro"
@@ -329,8 +331,6 @@ export default async function CollectionPage({
               </Link>
             )}
 
-            {/* ✅ Movers button should go to /pro/movers (real UI page),
-                and CSV is available with format=csv */}
             {canMovers && (
               <>
                 <Link
@@ -348,7 +348,6 @@ export default async function CollectionPage({
               </>
             )}
 
-            {/* ✅ Insurance CSV must pass format=csv */}
             {canInsurance && (
               <a
                 href="/api/pro/insurance?format=csv&threshold=250"
@@ -472,10 +471,7 @@ export default async function CollectionPage({
                         <div
                           className="h-full rounded-full bg-white/70"
                           style={{
-                            width: `${Math.max(
-                              8,
-                              Math.min(100, sharePct || 0),
-                            )}%`,
+                            width: `${Math.max(8, Math.min(100, sharePct || 0))}%`,
                           }}
                         />
                       </div>
