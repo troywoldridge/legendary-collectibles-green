@@ -617,3 +617,34 @@ body::after {
 .shopHeader::after {
   pointer-events: none;
 }
+
+/* --- Shop product tile images: show full card art --- */
+.productTile__imgWrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4; /* tall cards look right */
+  border-radius: 16px;
+  overflow: hidden;
+
+  /* makes "contain" look good (no ugly empty space) */
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+/* If you have the wrapper nested, this ensures fill works */
+.productTile__media {
+  display: block;
+}
+
+/* Make Next/Image "contain" and centered */
+.productTile__img {
+  object-fit: contain;
+  object-position: center;
+  padding: 10px; /* gives breathing room */
+}
+
+/* Optional: subtle hover polish */
+.productTile:hover .productTile__img {
+  transform: scale(1.02);
+  transition: transform 180ms ease;
+}

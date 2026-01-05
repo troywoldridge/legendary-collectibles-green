@@ -20,6 +20,13 @@ import { site } from "@/config/site";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type Params = { department: string; category: string };
+type SearchParams = Record<string, string | string[] | undefined>;
+
+function norm(s: unknown) {
+  return String(s ?? "").trim();
+}
+
 function asString(v: string | string[] | undefined): string {
   if (Array.isArray(v)) return v[0] ?? "";
   return v ?? "";
@@ -27,7 +34,7 @@ function asString(v: string | string[] | undefined): string {
 
 function buildQueryString(
   searchParams: Record<string, string | string[] | undefined>,
-  patch: Record<string, string | null | undefined>
+  patch: Record<string, string | null | undefined>,
 ) {
   const qs = new URLSearchParams();
 
@@ -47,13 +54,15 @@ function buildQueryString(
   return qs.toString();
 }
 
-export async function generateMetadata({
-  params,
-}: {
-  params: { department: string; category: string };
+export async function generateMetadata(props: {
+  params: Params | Promise<Params>;
 }): Promise<Metadata> {
-  const dept = normalizeDepartmentSlug(params.department);
-  const category = normalizeCategorySlug(params.category);
+  const p = await props.params;
+  const department = norm(p?.department);
+  const categoryParam = norm(p?.category);
+
+  const dept = normalizeDepartmentSlug(department);
+  const category = normalizeCategorySlug(categoryParam);
 
   if (!dept || !category) {
     return {
@@ -65,51 +74,55 @@ export async function generateMetadata({
   const deptCfg = getDepartmentConfig(dept);
   const cfg = categoryToApi(dept, category);
 
+  const canonical = `${site.url}/shop/${encodeURIComponent(dept)}/${encodeURIComponent(category)}`;
+
   if (!deptCfg || !cfg) {
     return {
       title: `Shop | ${site.name}`,
       robots: { index: false, follow: true },
-      alternates: { canonical: `${site.url}/shop/${encodeURIComponent(dept)}/${encodeURIComponent(category)}` },
+      alternates: { canonical },
     };
   }
 
   return {
     title: `Shop • ${deptCfg.name} • ${cfg.label} | ${site.name}`,
     description: `${cfg.label} from ${deptCfg.name}. Live inventory ready to ship.`,
-    alternates: { canonical: `${site.url}/shop/${encodeURIComponent(dept)}/${encodeURIComponent(category)}` },
+    alternates: { canonical },
   };
 }
 
-export default async function ShopCategoryPage({
-  params,
-  searchParams,
-}: {
-  params: { department: string; category: string };
-  searchParams: Record<string, string | string[] | undefined>;
+export default async function ShopCategoryPage(props: {
+  params: Params | Promise<Params>;
+  searchParams: SearchParams;
 }) {
-  const dept = normalizeDepartmentSlug(params.department);
-  const category = normalizeCategorySlug(params.category);
+  const p = await props.params;
 
-  if (!dept || !category) return notFound();
+  const department = norm(p?.department);
+  const categoryParam = norm(p?.category);
+
+  const dept = normalizeDepartmentSlug(department);
+  const category = normalizeCategorySlug(categoryParam);
+
+  if (!dept || !category) notFound();
 
   // Canonicalize aliases + casing: /shop/yugi/single -> /shop/yugioh/singles
-  const rawDept = String(params.department ?? "").trim().toLowerCase();
-  const rawCat = String(params.category ?? "").trim().toLowerCase();
+  const rawDept = department.toLowerCase();
+  const rawCat = categoryParam.toLowerCase();
 
   if (rawDept !== dept || rawCat !== category) {
     redirect(`/shop/${dept}/${category}`);
   }
 
   const deptCfg = getDepartmentConfig(dept);
-  if (!deptCfg) return notFound();
+  if (!deptCfg) notFound();
 
   const cfg = categoryToApi(dept, category);
-  if (!cfg) return notFound();
+  if (!cfg) notFound();
 
-  const data = await fetchShopProducts(cfg.api, searchParams);
+  const data = await fetchShopProducts(cfg.api, props.searchParams);
 
-  const page = Number(asString(searchParams.page) || data.page || 1) || 1;
-  const limit = Number(asString(searchParams.limit) || data.limit || 24) || 24;
+  const page = Number(asString(props.searchParams.page) || data.page || 1) || 1;
+  const limit = Number(asString(props.searchParams.limit) || data.limit || 24) || 24;
   const total = Number(data.total ?? 0);
   const totalPages = Math.max(1, Math.ceil(total / Math.max(1, limit)));
 
@@ -159,12 +172,14 @@ export default async function ShopCategoryPage({
         ) : (
           <>
             <div className="productMasonry">
-              {data.items.map((p) => {
+              {data.items.map((pItem) => {
+                const p = pItem as any;
+
                 const imgUrl = p?.image?.url || null;
                 const imgAlt = p?.image?.alt || p?.title || "Product image";
 
-                // ✅ FIX: Your site uses /products/[slug]
-                const href = `/products/${p.slug}`;
+                // ✅ IMPORTANT: your product detail route is /products/[id] (UUID)
+                const href = `/products/${p.id}`;
 
                 const badge = p?.isGraded
                   ? p?.grader
@@ -189,7 +204,7 @@ export default async function ShopCategoryPage({
                             alt={imgAlt}
                             fill
                             sizes="(max-width: 1024px) 100vw, 33vw"
-                            className="object-cover"
+                            className="productTile__img"
                             priority={false}
                           />
                         ) : (
@@ -216,7 +231,9 @@ export default async function ShopCategoryPage({
                       <div className="productTile__priceRow">
                         <div className="productTile__price">{formatCurrency(p.priceCents)}</div>
                         {hasCompare ? (
-                          <div className="productTile__compare">{formatCurrency(p.compareAtCents as number)}</div>
+                          <div className="productTile__compare">
+                            {formatCurrency(p.compareAtCents as number)}
+                          </div>
                         ) : null}
                       </div>
 
@@ -232,7 +249,10 @@ export default async function ShopCategoryPage({
                         <Link href={href} className="btn btnGhost btnInline">
                           View
                         </Link>
-                        <AddToCartButton productId={p.id} availableQty={p.quantity ?? undefined} />
+                        <AddToCartButton
+                          productId={p.id}
+                          availableQty={p.quantity ?? undefined}
+                        />
                       </div>
                     </div>
                   </article>
@@ -250,7 +270,7 @@ export default async function ShopCategoryPage({
                 {page > 1 ? (
                   <Link
                     className="pagerBtn"
-                    href={`${canonicalPath}?${buildQueryString(searchParams, {
+                    href={`${canonicalPath}?${buildQueryString(props.searchParams, {
                       page: String(page - 1),
                     })}`}
                   >
@@ -261,7 +281,7 @@ export default async function ShopCategoryPage({
                 {page < totalPages ? (
                   <Link
                     className="pagerBtn"
-                    href={`${canonicalPath}?${buildQueryString(searchParams, {
+                    href={`${canonicalPath}?${buildQueryString(props.searchParams, {
                       page: String(page + 1),
                     })}`}
                   >

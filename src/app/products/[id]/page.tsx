@@ -1,159 +1,205 @@
-// src/app/products/[id]/page.tsx
 import "server-only";
-import Image from "next/image";
-import Link from "next/link";
-import { notFound } from "next/navigation";
-import { db } from "@/lib/db";
-import { products, productImages } from "@/lib/db/schema/shop";
-import { eq, asc } from "drizzle-orm";
-import AddToCartButton from "@/app/store/AddToCartButton";
-import QtyPicker from "@/app/products/[id]/QtyPicker";
-import BuyNowButton from "@/app/products/[id]/BuyNowButton";
 
+import { notFound } from "next/navigation";
+import AddToCartButton from "@/components/cart/AddToCartButton";
+
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const fmtUSD = (cents: number) =>
-  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
-
-// Swap Cloudflare Images variant at end of URL
-function toVariantUrl(url: string, variant: string) {
-  const parts = url.split("/");
-  if (parts.length < 2) return url;
-  parts[parts.length - 1] = variant;
-  return parts.join("/");
+function norm(s: unknown) {
+  return String(s ?? "").trim();
 }
 
-export default async function ProductPage({ params }: { params: { id: string } }) {
-  const product = await db.select().from(products).where(eq(products.id, params.id)).limit(1);
-  if (!product.length) return notFound();
-  const p = product[0];
+function getBaseUrl(): string {
+  const envBase =
+    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+    process.env.SITE_URL?.replace(/\/+$/, "");
+  return envBase || "http://127.0.0.1:3001";
+}
 
-  const images = await db
-    .select()
-    .from(productImages)
-    .where(eq(productImages.productId, p.id))
-    .orderBy(asc(productImages.sort));
+type ApiProduct = {
+  id: string;
+  title: string;
+  subtitle?: string | null;
+  description?: string | null;
 
-  const mainImg = images[0] ?? null;
+  game?: string | null;
+  format?: string | null;
+  sealed?: boolean | null;
 
-  // ✅ Use "card" variant for product detail hero image
-  const mainUrl = mainImg?.url ? toVariantUrl(mainImg.url, "card") : null;
+  is_graded?: boolean | null;
+  grader?: string | null;
+  grade_x10?: number | null;
 
-  const available = Number(p.quantity ?? 0);
-  const isOos = available <= 0;
+  condition?: string | null;
+
+  price_cents?: number | null;
+  compare_at_cents?: number | null;
+
+  quantity?: number | null;
+  status?: string | null;
+
+  image_url?: string | null;
+  images?: { url: string; alt?: string | null; sort?: number | null }[];
+};
+
+async function fetchProduct(id: string): Promise<ApiProduct | null> {
+  const base = getBaseUrl();
+  const url = new URL(`/api/products/${encodeURIComponent(id)}`, base);
+
+  const res = await fetch(url.toString(), { cache: "no-store" });
+
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    console.error("[products/[id]] api error", res.status, await res.text());
+    return null;
+  }
+
+  const data = await res.json().catch(() => null);
+  if (!data) return null;
+
+  return (data.item ?? data.product ?? data) as ApiProduct;
+}
+
+function money(cents?: number | null) {
+  if (typeof cents !== "number") return null;
+  return (cents / 100).toFixed(2);
+}
+
+export default async function ProductDetailPage(props: {
+  params: { id: string } | Promise<{ id: string }>;
+}) {
+  const p = await props.params; // ✅ works for both object and Promise params
+  const id = norm(p?.id);
+  if (!id) notFound();
+
+  const product = await fetchProduct(id);
+  if (!product) notFound();
+
+  const price = money(product.price_cents);
+  const compareAt = money(product.compare_at_cents);
+
+  const images =
+    Array.isArray(product.images) && product.images.length > 0
+      ? product.images
+      : product.image_url
+        ? [{ url: product.image_url, alt: product.title, sort: 0 }]
+        : [];
+
+  const mainImage = images[0]?.url ?? "";
+
+  const qty = typeof product.quantity === "number" ? product.quantity : null;
+  const status = (product.status ?? "").toLowerCase();
+  const unavailableByStatus =
+    status === "sold" ||
+    status === "sold_out" ||
+    status === "inactive" ||
+    status === "disabled";
+
+  const addDisabled = !price || (qty !== null && qty <= 0) || unavailableByStatus;
 
   return (
-    <main className="min-h-screen">
-      <div className="mx-auto max-w-[1100px] px-4 py-10">
-        <Link href="/store" className="text-sm text-white/70 hover:text-white underline underline-offset-4">
-          ← Back to shop
-        </Link>
-
-        <div className="mt-6 grid grid-cols-1 gap-8 md:grid-cols-2">
-          {/* IMAGE */}
-          <div className="rounded-2xl border border-white/15 bg-black/40 p-4">
-            <div className="relative aspect-[3/4] w-full overflow-hidden rounded-xl bg-black/40">
-              {mainUrl ? (
-                <Image
-                  src={mainUrl}
-                  alt={mainImg?.alt ?? p.title}
-                  fill
-                  className="object-contain"
-                  unoptimized
-                  sizes="(max-width: 768px) 100vw, 50vw"
-                />
-              ) : (
-                <div className="absolute inset-0 flex items-center justify-center text-white/60">
-                  No image
-                </div>
-              )}
-            </div>
-
-            {/* Thumbnails (if multiple images) */}
-            {images.length > 1 ? (
-              <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
-                {images.slice(0, 10).map((img, idx) => {
-                  const thumbUrl = img.url ? toVariantUrl(img.url, "grid") : null;
-                  if (!thumbUrl) return null;
-                  return (
-                    <div
-                      key={`${img.productId}-${idx}`}
-                      className="relative h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-white/5"
-                      title={img.alt ?? p.title}
-                    >
-                      <Image
-                        src={thumbUrl}
-                        alt={img.alt ?? p.title}
-                        fill
-                        className="object-contain p-1"
-                        unoptimized
-                        sizes="64px"
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-          </div>
-
-          {/* DETAILS */}
-          <div>
-            <h1 className="text-3xl font-extrabold text-white">{p.title}</h1>
-
-            <div className="mt-2 flex flex-wrap gap-2 text-xs">
-              <span className="rounded-full border border-white/30 bg-white/10 px-3 py-1 text-white">
-                {String(p.game).toUpperCase()}
-              </span>
-              <span className="rounded-full border border-white/30 bg-white/10 px-3 py-1 text-white">
-                {String(p.format).toUpperCase()}
-              </span>
-              {p.sealed ? (
-                <span className="rounded-full border border-white/30 bg-white/10 px-3 py-1 text-white">
-                  SEALED
-                </span>
-              ) : null}
-              {p.isGraded ? (
-                <span className="rounded-full border border-white/30 bg-white/10 px-3 py-1 text-white">
-                  {p.grader ? String(p.grader).toUpperCase() : "GRADED"}
-                  {p.gradeX10 ? ` • ${p.gradeX10}/10` : ""}
-                </span>
-              ) : null}
-              {p.condition ? (
-                <span className="rounded-full border border-white/30 bg-white/10 px-3 py-1 text-white">
-                  {String(p.condition).toUpperCase()}
-                </span>
-              ) : null}
-            </div>
-
-            <div className="mt-4">
-              <div className="text-3xl font-extrabold text-white">{fmtUSD(Number(p.priceCents ?? 0))}</div>
-              {p.compareAtCents ? (
-                <div className="text-sm text-white/60 line-through">{fmtUSD(Number(p.compareAtCents))}</div>
-              ) : null}
-            </div>
-
-            <div className="mt-4 text-sm text-white/70">
-              {isOos ? "Out of stock" : `In stock: ${available}`}
-            </div>
-
-            {/* Quantity + actions */}
-            <div className="mt-6 max-w-sm space-y-3">
-              <QtyPicker max={Math.max(1, available)} disabled={isOos} />
-
-              {/* AddToCartButton updated to accept quantity via data attribute */}
-              <AddToCartButton productId={p.id} disabled={isOos} />
-
-              <BuyNowButton productId={p.id} disabled={isOos} />
-            </div>
-
-            {p.description ? (
-              <div className="mt-6 text-sm text-white/80 whitespace-pre-line">{p.description}</div>
+    <main className="mx-auto w-full max-w-6xl px-4 py-8 text-white">
+      <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
+        <div>
+          <div className="aspect-[3/4] w-full overflow-hidden rounded-2xl border border-white/10 bg-black/30">
+            {mainImage ? (
+              <img
+                src={mainImage}
+                alt={product.title}
+                className="h-full w-full object-contain"
+                loading="eager"
+              />
             ) : (
-              <div className="mt-6 text-sm text-white/60">
-                No description yet. (We can auto-generate these from set/card metadata later.)
+              <div className="flex h-full items-center justify-center text-white/60">
+                No image
               </div>
             )}
           </div>
+
+          {images.length > 1 ? (
+            <div className="mt-3 grid grid-cols-5 gap-2">
+              {images.slice(0, 10).map((im, i) => (
+                <div
+                  key={`${im.url}-${i}`}
+                  className="aspect-square overflow-hidden rounded-xl border border-white/10 bg-black/30"
+                >
+                  <img
+                    src={im.url}
+                    alt={im.alt ?? product.title}
+                    className="h-full w-full object-cover"
+                    loading="lazy"
+                  />
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div>
+          <h1 className="text-3xl font-bold">{product.title}</h1>
+          {product.subtitle ? (
+            <p className="mt-2 text-white/70">{product.subtitle}</p>
+          ) : null}
+
+          <div className="mt-4 flex items-end gap-3">
+            {price ? (
+              <div className="text-3xl font-extrabold">${price}</div>
+            ) : (
+              <div className="text-3xl font-extrabold">—</div>
+            )}
+            {compareAt && compareAt !== price ? (
+              <div className="text-lg text-white/50 line-through">${compareAt}</div>
+            ) : null}
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2 text-xs">
+            {product.game ? (
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                {product.game}
+              </span>
+            ) : null}
+            {product.format ? (
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                {product.format}
+              </span>
+            ) : null}
+            {product.condition ? (
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                {product.condition}
+              </span>
+            ) : null}
+            {product.is_graded ? (
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                {product.grader ?? "Graded"}{" "}
+                {typeof product.grade_x10 === "number"
+                  ? (product.grade_x10 / 10).toFixed(1)
+                  : ""}
+              </span>
+            ) : null}
+            {typeof product.quantity === "number" ? (
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
+                Qty: {product.quantity}
+              </span>
+            ) : null}
+          </div>
+
+          <AddToCartButton productId={product.id} disabled={addDisabled} />
+
+          {!price ? (
+            <p className="mt-2 text-sm text-white/60">
+              This item isn’t purchasable yet (no price set).
+            </p>
+          ) : null}
+
+          {product.description ? (
+            <div className="mt-8">
+              <h2 className="text-lg font-semibold">Description</h2>
+              <p className="mt-2 whitespace-pre-wrap text-sm text-white/70">
+                {product.description}
+              </p>
+            </div>
+          ) : null}
         </div>
       </div>
     </main>

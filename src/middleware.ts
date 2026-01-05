@@ -11,7 +11,9 @@ const isPublicRoute = createRouteMatcher([
   // Public pages
   "/",
   "/shop(.*)",
+  "/api/shop(.*)", 
   "/products(.*)",
+  "/api/products(.*)", 
   "/categories(.*)",
   "/psa(.*)",
   "/guides(.*)",

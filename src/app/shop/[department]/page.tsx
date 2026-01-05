@@ -9,17 +9,24 @@ import { getDepartmentConfig, normalizeDepartmentSlug } from "@/lib/shop/catalog
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function generateMetadata({
-  params,
-}: {
-  params: { department: string };
+type Params = { department: string };
+
+function norm(s: unknown) {
+  return String(s ?? "").trim();
+}
+
+export async function generateMetadata(props: {
+  params: Params | Promise<Params>;
 }): Promise<Metadata> {
-  const deptKey = normalizeDepartmentSlug(params.department);
+  const p = await props.params;
+  const department = norm(p?.department);
+
+  const deptKey = normalizeDepartmentSlug(department);
   const dept = deptKey ? getDepartmentConfig(deptKey) : null;
 
   const canonical = deptKey
     ? `${site.url}/shop/${encodeURIComponent(deptKey)}`
-    : `${site.url}/shop/${encodeURIComponent(params.department)}`;
+    : `${site.url}/shop/${encodeURIComponent(department)}`;
 
   if (!dept) {
     return {
@@ -36,13 +43,18 @@ export async function generateMetadata({
   };
 }
 
-export default function DepartmentPage({ params }: { params: { department: string } }) {
-  const deptKey = normalizeDepartmentSlug(params.department);
+export default async function DepartmentPage(props: {
+  params: Params | Promise<Params>;
+}) {
+  const p = await props.params;
+  const department = norm(p?.department);
+
+  const deptKey = normalizeDepartmentSlug(department);
   const dept = deptKey ? getDepartmentConfig(deptKey) : null;
-  if (!deptKey || !dept) return notFound();
+  if (!deptKey || !dept) notFound();
 
   // Canonicalize /shop/yugi -> /shop/yugioh (and any casing weirdness)
-  const raw = String(params.department ?? "").trim().toLowerCase();
+  const raw = department.toLowerCase();
   if (raw !== deptKey) {
     redirect(`/shop/${deptKey}`);
   }
@@ -65,7 +77,11 @@ export default function DepartmentPage({ params }: { params: { department: strin
       <section className="shopSection">
         <div className="tileGrid">
           {dept.categories.map((c) => (
-            <Link key={c.slug} href={`/shop/${deptKey}/${c.slug}`} className="tile tileLarge">
+            <Link
+              key={c.slug}
+              href={`/shop/${deptKey}/${c.slug}`}
+              className="tile tileLarge"
+            >
               <div className="tileTitle">{c.name}</div>
               <div className="tileDesc">{c.description}</div>
               <div className="tileCta">Browse →</div>
