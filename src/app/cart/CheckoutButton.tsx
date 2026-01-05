@@ -1,43 +1,27 @@
+// src/app/cart/CheckoutButton.tsx
 "use client";
 
 import { useState } from "react";
 
-export default function CheckoutButton({
-  disabled,
-  className,
-}: {
-  disabled?: boolean;
-  className?: string;
-}) {
+export default function CheckoutButton({ disabled }: { disabled?: boolean }) {
   const [loading, setLoading] = useState(false);
 
   async function onCheckout() {
-    if (loading) return;
-    setLoading(true);
-
     try {
-      const res = await fetch("/api/checkout/cart", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-      });
+      setLoading(true);
 
-      const data = await res.json().catch(() => ({}));
+      // ✅ Canonical: one endpoint
+      const r = await fetch("/api/stripe/checkout/start", { method: "POST" });
+      const j = await r.json().catch(() => ({}));
 
-      if (!res.ok) {
-        alert(data?.error || "Checkout failed");
-        return;
-      }
+      if (!r.ok) throw new Error(j?.error || "Checkout failed");
 
-      if (!data?.url) {
-        alert("Checkout failed: missing Stripe URL");
-        return;
-      }
+      const url = typeof j?.url === "string" ? j.url : "";
+      if (!url) throw new Error("Checkout failed: missing Stripe URL");
 
-      // ✅ Send the user to Stripe Checkout
-      window.location.href = data.url;
-    } catch (e) {
-      console.error(e);
-      alert("Checkout failed");
+      window.location.assign(url);
+    } catch (e: any) {
+      alert(e?.message || "Checkout failed");
     } finally {
       setLoading(false);
     }
@@ -48,12 +32,9 @@ export default function CheckoutButton({
       type="button"
       onClick={onCheckout}
       disabled={disabled || loading}
-      className={
-        className ??
-        "w-full rounded-lg bg-indigo-600/80 px-4 py-3 text-sm font-bold text-white hover:bg-indigo-600 disabled:opacity-50"
-      }
+      className="mt-5 w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-60"
     >
-      {loading ? "Redirecting…" : "Proceed to Checkout"}
+      {loading ? "Redirecting…" : "Proceed to checkout"}
     </button>
   );
 }

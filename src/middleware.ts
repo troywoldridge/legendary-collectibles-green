@@ -23,6 +23,11 @@ const isPublicRoute = createRouteMatcher([
   "/vault(.*)",
   "/contact(.*)",
   "/faq(.*)",
+  "/api/stripe/checkout/start",
+  "/api/stripe/checkout/start(.*)",
+  "/api/stripe/checkout/sessions(.*)",
+
+
 
   // Auth pages
   "/sign-in(.*)",
@@ -38,6 +43,7 @@ const isPublicRoute = createRouteMatcher([
   "/api/store(.*)",
   "/api/shop(.*)",
   "/api/cart(.*)",
+  "/api/checkout(.*)",
 
   // Webhooks
   "/api/webhooks/stripe",
@@ -50,5 +56,10 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
 });
 
 export const config = {
-  matcher: ["/((?!_next|.*\\..*).*)", "/", "/(api|trpc)(.*)"],
-};
+  matcher: [
+    // match all except static files
+    "/((?!.*\\..*|_next).*)",
+    // always run for api routes
+    "/(api|trpc)(.*)",
+  ],
+};;

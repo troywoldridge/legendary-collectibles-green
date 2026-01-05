@@ -1,121 +1,156 @@
+// src/app/api/cart/route.ts
 import "server-only";
+
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
-import { carts, cartLines } from "@/lib/db/schema/cart";
-import { products, productImages } from "@/lib/db/schema/shop";
-import { and, eq, inArray, asc, sql } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
+import { carts, cart_lines, products } from "@/lib/db/schema";
+import { auth, currentUser } from "@clerk/nextjs/server";
+import { randomUUID } from "crypto";
+
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const CART_COOKIE = "lc_cart_id";
 
-function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+function json(data: any, init?: ResponseInit) {
+  return NextResponse.json(data, init);
+}
+
+function toInt(v: any, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+async function getOrCreateCartId(): Promise<string> {
+  const jar = await cookies(); // ✅ async in your Next version
+  const existing = jar.get(CART_COOKIE)?.value?.trim();
+  if (existing) return existing;
+
+  const id = randomUUID();
+
+  await db.insert(carts).values({
+    id,
+    status: "open",
+  });
+
+  jar.set(CART_COOKIE, id, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: true,
+    path: "/",
+    maxAge: 60 * 60 * 24 * 14,
+  });
+
+  return id;
 }
 
 export async function GET() {
   try {
-    const jar = await cookies();
-    const cartId = jar.get(CART_COOKIE)?.value;
+    const cartId = await getOrCreateCartId();
 
-    if (!cartId || !isUuid(cartId)) {
-      return NextResponse.json({ cartId: null, items: [], subtotalCents: 0 }, { status: 200 });
+    // Best-effort attach user/email (do not require auth)
+    try {
+      const a = await auth(); // ✅ async in your Clerk setup
+      const userId = a?.userId || null;
+
+      if (userId) {
+        const u = await currentUser().catch(() => null);
+        const email = u?.emailAddresses?.[0]?.emailAddress || null;
+
+        await db
+          .update(carts)
+          .set({
+            user_id: userId,
+            email,
+            updated_at: new Date(),
+          })
+          .where(eq(carts.id, cartId));
+      }
+    } catch {
+      // ignore
     }
 
-    const cart = await db.select({ id: carts.id }).from(carts).where(eq(carts.id, cartId)).limit(1);
-    if (!cart.length) {
-      return NextResponse.json({ cartId, items: [], subtotalCents: 0 }, { status: 200 });
-    }
-
+    // Load cart lines
     const lines = await db
       .select({
-        lineId: cartLines.id,
-        qty: cartLines.qty,
-        listingId: cartLines.listingId,
-        updatedAt: cartLines.updatedAt,
+        id: cart_lines.id,
+        qty: cart_lines.qty, // ✅ your table likely uses qty (NOT quantity)
+        listingId: cart_lines.listing_id,
       })
-      .from(cartLines)
-      .where(and(eq(cartLines.cartId, cartId), sql`${cartLines.listingId} is not null`));
+      .from(cart_lines)
+      .where(eq(cart_lines.cart_id, cartId));
 
-    const productIds = lines.map((l) => l.listingId).filter(Boolean) as string[];
-    if (!productIds.length) {
-      return NextResponse.json({ cartId, items: [], subtotalCents: 0 }, { status: 200 });
-    }
+    const listingIds = lines
+      .map((l) => l.listingId)
+      .filter((x): x is string => typeof x === "string" && x.length > 0);
 
-    const prows = await db
-      .select({
-        id: products.id,
-        title: products.title,
-        slug: products.slug,
-        priceCents: products.priceCents,
-        compareAtCents: products.compareAtCents,
-        status: products.status,
-        sealed: products.sealed,
-        isGraded: products.isGraded,
-        grader: products.grader,
-        gradeX10: products.gradeX10,
-        condition: products.condition,
-        inventoryType: products.inventoryType,
-        quantity: products.quantity,
-      })
-      .from(products)
-      .where(inArray(products.id, productIds));
+    const prodRows =
+      listingIds.length > 0
+        ? await db
+            .select({
+              id: products.id,
+              slug: products.slug,
+              title: products.title,
+              priceCents: products.priceCents,
+              compareAtCents: products.compareAtCents,
+              sealed: products.sealed,
+              isGraded: products.isGraded,
+              grader: products.grader,
+              gradeX10: products.gradeX10,
+              condition: products.condition,
+              inventoryType: products.inventoryType,
+              quantity: products.quantity,
+              // imageUrl: products.imageUrl, // ❌ doesn’t exist in your schema
+            })
+            .from(products)
+            .where(inArray(products.id, listingIds))
+        : [];
 
-    const productById = new Map(prows.map((p) => [p.id, p]));
-
-    const imgs = await db
-      .select({
-        productId: productImages.productId,
-        url: productImages.url,
-        alt: productImages.alt,
-        sort: productImages.sort,
-      })
-      .from(productImages)
-      .where(inArray(productImages.productId, productIds))
-      .orderBy(asc(productImages.productId), asc(productImages.sort));
-
-    const imageByProductId = new Map<string, { url: string; alt: string | null }>();
-    for (const img of imgs) {
-      if (!imageByProductId.has(img.productId)) {
-        imageByProductId.set(img.productId, { url: img.url, alt: img.alt ?? null });
-      }
-    }
+    const prodById = new Map(prodRows.map((p) => [p.id, p]));
 
     const items = lines
       .map((l) => {
-        const p = l.listingId ? productById.get(l.listingId) : null;
+        const pid = l.listingId || null;
+        if (!pid) return null;
+
+        const p = prodById.get(pid);
         if (!p) return null;
 
-        const unit = Number(p.priceCents ?? 0);
-        const qty = Number(l.qty ?? 0);
+        const unitPriceCents = toInt((p as any).priceCents, 0);
+        const qty = Math.max(1, toInt(l.qty, 1));
 
         return {
-          lineId: l.lineId,
+          lineId: l.id,
           productId: p.id,
-          slug: p.slug,
-          title: p.title,
+          slug: (p as any).slug ?? null,
+          title: (p as any).title ?? null,
           qty,
-          unitPriceCents: unit,
-          lineTotalCents: unit * qty,
-          compareAtCents: p.compareAtCents ?? null,
-          sealed: p.sealed,
-          isGraded: p.isGraded,
-          grader: p.grader,
-          gradeX10: p.gradeX10,
-          condition: p.condition,
-          inventoryType: p.inventoryType,
-          availableQty: p.quantity,
-          image: imageByProductId.get(p.id) ?? null,
+          unitPriceCents,
+          lineTotalCents: unitPriceCents * qty,
+          compareAtCents: (p as any).compareAtCents ?? null,
+          sealed: !!(p as any).sealed,
+          isGraded: !!(p as any).isGraded,
+          grader: (p as any).grader ?? null,
+          gradeX10: (p as any).gradeX10 ?? null,
+          condition: (p as any).condition ?? null,
+          inventoryType: (p as any).inventoryType ?? null,
+          availableQty: (p as any).quantity ?? null,
+          image: null,
         };
       })
       .filter(Boolean) as any[];
 
-    const subtotalCents = items.reduce((sum, it) => sum + it.lineTotalCents, 0);
+    const subtotalCents = items.reduce(
+      (sum, it) => sum + (it.unitPriceCents || 0) * (it.qty || 0),
+      0
+    );
 
-    return NextResponse.json({ cartId, items, subtotalCents }, { status: 200 });
-  } catch (err) {
+    return json({ cartId, items, subtotalCents });
+  } catch (err: any) {
     console.error("[api/cart] error", err);
-    return NextResponse.json({ error: "Failed to load cart" }, { status: 500 });
+    return json({ error: err?.message || "Cart error" }, { status: 500 });
   }
 }

@@ -2,7 +2,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
-import { cartLines } from "@/lib/db/schema/cart";
+import { cart_lines } from "@/lib/db/schema/cart";
 import { and, eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +29,7 @@ export async function POST(req: Request) {
 
     if (!Number.isFinite(lineId) || lineId < 1) return json({ error: "Invalid lineId" }, 400);
 
-    await db.delete(cartLines).where(and(eq(cartLines.id, lineId), eq(cartLines.cartId, cartId)));
+    await db.delete(cart_lines).where(and(eq(cart_lines.id, lineId), eq(cart_lines.cart_id, cartId)));
 
     return json({ ok: true });
   } catch (err) {

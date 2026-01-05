@@ -2,7 +2,7 @@ import "server-only";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
-import { cartLines } from "@/lib/db/schema/cart";
+import { cart_lines } from "@/lib/db/schema/cart";
 import { and, eq, sql } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +14,9 @@ function json(data: any, status = 200) {
 }
 
 function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v
+  );
 }
 
 export async function POST(req: Request) {
@@ -32,15 +34,20 @@ export async function POST(req: Request) {
     if (!Number.isFinite(qty) || qty < 0) return json({ error: "Invalid qty" }, 400);
 
     if (qty === 0) {
-      await db.delete(cartLines).where(and(eq(cartLines.id, lineId), eq(cartLines.cartId, cartId)));
+      await db
+        .delete(cart_lines)
+        .where(and(eq(cart_lines.id, lineId), eq(cart_lines.cart_id, cartId))); // ✅ cart_id
       return json({ ok: true, removed: true });
     }
 
     // ✅ Drizzle in your repo: returning() takes NO args
     const updated = await db
-      .update(cartLines)
-      .set({ qty, updatedAt: sql`now()` })
-      .where(and(eq(cartLines.id, lineId), eq(cartLines.cartId, cartId)))
+      .update(cart_lines)
+      .set({
+        qty,
+        updated_at: sql`now()`, // ✅ updated_at
+      })
+      .where(and(eq(cart_lines.id, lineId), eq(cart_lines.cart_id, cartId))) // ✅ cart_id
       .returning();
 
     if (!updated.length) return json({ error: "Line not found" }, 404);

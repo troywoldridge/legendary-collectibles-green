@@ -2,7 +2,8 @@ import "server-only";
 import { NextResponse } from "next/server";
 import Stripe from "stripe";
 import { db } from "@/lib/db";
-import { carts, cartLines } from "@/lib/db/schema/cart";
+import { carts, cart_lines } from "@/lib/db/schema/cart";
+
 import { products, productImages } from "@/lib/db/schema/shop";
 import { orders, orderItems } from "@/lib/db/schema/orders";
 import { and, eq, inArray, sql, asc } from "drizzle-orm";
@@ -90,12 +91,12 @@ export async function POST(req: Request) {
   // Pull cart lines: your cart uses listing_id UUID for shop products
   const lines = await db
     .select({
-      id: cartLines.id,
-      qty: cartLines.qty,
-      listingId: cartLines.listingId,
+      id: cart_lines.id,
+      qty: cart_lines.qty,
+      listingId: cart_lines.listing_id,
     })
-    .from(cartLines)
-    .where(and(eq(cartLines.cartId, cartId), sql`${cartLines.listingId} is not null`));
+    .from(cart_lines)
+    .where(and(eq(cart_lines.cart_id, cartId), sql`${cart_lines.listing_id} is not null`));
 
   const productIds = lines.map((l) => l.listingId).filter(Boolean) as string[];
   if (!productIds.length) {

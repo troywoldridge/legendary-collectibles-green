@@ -1,17 +1,24 @@
 // src/lib/db/schema/index.ts
-// Re-export every table module that should be part of the Drizzle schema.
-// Add your existing modules here too (pokemon, ygo, mtg, etc).
 
-export * from "./billing";      // <-- exposes plans, userPlans, billingCustomers
-export * from "./mtg";          // (example) your MTG tables
+export * from "./enums"; // ✅ only enums here (gameEnum, etc.)
+
+export * from "./billing";
+export * from "./mtg";
 export * from "./pricecharting";
-export * from "./pro";
 export * from "./collectionAnalytics";
-
 export * from "./priceAlertLogs";
 export * from "./priceAlerts";
-export * from "./orders";
+
 export * from "./store";
 export * from "./inventory";
+export * from "./orders";
+export * from "./cart";
+export * from "./shop";
 
+// 🚫 DO NOT export * from "./pro" if pro re-exports gameEnum
+// Instead: export only the tables you need from pro:
+export { pro_exports } from "./pro";
+export * from "./emailEvents";
+export { categories, subcategories } from "./schema";
+export * from "./vendorMaps";
 

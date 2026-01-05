@@ -1,127 +1,136 @@
+// src/app/api/checkout/cart/route.ts
 import "server-only";
+
 import { NextResponse } from "next/server";
-import Stripe from "stripe";
-import { cookies } from "next/headers";
+import { auth } from "@clerk/nextjs/server";
+import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { carts, cartLines } from "@/lib/db/schema/cart";
-import { products } from "@/lib/db/schema/shop";
-import { and, eq, inArray, sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2025-10-29.clover",
-});
+type CheckoutCartItem = {
+  lineId: number;
+  listingId: string;
+  qty: number;
 
-const CART_COOKIE = "lc_cart_id";
+  id: string;
+  slug: string | null;
+  title: string;
+  subtitle: string | null;
 
-function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  priceCents: number;
+  compareAtCents: number | null;
+
+  sealed: boolean | null;
+  isGraded: boolean | null;
+  grader: string | null;
+  gradeX10: number | null;
+  condition: string | null;
+
+  quantity: number | null;
+  imageUrl: string | null;
+};
+
+async function buildCheckoutCart() {
+  const { userId } = await auth();
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const cartRes = await db.execute(
+    sql<{ id: string }>`
+      select id
+      from carts
+      where user_id = ${userId}
+        and coalesce(status, 'open') = 'open'
+      order by updated_at desc nulls last, created_at desc
+      limit 1
+    `,
+  );
+
+  const cartId = cartRes.rows?.[0]?.id ?? null;
+  if (!cartId) {
+    return NextResponse.json({ cartId: null, items: [], subtotalCents: 0 }, { status: 200 });
+  }
+
+  const linesRes = await db.execute(
+    sql<CheckoutCartItem>`
+      select
+        cl.id as "lineId",
+        cl.listing_id as "listingId",
+        cl.qty as "qty",
+
+        p.id as "id",
+        p.slug as "slug",
+        p.title as "title",
+        p.subtitle as "subtitle",
+
+        p.price_cents as "priceCents",
+        p.compare_at_cents as "compareAtCents",
+
+        p.sealed as "sealed",
+        p.is_graded as "isGraded",
+        p.grader as "grader",
+        p.grade_x10 as "gradeX10",
+        p.condition as "condition",
+
+        p.quantity as "quantity",
+        p.image_url as "imageUrl"
+      from cart_lines cl
+      join products p
+        on p.id = cl.listing_id
+      where cl.cart_id = ${cartId}
+        and cl.listing_id is not null
+      order by cl.id asc
+    `,
+  );
+
+  const items = (linesRes.rows ?? []).map((r) => ({
+    lineId: Number(r.lineId),
+    listingId: String(r.listingId),
+    qty: Number(r.qty),
+
+    productId: String(r.id),
+    slug: r.slug ?? null,
+    title: r.title,
+    subtitle: r.subtitle ?? null,
+
+    unitPriceCents: Number(r.priceCents ?? 0),
+    compareAtCents: r.compareAtCents == null ? null : Number(r.compareAtCents),
+
+    sealed: r.sealed ?? null,
+    isGraded: r.isGraded ?? null,
+    grader: r.grader ?? null,
+    gradeX10: r.gradeX10 == null ? null : Number(r.gradeX10),
+    condition: r.condition ?? null,
+
+    availableQty: r.quantity == null ? null : Number(r.quantity),
+    image: r.imageUrl ? { url: r.imageUrl, alt: r.title ?? null } : null,
+
+    lineTotalCents: Number(r.priceCents ?? 0) * Number(r.qty ?? 0),
+  }));
+
+  const subtotalCents = items.reduce((sum, it) => sum + (it.lineTotalCents ?? 0), 0);
+
+  return NextResponse.json({ cartId, items, subtotalCents }, { status: 200 });
 }
 
-export async function POST(req: Request) {
+export async function GET() {
   try {
-    const jar = await cookies();
-    const cartId = jar.get(CART_COOKIE)?.value;
-
-    if (!cartId || !isUuid(cartId)) {
-      return NextResponse.json({ error: "No active cart" }, { status: 400 });
-    }
-
-    const cart = await db
-      .select({ id: carts.id })
-      .from(carts)
-      .where(eq(carts.id, cartId))
-      .limit(1);
-
-    if (!cart.length) {
-      return NextResponse.json({ error: "Cart not found" }, { status: 400 });
-    }
-
-    // ✅ Pull cart lines using the UUID column directly (DB column: product_uuid)
-    const lines = await db
-      .select({
-        id: cartLines.id,
-        qty: cartLines.qty,
-        productUuid: sql<string>`(${cartLines}."product_uuid")`,
-      })
-      .from(cartLines)
-      .where(
-        and(
-          eq(cartLines.cartId, cartId),
-          sql`(${cartLines}."product_uuid") is not null`
-        )
-      );
-
-    const productIds = lines.map((l) => l.productUuid).filter(Boolean);
-
-    if (!productIds.length) {
-      return NextResponse.json({ error: "Cart is empty" }, { status: 400 });
-    }
-
-    const prows = await db
-      .select({
-        id: products.id,
-        title: products.title,
-        priceCents: products.priceCents,
-        status: products.status,
-        quantity: products.quantity,
-      })
-      .from(products)
-      .where(inArray(products.id, productIds));
-
-    const byId = new Map(prows.map((p) => [p.id, p]));
-
-    const line_items: Stripe.Checkout.SessionCreateParams.LineItem[] = [];
-
-    for (const l of lines) {
-      const p = l.productUuid ? byId.get(l.productUuid) : null;
-      if (!p) continue;
-
-      const qty = Math.max(1, Math.min(99, Number(l.qty) || 1));
-
-      if (p.status !== "active") {
-        return NextResponse.json({ error: `Product not available: ${p.title}` }, { status: 400 });
-      }
-      if (Number(p.quantity ?? 0) < qty) {
-        return NextResponse.json({ error: `Out of stock: ${p.title}` }, { status: 400 });
-      }
-
-      line_items.push({
-        quantity: qty,
-        price_data: {
-          currency: "usd",
-          unit_amount: Number(p.priceCents),
-          product_data: {
-            name: p.title,
-            metadata: { productId: String(p.id) },
-          },
-        },
-      });
-    }
-
-    if (!line_items.length) {
-      return NextResponse.json({ error: "Cart has no valid items" }, { status: 400 });
-    }
-
-    const origin = req.headers.get("origin") || "https://legendary-collectibles.com";
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      line_items,
-      success_url: `${origin}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${origin}/cart`,
-      metadata: {
-        source: "cart",
-        cartId,
-      },
-    });
-
-
-    return NextResponse.json({ url: session.url }, { status: 200 });
+    return await buildCheckoutCart();
   } catch (err) {
     console.error("[api/checkout/cart] error", err);
-    return NextResponse.json({ error: "Checkout failed" }, { status: 500 });
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+  }
+}
+
+// ✅ your button is POSTing, so support it
+export async function POST() {
+  try {
+    return await buildCheckoutCart();
+  } catch (err) {
+    console.error("[api/checkout/cart] error", err);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }

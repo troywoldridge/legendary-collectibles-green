@@ -1,7 +1,6 @@
 // src/lib/db/schema/cart.ts
 import {
   pgTable,
-  pgEnum,
   uuid,
   text,
   integer,
@@ -9,78 +8,56 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
 import { products } from "@/lib/db/schema/shop";
-
-/**
- * Cart lifecycle:
- * - open: active cart in progress
- * - checked_out: completed purchase
- * - abandoned: optionally marked by cleanup job
- */
-export const cartStatus = pgEnum("cart_status", ["open", "checked_out", "abandoned"]);
 
 export const carts = pgTable(
   "carts",
   {
     id: uuid("id").defaultRandom().primaryKey(),
 
-    status: cartStatus("status").notNull().default("open"),
+    status: text("status").default("open"),
 
-    // Attach if user is signed in (Clerk user id). Optional.
-    userId: text("user_id"),
-
-    // For guest checkout / email capture. Optional.
+    user_id: text("user_id"),
     email: text("email"),
+    expires_at: timestamp("expires_at", { withTimezone: true }),
 
-    // Optional: when cart should be treated as expired (cleanup job can mark abandoned).
-    expiresAt: timestamp("expires_at", { withTimezone: true }),
-
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).defaultNow(),
   },
   (t) => ({
-    statusIdx: index("carts_status_idx").on(t.status),
-    userIdx: index("carts_user_idx").on(t.userId),
-    emailIdx: index("carts_email_idx").on(t.email),
-    updatedIdx: index("carts_updated_at_idx").on(t.updatedAt),
+    carts_status_idx: index("carts_status_idx").on(t.status),
+    carts_user_idx: index("carts_user_idx").on(t.user_id),
+    carts_email_idx: index("carts_email_idx").on(t.email),
+    carts_updated_at_idx: index("carts_updated_at_idx").on(t.updated_at),
   })
 );
 
-export const cartLines = pgTable(
+export const cart_lines = pgTable(
   "cart_lines",
   {
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
-    cartId: uuid("cart_id")
+    cart_id: uuid("cart_id")
       .notNull()
       .references(() => carts.id, { onDelete: "cascade", onUpdate: "cascade" }),
 
-    // legacy/optional: keep for now (some old code might still write it)
-    productId: integer("product_id"),
+    product_id: integer("product_id"),
 
-    // ✅ main FK for shop products (uuid)
-    listingId: uuid("listing_id").references(() => products.id, {
+    listing_id: uuid("listing_id").references(() => products.id, {
       onDelete: "set null",
       onUpdate: "cascade",
     }),
 
     qty: integer("qty").notNull(),
 
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
+    created_at: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updated_at: timestamp("updated_at", { withTimezone: true }).defaultNow(),
   },
   (t) => ({
-    cartIdx: index("cart_lines_cart_id_idx").on(t.cartId),
-    listingIdx: index("cart_lines_listing_id_idx").on(t.listingId),
-    productIdx: index("cart_lines_product_id_idx").on(t.productId),
+    idx_cart_lines_cart_id: index("idx_cart_lines_cart_id").on(t.cart_id),
+    idx_cart_lines_listing_id: index("idx_cart_lines_listing_id").on(t.listing_id),
+    idx_cart_lines_product_id: index("idx_cart_lines_product_id").on(t.product_id),
 
-    // Unique cart + listing
-    cartListingUnique: uniqueIndex("ux_cart_lines_cart_listing")
-      .on(t.cartId, t.listingId),
+    ux_cart_lines_cart_listing: uniqueIndex("ux_cart_lines_cart_listing").on(t.cart_id, t.listing_id),
   })
 );
