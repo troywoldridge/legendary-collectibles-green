@@ -10,6 +10,9 @@ const nextConfig: NextConfig = {
       // ✅ PokemonTCG images (required)
       { protocol: "https", hostname: "images.pokemontcg.io", pathname: "/**" },
 
+      // ✅ YGOPRODeck (Yu-Gi-Oh images)
+      { protocol: "https", hostname: "images.ygoprodeck.com", pathname: "/**" },
+
       // Scryfall
       { protocol: "https", hostname: "c1.scryfall.com", pathname: "/**" },
       { protocol: "https", hostname: "cards.scryfall.io", pathname: "/**" },
@@ -30,9 +33,7 @@ const nextConfig: NextConfig = {
   },
 
   async rewrites() {
-    return [
-      { source: "/sitemap-pages.xml", destination: "/sitemap-pages" },
-    ];
+    return [{ source: "/sitemap-pages.xml", destination: "/sitemap-pages" }];
   },
 };
 

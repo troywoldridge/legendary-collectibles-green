@@ -58,11 +58,15 @@ export default function ShopFilters({ game, format }: { game: string; format: st
       <div className="filtersRow">
         <div className="filtersLabel">Search</div>
         <input
-          className="input"
-          value={state.q}
-          onChange={(e) => setState((s) => ({ ...s, q: e.target.value }))}
-          placeholder="Search title…"
-        />
+  className="input"
+  value={state.q}
+  onChange={(e) => setState((s) => ({ ...s, q: e.target.value }))}
+  onKeyDown={(e) => {
+    if (e.key === "Enter") apply();
+  }}
+  placeholder="Search title…"
+/>
+
       </div>
 
       <div className="filtersRow">

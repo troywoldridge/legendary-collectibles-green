@@ -648,3 +648,306 @@ body::after {
   transform: scale(1.02);
   transition: transform 180ms ease;
 }
+
+/* ============================
+   PRO SHOP TILE POLISH (supplier-ready)
+   ============================ */
+
+.productMasonry {
+  /* If this is currently a "masonry" feel, this makes it more premium + consistent */
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+
+@media (min-width: 640px) {
+  .productMasonry { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1024px) {
+  .productMasonry { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (min-width: 1280px) {
+  .productMasonry { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+/* Card shell */
+.productTile {
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(10,10,10,0.45);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.productTile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+  border-color: rgba(255,255,255,0.16);
+}
+
+/* Image area */
+.productTile__media {
+  display: block;
+  text-decoration: none;
+}
+
+.productTile__imgWrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4; /* trading card friendly */
+  background: radial-gradient(
+    circle at 30% 20%,
+    rgba(255,255,255,0.10),
+    rgba(0,0,0,0.45) 55%,
+    rgba(0,0,0,0.65) 100%
+  );
+}
+
+.productTile__img {
+  object-fit: contain;
+  object-position: center;
+  padding: 10px;
+  transform: scale(1.0);
+  transition: transform 180ms ease;
+}
+
+.productTile:hover .productTile__img {
+  transform: scale(1.02);
+}
+
+/* Badge: small + clean */
+.productTile__badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: rgba(255,255,255,0.92);
+  border: 1px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.45);
+  backdrop-filter: blur(8px);
+}
+
+/* Body spacing: tighter and more “catalog” */
+.productTile__body {
+  padding: 12px 12px 14px;
+}
+
+.productTile__body--tight {
+  padding: 10px 12px 12px;
+}
+
+/* Title + subtitle */
+.productTile__title {
+  font-weight: 800;
+  font-size: 14px;
+  line-height: 1.2;
+  color: rgba(255,255,255,0.96);
+  margin-bottom: 6px;
+}
+
+.productTile__subtitle {
+  font-size: 12px;
+  line-height: 1.3;
+  color: rgba(255,255,255,0.65);
+  margin-bottom: 10px;
+}
+
+/* Price row */
+.productTile__priceRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.productTile__price {
+  font-size: 16px;
+  font-weight: 900;
+  color: rgba(255,255,255,0.98);
+}
+
+.productTile__compare {
+  font-size: 13px;
+  color: rgba(255,255,255,0.45);
+  text-decoration: line-through;
+}
+
+/* Stock/meta line */
+.productTile__meta {
+  font-size: 12px;
+  color: rgba(255,255,255,0.60);
+  margin-bottom: 12px;
+}
+
+/* Actions: consistent buttons */
+.productTile__actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.btn.btnInline {
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 12px;
+  font-weight: 800;
+  font-size: 12px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.92);
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.btn.btnInline:hover {
+  background: rgba(255,255,255,0.12);
+  border-color: rgba(255,255,255,0.20);
+}
+
+.btn.btnGhost.btnInline {
+  background: rgba(0,0,0,0.25);
+}
+
+/* Make add-to-cart button match */
+.productTile__actions button,
+.productTile__actions .btn {
+  flex: 1;
+}
+
+/* If your AddToCartButton renders a <button> with its own class,
+   this makes it visually consistent without touching component code. */
+.productTile__actions button {
+  height: 38px;
+  border-radius: 12px;
+  font-weight: 900;
+  font-size: 12px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.92);
+  color: rgba(0,0,0,0.92);
+  transition: transform 160ms ease, background 160ms ease;
+}
+
+.productTile__actions button:hover {
+  background: rgba(255,255,255,0.85);
+  transform: translateY(-1px);
+}
+
+.productTile__actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ============================
+   ShopFilters.tsx — compact pro layout
+   ============================ */
+
+.filters {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px 12px;
+  width: 100%;
+}
+
+/* 2 cols on small screens, 3 on desktop, 4 on wide */
+@media (min-width: 640px) {
+  .filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1024px) {
+  .filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (min-width: 1280px) {
+  .filters { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+/* Each filter row becomes a compact block */
+.filtersRow {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 6px;
+}
+
+/* Labels tight + consistent */
+.filtersLabel {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: rgba(255,255,255,0.70);
+}
+
+/* Inputs/selects compact */
+.filters .input,
+.filters .select {
+  width: 100%;
+  height: 36px;
+  border-radius: 12px;
+  padding: 0 10px;
+
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(0,0,0,0.30);
+  color: rgba(255,255,255,0.92);
+  outline: none;
+}
+
+.filters .input::placeholder {
+  color: rgba(255,255,255,0.40);
+}
+
+.filters .input:focus,
+.filters .select:focus {
+  border-color: rgba(255,255,255,0.26);
+}
+
+/* Price row: label on top, two inputs side-by-side */
+.twoCol {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* Actions row spans full width + right aligned */
+.filtersActions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+/* Buttons pro sizing */
+.filtersActions .btn {
+  height: 36px;
+  border-radius: 12px;
+  padding: 0 14px;
+  font-weight: 900;
+  font-size: 12px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.92);
+  color: rgba(0,0,0,0.92);
+  transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.filtersActions .btn:hover {
+  background: rgba(255,255,255,0.85);
+  transform: translateY(-1px);
+}
+
+.filtersActions .btn.btnGhost {
+  background: rgba(0,0,0,0.25);
+  color: rgba(255,255,255,0.92);
+}
+
+.filtersActions .btn.btnGhost:hover {
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.20);
+}
+
+/* Make Search span 2 columns on desktop */
+@media (min-width: 1024px) {
+  .filtersRow:first-child { grid-column: span 2; }
+}

@@ -159,7 +159,17 @@ export default async function ShopCategoryPage(props: {
         </div>
 
         {/* Filters (client component) */}
-        <ShopFilters game={dept} format={category} />
+        <details className="shopFiltersDetails">
+          <summary className="shopFiltersSummary">
+            Filters
+            <span className="shopFiltersSummaryHint">Search + refine</span>
+          </summary>
+
+          <div className="shopFiltersPanel">
+            <ShopFilters game={dept} format={category} />
+          </div>
+        </details>
+
       </header>
 
       <section className="shopSection">
@@ -214,7 +224,8 @@ export default async function ShopCategoryPage(props: {
                       {badge ? <div className="productTile__badge">{badge}</div> : null}
                     </Link>
 
-                    <div className="productTile__body">
+                    <div className="productTile__body productTile__body--tight">
+
                       <div className="productTile__title">
                         <Link className="hover:underline" href={href}>
                           {p.title}
