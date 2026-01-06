@@ -1,7 +1,7 @@
 import "server-only";
 
 import { notFound } from "next/navigation";
-import AddToCartButton from "@/components/cart/AddToCartButton";
+import AddToCartWithQty from "@/app/shop/_components/AddToCartWithQty";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -69,15 +69,15 @@ function money(cents?: number | null) {
 export default async function ProductDetailPage(props: {
   params: { id: string } | Promise<{ id: string }>;
 }) {
-  const p = await props.params; // ✅ works for both object and Promise params
+  const p = await props.params;
   const id = norm(p?.id);
   if (!id) notFound();
 
   const product = await fetchProduct(id);
   if (!product) notFound();
 
-  const price = money(product.price_cents);
-  const compareAt = money(product.compare_at_cents);
+  const priceText = money(product.price_cents);
+  const compareAtText = money(product.compare_at_cents);
 
   const images =
     Array.isArray(product.images) && product.images.length > 0
@@ -90,13 +90,19 @@ export default async function ProductDetailPage(props: {
 
   const qty = typeof product.quantity === "number" ? product.quantity : null;
   const status = (product.status ?? "").toLowerCase();
-  const unavailableByStatus =
-    status === "sold" ||
-    status === "sold_out" ||
-    status === "inactive" ||
-    status === "disabled";
 
-  const addDisabled = !price || (qty !== null && qty <= 0) || unavailableByStatus;
+  const hasPrice =
+    typeof product.price_cents === "number" &&
+    Number.isFinite(product.price_cents) &&
+    product.price_cents > 0;
+
+  const soldOut = (qty !== null && qty <= 0) || status === "sold" || status === "sold_out";
+
+  const unavailableByStatus = status === "inactive" || status === "disabled";
+
+  const addDisabled = !hasPrice || soldOut || unavailableByStatus;
+
+  const lowStock = qty !== null && qty > 0 && qty <= 3;
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-8 text-white">
@@ -138,18 +144,16 @@ export default async function ProductDetailPage(props: {
 
         <div>
           <h1 className="text-3xl font-bold">{product.title}</h1>
-          {product.subtitle ? (
-            <p className="mt-2 text-white/70">{product.subtitle}</p>
-          ) : null}
+          {product.subtitle ? <p className="mt-2 text-white/70">{product.subtitle}</p> : null}
 
           <div className="mt-4 flex items-end gap-3">
-            {price ? (
-              <div className="text-3xl font-extrabold">${price}</div>
+            {priceText ? (
+              <div className="text-3xl font-extrabold">${priceText}</div>
             ) : (
               <div className="text-3xl font-extrabold">—</div>
             )}
-            {compareAt && compareAt !== price ? (
-              <div className="text-lg text-white/50 line-through">${compareAt}</div>
+            {compareAtText && compareAtText !== priceText ? (
+              <div className="text-lg text-white/50 line-through">${compareAtText}</div>
             ) : null}
           </div>
 
@@ -159,45 +163,63 @@ export default async function ProductDetailPage(props: {
                 {product.game}
               </span>
             ) : null}
+
             {product.format ? (
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
                 {product.format}
               </span>
             ) : null}
+
             {product.condition ? (
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
                 {product.condition}
               </span>
             ) : null}
+
             {product.is_graded ? (
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
                 {product.grader ?? "Graded"}{" "}
-                {typeof product.grade_x10 === "number"
-                  ? (product.grade_x10 / 10).toFixed(1)
-                  : ""}
+                {typeof product.grade_x10 === "number" ? (product.grade_x10 / 10).toFixed(1) : ""}
               </span>
             ) : null}
-            {typeof product.quantity === "number" ? (
+
+            {soldOut ? (
+              <span className="rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1 font-semibold text-red-200">
+                Sold Out
+              </span>
+            ) : typeof product.quantity === "number" ? (
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                Qty: {product.quantity}
+                In Stock: {product.quantity}
+              </span>
+            ) : null}
+
+            {lowStock ? (
+              <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 font-semibold text-amber-200">
+                Only {qty} left
               </span>
             ) : null}
           </div>
 
-          <AddToCartButton productId={product.id} disabled={addDisabled} />
+          <AddToCartWithQty
+            productId={product.id}
+            availableQty={product.quantity ?? null}
+            disabled={addDisabled}
+          />
 
-          {!price ? (
+          {!hasPrice ? (
             <p className="mt-2 text-sm text-white/60">
               This item isn’t purchasable yet (no price set).
             </p>
           ) : null}
 
+          {unavailableByStatus ? (
+            <p className="mt-2 text-sm text-white/60">This item is currently unavailable.</p>
+          ) : null}
+
           {product.description ? (
             <div className="mt-8">
               <h2 className="text-lg font-semibold">Description</h2>
-              <p className="mt-2 whitespace-pre-wrap text-sm text-white/70">
-                {product.description}
-              </p>
+              <p className="mt-2 whitespace-pre-wrap text-sm text-white/70">{product.description}</p>
             </div>
           ) : null}
         </div>

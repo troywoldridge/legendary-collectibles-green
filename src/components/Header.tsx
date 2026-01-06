@@ -8,6 +8,8 @@ import { site } from "@/config/site";
 import { cfUrl, CF_ACCOUNT_HASH, type Variant } from "@/lib/cf";
 import { FEATURES } from "@/config/flags";
 import { SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
+import { useCartCount } from "@/hooks/useCartCount";
+
 
 const LOGO_CF_ID = "f7b75c90-dccb-4c37-e603-2bc749caaa00";
 
@@ -20,6 +22,7 @@ const LOGO_VARIANTS: Variant[] = ["hero"];
 
 export default function Header() {
   const pathname = usePathname();
+const cartCount = useCartCount();
 
   const isActive = (href: string) =>
     pathname === href || (href !== "/" && pathname?.startsWith(href));
@@ -121,10 +124,12 @@ export default function Header() {
                   d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"
                 />
               </svg>
-              <span className="hidden text-sm font-medium text-white lg:inline">Cart</span>
-              <span className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white">
-                0
-              </span>
+              {cartCount > 0 && (
+  <span className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white">
+    {cartCount}
+  </span>
+)}
+
             </Link>
 
             {/* Auth */}
