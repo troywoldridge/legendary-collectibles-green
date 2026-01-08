@@ -1,19 +1,12 @@
-import "server-only";
-
-import { NextResponse, type NextRequest } from "next/server";
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
-/**
- * Public routes:
- * Anything NOT matched here is protected by Clerk.
- */
 const isPublicRoute = createRouteMatcher([
-  // Public pages
+  "/clerk_(.*)",
   "/",
   "/shop(.*)",
-  "/api/shop(.*)", 
   "/products(.*)",
-  "/api/products(.*)", 
   "/categories(.*)",
   "/psa(.*)",
   "/guides(.*)",
@@ -23,43 +16,44 @@ const isPublicRoute = createRouteMatcher([
   "/vault(.*)",
   "/contact(.*)",
   "/faq(.*)",
-  "/api/stripe/checkout/start",
+  "/api/shop(.*)",
+  "/api/products(.*)",
+  "/api/store(.*)",
+  "/api/cart(.*)",
+  "/api/checkout(.*)",
   "/api/stripe/checkout/start(.*)",
   "/api/stripe/checkout/sessions(.*)",
-
-
-
-  // Auth pages
   "/sign-in(.*)",
   "/sign-up(.*)",
-
-  // SEO / simple routes
   "/robots.txt",
   "/sitemap.xml",
   "/sitemap(.*)",
   "/ping(.*)",
-
-  // Guest shopping MUST work
-  "/api/store(.*)",
-  "/api/shop(.*)",
-  "/api/cart(.*)",
-  "/api/checkout(.*)",
-
-  // Webhooks
   "/api/webhooks/stripe",
 ]);
 
 export default clerkMiddleware(async (auth, req: NextRequest) => {
   if (isPublicRoute(req)) return NextResponse.next();
-  await auth.protect();
+
+  const { userId } = await auth();
+
+  if (!userId) {
+    const redirectPath = `${req.nextUrl.pathname}${req.nextUrl.search}`;
+
+    const signInUrl = req.nextUrl.clone();
+    signInUrl.pathname = "/sign-in";
+    signInUrl.search = "";
+    signInUrl.searchParams.set("redirect_url", redirectPath);
+
+    return NextResponse.redirect(signInUrl);
+  }
+
   return NextResponse.next();
 });
 
 export const config = {
   matcher: [
-    // match all except static files
     "/((?!.*\\..*|_next).*)",
-    // always run for api routes
     "/(api|trpc)(.*)",
   ],
-};;
+};

@@ -44,9 +44,15 @@ function normalizeVariantType(input) {
 
   if (s === "normal") return "normal";
   if (s === "holo" || s === "holofoil") return "holofoil";
-  if (s === "reverse" || s === "reverse_holo" || s === "reverseholo" || s === "reverse_holofoil")
+  if (
+    s === "reverse" ||
+    s === "reverse_holo" ||
+    s === "reverseholo" ||
+    s === "reverse_holofoil"
+  )
     return "reverse_holofoil";
-  if (s === "first" || s === "firstedition" || s === "first_edition") return "first_edition";
+  if (s === "first" || s === "firstedition" || s === "first_edition")
+    return "first_edition";
   if (s === "promo" || s === "wpromo" || s === "w_promo") return "promo";
 
   return "normal";
@@ -85,17 +91,33 @@ function isUuidLike(s) {
   );
 }
 
+/**
+ * Ensures the DB has the index your app needs for:
+ * "only one active job (queued/running) per user"
+ *
+ * NOTE: This is a partial UNIQUE INDEX (not a constraint),
+ * so app-side enqueue should use:
+ *   ON CONFLICT DO NOTHING
+ */
+async function ensureActiveJobIndex(client) {
+  await client.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_user_revalue_jobs_active_user
+    ON public.user_revalue_jobs (user_id)
+    WHERE status IN ('queued', 'running');
+  `);
+}
+
 async function claimNextJob(client) {
   const { rows } = await client.query(`
     WITH next_job AS (
       SELECT id
-      FROM user_revalue_jobs
+      FROM public.user_revalue_jobs
       WHERE status = 'queued'
       ORDER BY created_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
-    UPDATE user_revalue_jobs j
+    UPDATE public.user_revalue_jobs j
     SET status = 'running',
         started_at = COALESCE(started_at, now()),
         error = NULL
@@ -109,7 +131,7 @@ async function claimNextJob(client) {
 
 async function markJobDone(client, jobId) {
   await client.query(
-    `UPDATE user_revalue_jobs
+    `UPDATE public.user_revalue_jobs
      SET status='done', finished_at=now(), error=NULL
      WHERE id=$1`,
     [jobId],
@@ -118,7 +140,7 @@ async function markJobDone(client, jobId) {
 
 async function markJobFailed(client, jobId, err) {
   await client.query(
-    `UPDATE user_revalue_jobs
+    `UPDATE public.user_revalue_jobs
      SET status='failed', finished_at=now(), error=$2
      WHERE id=$1`,
     [jobId, String(err?.stack || err?.message || err)],
@@ -190,7 +212,6 @@ async function lookupYgoUnitCents(client, cardId) {
   if (!rows?.length) return null;
   const r = rows[0];
 
-  // Preference order (my opinion): TCGplayer > Cardmarket > eBay > Amazon > CoolStuff
   const candidates = [
     { key: "tcgplayer_price", v: r.tcgplayer_price },
     { key: "cardmarket_price", v: r.cardmarket_price },
@@ -216,7 +237,6 @@ async function lookupYgoUnitCents(client, cardId) {
 
 /** MTG price from mtg_prices_scryfall_latest using scryfall_id uuid */
 async function lookupMtgUnitCents(client, scryfallIdUuid, finish) {
-  // finish: 'normal' | 'foil' | 'etched'
   const col =
     finish === "foil" ? "usd_foil" : finish === "etched" ? "usd_etched" : "usd";
 
@@ -243,12 +263,6 @@ async function lookupMtgUnitCents(client, scryfallIdUuid, finish) {
   };
 }
 
-/**
- * Compute item total cents using your real tables.
- * PSA handling (for now):
- * - if grading_company='PSA' we still price by RAW tables unless/until you add a PSA-price table
- *   (we preserve meta + can add PSA buckets later without schema changes)
- */
 async function computeItemValueCents(client, item) {
   const qty = Number(item.quantity || 1) > 0 ? Number(item.quantity) : 1;
 
@@ -278,7 +292,6 @@ async function computeItemValueCents(client, item) {
       };
     }
 
-    // fallback: don't zero out
     const fallback = Number(item.last_value_cents ?? 0);
     return {
       totalCents: fallback,
@@ -327,12 +340,12 @@ async function computeItemValueCents(client, item) {
   if (game === "mtg" || game === "magic") {
     const id = String(item.card_id || "").trim();
 
-    // Decide finish using your variant_type (you can refine this later)
-    // - holofoil -> foil
-    // - promo/normal -> normal
-    // - if you ever store etched explicitly, map it
     const finish =
-      variantType === "holofoil" ? "foil" : variantType === "promo" ? "foil" : "normal";
+      variantType === "holofoil"
+        ? "foil"
+        : variantType === "promo"
+          ? "foil"
+          : "normal";
 
     if (isUuidLike(id)) {
       const mtg = await lookupMtgUnitCents(client, id, finish);
@@ -357,7 +370,9 @@ async function computeItemValueCents(client, item) {
       totalCents: fallback,
       unitCents: null,
       currency: "USD",
-      source: isUuidLike(id) ? "mtg_no_price_found_fallback" : "mtg_card_id_not_uuid_fallback",
+      source: isUuidLike(id)
+        ? "mtg_no_price_found_fallback"
+        : "mtg_card_id_not_uuid_fallback",
       confidence: "low",
       metaExtra: {
         pricing_mode: "raw_fallback",
@@ -380,7 +395,6 @@ async function computeItemValueCents(client, item) {
 }
 
 async function upsertDailyRollup(client, userId) {
-  // Totals
   const { rows } = await client.query(
     `
     SELECT
@@ -388,7 +402,7 @@ async function upsertDailyRollup(client, userId) {
       COALESCE(SUM(COALESCE(quantity, 0)), 0)::bigint AS total_quantity,
       COALESCE(COUNT(*), 0)::bigint AS distinct_items,
       COALESCE(SUM(COALESCE(cost_cents, 0) * COALESCE(quantity, 0)), 0)::bigint AS total_cost_cents
-    FROM user_collection_items
+    FROM public.user_collection_items
     WHERE user_id = $1
     `,
     [userId],
@@ -401,7 +415,6 @@ async function upsertDailyRollup(client, userId) {
 
   const unrealizedPnl = totalValue - totalCost;
 
-  // Breakdown by game + grading
   const { rows: gameRows } = await client.query(
     `
     SELECT
@@ -409,7 +422,7 @@ async function upsertDailyRollup(client, userId) {
       COALESCE(SUM(COALESCE(last_value_cents, 0)), 0)::bigint AS value_cents,
       COALESCE(SUM(COALESCE(quantity, 0)), 0)::bigint AS quantity,
       COALESCE(COUNT(*), 0)::bigint AS items
-    FROM user_collection_items
+    FROM public.user_collection_items
     WHERE user_id = $1
     GROUP BY COALESCE(game, 'unknown')
     ORDER BY value_cents DESC
@@ -428,7 +441,7 @@ async function upsertDailyRollup(client, userId) {
       COALESCE(COUNT(*), 0)::bigint AS items,
       COALESCE(SUM(COALESCE(quantity, 0)), 0)::bigint AS quantity,
       COALESCE(SUM(COALESCE(last_value_cents, 0)), 0)::bigint AS value_cents
-    FROM user_collection_items
+    FROM public.user_collection_items
     WHERE user_id = $1
     GROUP BY 1
     ORDER BY value_cents DESC
@@ -458,10 +471,9 @@ async function upsertDailyRollup(client, userId) {
     },
   };
 
-  // Upsert row for today
   await client.query(
     `
-    INSERT INTO user_collection_daily_valuations (
+    INSERT INTO public.user_collection_daily_valuations (
       user_id,
       as_of_date,
       total_value_cents,
@@ -482,7 +494,15 @@ async function upsertDailyRollup(client, userId) {
       breakdown            = EXCLUDED.breakdown,
       updated_at           = now()
     `,
-    [userId, totalValue, totalQty, distinctItems, totalCost, unrealizedPnl, JSON.stringify(breakdown)],
+    [
+      userId,
+      totalValue,
+      totalQty,
+      distinctItems,
+      totalCost,
+      unrealizedPnl,
+      JSON.stringify(breakdown),
+    ],
   );
 
   return {
@@ -502,7 +522,7 @@ async function processUser(client, userId) {
       grading_company, grade_label, cert_number,
       quantity,
       last_value_cents
-    FROM user_collection_items
+    FROM public.user_collection_items
     WHERE user_id = $1
     ORDER BY game, card_id
     LIMIT $2
@@ -535,7 +555,7 @@ async function processUser(client, userId) {
     };
 
     await client.query(
-      `UPDATE user_collection_items
+      `UPDATE public.user_collection_items
        SET last_value_cents = $2, updated_at = now()
        WHERE id = $1`,
       [item.id, computed.totalCents],
@@ -546,7 +566,7 @@ async function processUser(client, userId) {
 
     await client.query(
       `
-      INSERT INTO user_collection_item_valuations
+      INSERT INTO public.user_collection_item_valuations
         (user_id, item_id, as_of_date, value_cents, currency, source, confidence, meta, game)
       VALUES
         ($1, $2, CURRENT_DATE, $3, $4, $5, $6, $7::jsonb, $8)
@@ -586,6 +606,19 @@ async function main() {
   process.on("SIGINT", () => (stopping = true));
   process.on("SIGTERM", () => (stopping = true));
 
+  // ✅ Ensure the required partial unique index exists (so app enqueue doesn’t error)
+  {
+    const client = await pool.connect();
+    try {
+      await ensureActiveJobIndex(client);
+      console.log("DB ok: ensured ux_user_revalue_jobs_active_user index");
+    } catch (e) {
+      console.error("WARNING: failed to ensure active-job unique index:", e);
+    } finally {
+      client.release();
+    }
+  }
+
   while (!stopping) {
     const client = await pool.connect();
     try {
@@ -606,7 +639,7 @@ async function main() {
         const res = await processUser(client2, job.user_id);
         console.log(
           `Done user ${job.user_id}: ${res.updated}/${res.items} items updated` +
-            (res.total_value_cents != null ? ` total=${res.total_value_cents}` : ""),
+            (res.total_value_cents != null ? ` total=${JSON.stringify(res.total_value_cents)}` : ""),
         );
         await markJobDone(client2, job.id);
       } catch (err) {

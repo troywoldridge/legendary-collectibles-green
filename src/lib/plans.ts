@@ -35,6 +35,10 @@ export type Plan = {
     liveMarketPricing: boolean;
     ebayCompsAndSnapshots: boolean;
 
+    // Market value panel gating (NEW)
+    marketValueRanges: boolean;      // Collector+
+    marketValueConfidence: boolean;  // Pro
+
     // Reporting / exports
     csvExports: boolean;
     insuranceReports: boolean;
@@ -54,33 +58,28 @@ export const PLANS: Record<PlanId, Plan> = {
     badge: "Starter",
     priceLabel: "Free",
     priceMonthlyCents: 0,
-    description:
-      "Track a starter collection and try out Legendary Collectibles with no commitment.",
-    limits: {
-      maxCollections: 1,
-      maxItemsTotal: 500,
-    },
+    description: "Track a starter collection and try out Legendary Collectibles with no commitment.",
+    limits: { maxCollections: 1, maxItemsTotal: 500 },
     features: {
-      // Commerce / monetization
       amazonCtas: true,
       ebayCtas: true,
       affiliateLinks: true,
 
-      // Lists / discovery
       pricechartingTopLists: false,
       tcgplayerTopLists: false,
       trendsAndMovers: false,
 
-      // Pricing + alerts
       priceAlerts: false,
-      liveMarketPricing: true, // OK to keep on for everyone
+      liveMarketPricing: true,
       ebayCompsAndSnapshots: true,
 
-      // Reporting / exports
+      // Market value panel gating
+      marketValueRanges: false,
+      marketValueConfidence: false,
+
       csvExports: false,
       insuranceReports: false,
 
-      // Analytics
       collectionValuations: false,
       advancedLtvTools: false,
     },
@@ -90,35 +89,30 @@ export const PLANS: Record<PlanId, Plan> = {
     id: "collector",
     name: "Collector",
     badge: "Most Popular",
-    priceLabel: "$7 / month",
+    priceLabel: "$7.00 / month",
     priceMonthlyCents: 700,
-    description:
-      "For serious collectors who want trends, leaderboards, and deep pricing insights.",
-    limits: {
-      maxCollections: 5,
-      maxItemsTotal: 5000,
-    },
+    description: "For serious collectors who want trends, leaderboards, and deep pricing insights.",
+    limits: { maxCollections: 5, maxItemsTotal: 5000 },
     features: {
-      // Commerce / monetization
       amazonCtas: true,
       ebayCtas: true,
       affiliateLinks: true,
 
-      // Lists / discovery
-      pricechartingTopLists: true, // keep true until legacy UI is gone
+      pricechartingTopLists: true,
       tcgplayerTopLists: true,
       trendsAndMovers: true,
 
-      // Pricing + alerts
-      priceAlerts: false, // Pro-only
+      priceAlerts: false,
       liveMarketPricing: true,
       ebayCompsAndSnapshots: true,
 
-      // Reporting / exports
+      // Market value panel gating
+      marketValueRanges: true,        // ✅ Collector+
+      marketValueConfidence: false,   // 🔒 Pro
+
       csvExports: false,
       insuranceReports: false,
 
-      // Analytics
       collectionValuations: true,
       advancedLtvTools: false,
     },
@@ -132,31 +126,27 @@ export const PLANS: Record<PlanId, Plan> = {
     priceMonthlyCents: 2999,
     description:
       "For high-volume collectors, stores, and investors. Price alerts, live market pricing, eBay comps, exports, valuations, and pro-grade analytics.",
-    limits: {
-      maxCollections: null,
-      maxItemsTotal: null,
-    },
+    limits: { maxCollections: null, maxItemsTotal: null },
     features: {
-      // Commerce / monetization
       amazonCtas: true,
       ebayCtas: true,
       affiliateLinks: true,
 
-      // Lists / discovery
       pricechartingTopLists: true,
       tcgplayerTopLists: true,
       trendsAndMovers: true,
 
-      // Pricing + alerts
       priceAlerts: true,
       liveMarketPricing: true,
       ebayCompsAndSnapshots: true,
 
-      // Reporting / exports
+      // Market value panel gating
+      marketValueRanges: true,
+      marketValueConfidence: true,
+
       csvExports: true,
       insuranceReports: true,
 
-      // Analytics
       collectionValuations: true,
       advancedLtvTools: true,
     },
@@ -216,7 +206,6 @@ export function isPlanAtLeast(current: PlanId, required: PlanId): boolean {
 
 /* ---------- Feature gating (single-source-of-truth) ---------- */
 
-// Legacy + new top lists
 export function canSeeTopLists(plan: Plan): boolean {
   return plan.features.tcgplayerTopLists || plan.features.pricechartingTopLists;
 }
@@ -265,6 +254,15 @@ export function canSeeCollectionValuations(plan: Plan): boolean {
   return plan.features.collectionValuations;
 }
 
+// ✅ NEW: Market Value Panel gates
+export function canSeeMarketRanges(plan: Plan): boolean {
+  return plan.features.marketValueRanges;
+}
+
+export function canSeeMarketConfidence(plan: Plan): boolean {
+  return plan.features.marketValueConfidence;
+}
+
 /* ---------- Capabilities object (nice for UI) ---------- */
 
 export function planCapabilities(plan: Plan) {
@@ -286,6 +284,10 @@ export function planCapabilities(plan: Plan) {
     canSeeEbayComps: canSeeEbayComps(plan),
     canSeeLiveMarketPricing: canSeeLiveMarketPricing(plan),
     canSeeCollectionValuations: canSeeCollectionValuations(plan),
+
+    // ✅ market panel
+    canSeeMarketRanges: canSeeMarketRanges(plan),
+    canSeeMarketConfidence: canSeeMarketConfidence(plan),
 
     // limits
     maxCollections: plan.limits.maxCollections,

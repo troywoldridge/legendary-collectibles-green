@@ -21,6 +21,8 @@ import VariantPickerAdd from "@/components/pokemon/VariantPickerAdd";
 import PriceAlertBell from "@/components/alerts/PriceAlertBell";
 import { getUserPlan, canUsePriceAlerts } from "@/lib/plans";
 
+import MarketValuePanel from "@/components/market/MarketValuePanel";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -503,7 +505,6 @@ export default async function PokemonCardDetailPage({
   const display = readDisplay(sp);
   const id = decodeURIComponent(rawId ?? "").trim();
 
-  // Always needed:
   const [card, variants, offer] = await Promise.all([
     getCardById(id),
     getVariantsByCardId(id),
@@ -546,7 +547,6 @@ export default async function PokemonCardDetailPage({
 
   const pricesHref = `/categories/pokemon/cards/${encodeURIComponent(card.id)}/prices`;
 
-  // Prefer set_id for URLs; only fall back to set_name when it's non-empty
   const setSlug = (card.set_id ?? "").trim() || (card.set_name ?? "").trim();
   const setHref = setSlug ? `/categories/pokemon/sets/${encodeURIComponent(setSlug)}` : null;
 
@@ -557,12 +557,14 @@ export default async function PokemonCardDetailPage({
   const retreat = parseTextList(card.retreat_cost);
   const pokedexNums = parseTextList(card.national_pokedex_numbers);
 
-  // Alerts: only fetch plan + market item if signed-in
+  // ---- Plan + alerts (single fetch) ----
+  let planTier: "free" | "collector" | "pro" = "free";
   let canUseAlerts = false;
   let marketItemId: string | null = null;
 
   if (userId) {
     const plan = await getUserPlan(userId);
+    planTier = plan.id === "pro" ? "pro" : plan.id === "collector" ? "collector" : "free";
     canUseAlerts = canUsePriceAlerts(plan);
 
     if (canUseAlerts) {
@@ -838,6 +840,17 @@ export default async function PokemonCardDetailPage({
           </div>
 
           <MarketPrices category="pokemon" cardId={card.id} display={display} />
+
+          {/* ✅ Market Value (Estimate) — plan gated */}
+          <MarketValuePanel
+              game="pokemon"
+              canonicalId={card.id}
+              title="Market Value"
+              showDisclaimer
+              canSeeRanges={planTier === "collector" || planTier === "pro"}
+              canSeeConfidence={planTier === "pro"}
+            />
+
         </div>
       </div>
 

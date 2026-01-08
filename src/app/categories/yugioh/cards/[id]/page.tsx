@@ -23,6 +23,7 @@ import CardEbayCTA from "@/components/CardEbayCTA";
 import { getAffiliateLinkForCard } from "@/lib/affiliate";
 
 import { site } from "@/config/site";
+import MarketValuePanel from "@/components/market/MarketValuePanel";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -360,12 +361,14 @@ export default async function YugiohCardDetailPage({
   const { userId } = await auth();
   const canSave = !!userId;
 
-  // Alerts gate (Pro-only)
+  // ---- Plan + alerts (single fetch) ----
+  let planTier: "free" | "collector" | "pro" = "free";
   let canUseAlerts = false;
   let marketItemId: string | null = null;
 
   if (userId) {
     const plan = await getUserPlan(userId);
+    planTier = plan.id === "pro" ? "pro" : plan.id === "collector" ? "collector" : "free";
     canUseAlerts = canUsePriceAlerts(plan);
 
     if (canUseAlerts) {
@@ -379,7 +382,7 @@ export default async function YugiohCardDetailPage({
   const currentUsd =
     offerPrice != null && Number.isFinite(offerPrice) && offerPrice > 0 ? offerPrice : null;
 
-  // Amazon affiliate link (server-side) — ok for all users, but only after card exists
+  // Amazon affiliate link (server-side)
   const amazonLink = await getAffiliateLinkForCard({
     category: "yugioh",
     cardId: card.id,
@@ -557,11 +560,7 @@ export default async function YugiohCardDetailPage({
 
             {/* CTAs */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <CardEbayCTA
-                card={{ id: card.id, name: card.name, set_name: firstSet ?? null }}
-                game="Yu-Gi-Oh!"
-                variant="pill"
-              />
+              <CardEbayCTA card={{ id: card.id, name: card.name, set_name: firstSet ?? null }} game="Yu-Gi-Oh!" variant="pill" />
               <CardAmazonCTA url={amazonLink?.url} label={card.name} />
             </div>
 
@@ -576,16 +575,10 @@ export default async function YugiohCardDetailPage({
                 imageUrl={cover ?? undefined}
               />
 
-              {/* ✅ Pro-gated alerts */}
               {userId ? (
                 canUseAlerts ? (
                   marketItemId ? (
-                    <PriceAlertBell
-                      game="yugioh"
-                      marketItemId={marketItemId}
-                      label={card.name}
-                      currentUsd={currentUsd}
-                    />
+                    <PriceAlertBell game="yugioh" marketItemId={marketItemId} label={card.name} currentUsd={currentUsd} />
                   ) : (
                     <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
                       🔔 Alerts unavailable
@@ -633,19 +626,6 @@ export default async function YugiohCardDetailPage({
                 <div className="mt-1 text-lg font-semibold text-white">{card.id}</div>
               </div>
             </div>
-
-            {(card.scale != null || card.linkval != null) && (
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                  <div className="text-xs uppercase tracking-wide text-white/60">Scale</div>
-                  <div className="mt-1 text-lg font-semibold text-white">{card.scale ?? "—"}</div>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                  <div className="text-xs uppercase tracking-wide text-white/60">Link</div>
-                  <div className="mt-1 text-lg font-semibold text-white">{card.linkval ?? "—"}</div>
-                </div>
-              </div>
-            )}
           </div>
 
           {/* Prices */}
@@ -660,6 +640,17 @@ export default async function YugiohCardDetailPage({
               <PriceBox label="Amazon" value={prices?.amazon} />
             </div>
           </div>
+
+          {/* ✅ Market Value (Estimate) — plan gated */}
+          <MarketValuePanel
+              game="yugioh"
+              canonicalId={card.id}
+              title="Market Value"
+              showDisclaimer
+              canSeeRanges={planTier === "collector" || planTier === "pro"}
+              canSeeConfidence={planTier === "pro"}
+            />
+
         </div>
       </div>
 

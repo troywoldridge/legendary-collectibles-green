@@ -6,15 +6,21 @@ import { eq } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
-const fmtUSD = (cents: number) =>
-  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents || 0) / 100);
+function fmtMoney(cents: number, currency: string) {
+  const cur = (currency || "usd").toUpperCase();
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: cur,
+  }).format((Number(cents || 0) / 100));
+}
 
 type Props = {
-  searchParams?: { session_id?: string };
+  searchParams?: { session_id?: string; sid?: string };
 };
 
 export default async function CheckoutSuccessPage({ searchParams }: Props) {
-  const sessionId = searchParams?.session_id;
+  // ✅ accept either param name (session_id preferred)
+  const sessionId = searchParams?.session_id || searchParams?.sid;
 
   if (!sessionId) {
     return (
@@ -23,10 +29,16 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
           <h1 className="text-3xl font-extrabold text-white">Missing session</h1>
           <p className="mt-3 text-white/80">We didn’t get a Stripe session id.</p>
           <div className="mt-6 flex gap-3">
-            <Link href="/cart" className="rounded-lg border border-white/30 bg-white/5 px-4 py-2 text-sm font-semibold text-white hover:bg-white/10">
+            <Link
+              href="/cart"
+              className="rounded-lg border border-white/30 bg-white/5 px-4 py-2 text-sm font-semibold text-white hover:bg-white/10"
+            >
               Back to cart
             </Link>
-            <Link href="/store" className="rounded-lg border border-white/40 bg-indigo-600/80 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-600">
+            <Link
+              href="/store"
+              className="rounded-lg border border-white/40 bg-indigo-600/80 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-600"
+            >
               Shop
             </Link>
           </div>
@@ -36,7 +48,11 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
   }
 
   // Order may take a moment to appear if webhook is still processing
-  const o = await db.select().from(orders).where(eq(orders.stripeSessionId, sessionId)).limit(1);
+  const o = await db
+    .select()
+    .from(orders)
+    .where(eq(orders.stripeSessionId, sessionId))
+    .limit(1);
 
   if (!o.length) {
     return (
@@ -72,6 +88,7 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
   }
 
   const order = o[0];
+  const currency = String(order.currency ?? "usd");
 
   const items = await db
     .select()
@@ -120,13 +137,15 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
                 <li key={it.id} className="rounded-xl border border-white/10 bg-white/5 p-4">
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <div className="text-sm font-semibold text-white line-clamp-2">{it.title}</div>
+                      <div className="text-sm font-semibold text-white line-clamp-2">
+                        {it.title}
+                      </div>
                       <div className="mt-1 text-xs text-white/70">
-                        {fmtUSD(it.unitPriceCents)} × {it.qty}
+                        {fmtMoney(it.unitPriceCents ?? 0, currency)} × {it.qty ?? 1}
                       </div>
                     </div>
                     <div className="text-sm font-semibold text-white">
-                      {fmtUSD(it.lineTotalCents)}
+                      {fmtMoney(it.lineTotalCents ?? 0, currency)}
                     </div>
                   </div>
                 </li>
@@ -141,26 +160,31 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
             <div className="mt-4 space-y-3 text-sm">
               <div className="flex items-center justify-between text-white/85">
                 <span>Subtotal</span>
-                <span className="font-semibold text-white">{fmtUSD(order.subtotalCents)}</span>
+                <span className="font-semibold text-white">
+                  {fmtMoney(order.subtotalCents ?? 0, currency)}
+                </span>
               </div>
 
               <div className="flex items-center justify-between text-white/70">
                 <span>Shipping</span>
-                <span>{fmtUSD(order.shippingCents)}</span>
+                <span>{fmtMoney(order.shippingCents ?? 0, currency)}</span>
               </div>
 
               <div className="flex items-center justify-between text-white/70">
                 <span>Tax</span>
-                <span>{fmtUSD(order.taxCents)}</span>
+                <span>{fmtMoney(order.taxCents ?? 0, currency)}</span>
               </div>
 
               <div className="border-t border-white/15 pt-3 flex items-center justify-between">
                 <span className="text-white/85">Total</span>
-                <span className="text-lg font-extrabold text-white">{fmtUSD(order.totalCents)}</span>
+                <span className="text-lg font-extrabold text-white">
+                  {fmtMoney(order.totalCents ?? 0, currency)}
+                </span>
               </div>
 
               <div className="pt-3 text-xs text-white/60">
-                Status: <span className="text-white/80">{String(order.status).toUpperCase()}</span>
+                Status:{" "}
+                <span className="text-white/80">{String(order.status).toUpperCase()}</span>
               </div>
             </div>
           </aside>

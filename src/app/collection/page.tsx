@@ -16,6 +16,8 @@ import CollectionDashboardClient from "@/components/collection/CollectionDashboa
 
 import CollectionTableBody, {
   type CollectionItem,
+  type MVRow,
+  type MVMap,
 } from "@/app/collection/CollectionTableBody";
 
 export const runtime = "nodejs";
@@ -75,9 +77,7 @@ function buildSparklinePath(
   return values
     .map((v, idx) => {
       const x =
-        n === 1
-          ? width / 2
-          : padX + ((width - padX * 2) * idx) / (n - 1);
+        n === 1 ? width / 2 : padX + ((width - padX * 2) * idx) / (n - 1);
       const norm = (v - min) / span;
       const y = height - padY - norm * (height - padY * 2);
       return `${idx === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
@@ -113,6 +113,12 @@ export default async function CollectionPage({
   const isCollector = plan.id === "collector";
   const planLabel = isPro ? "Pro Collector" : isCollector ? "Collector" : "Free";
 
+  const planTier: "free" | "collector" | "pro" = isPro
+    ? "pro"
+    : isCollector
+      ? "collector"
+      : "free";
+
   const canCsv = canExportCsv(plan);
   const canInsurance = canSeeInsuranceReports(plan);
   const canMovers = canSeeTrends(plan);
@@ -143,7 +149,7 @@ export default async function CollectionPage({
       cost_cents,
       last_value_cents,
       created_at
-    FROM user_collection_items
+    FROM public.user_collection_items
     WHERE user_id = ${userId}
       AND (${game} = 'all' OR game = ${game})
       AND (${setName} = 'all' OR set_name = ${setName})
@@ -161,7 +167,77 @@ export default async function CollectionPage({
 
   const items = rowsRes.rows ?? [];
 
-  // Build dropdown options (safe + stable)
+  /* ---------------- Bulk market-values lookup (today + yesterday) ---------------- */
+
+  // Build desired keys (card_key + grade) for the items on this page
+  const wantedRaw = items
+  .map((r) => {
+    const g = String(r.game ?? "").toLowerCase();
+    const id = String(r.card_id ?? "").trim();
+    if (!g || !id) return null;
+
+    // IMPORTANT: match what's stored in market_values_daily right now (mtg|card|...)
+    const source = "card";
+    const card_key = `${g}|${source}|${id}`;
+
+    const grade =
+      r.grade_label && String(r.grade_label).trim()
+        ? String(r.grade_label).trim()
+        : "Ungraded";
+
+    return { card_key, grade };
+  })
+  .filter(Boolean) as { card_key: string; grade: string }[];
+
+// Deduplicate: avoids repeating the same (card_key, grade) many times
+const wanted = Array.from(
+  new Map(wantedRaw.map((x) => [`${x.card_key}||${x.grade}`, x])).values(),
+);
+
+
+  const mvMap: MVMap = new Map();
+
+  if (wanted.length) {
+    const mvRes = await db.execute<MVRow>(sql`
+      WITH wanted AS (
+        SELECT *
+        FROM jsonb_to_recordset(${JSON.stringify(wanted)}::jsonb)
+          AS x(card_key text, grade text)
+      )
+      SELECT
+  mvd.as_of_date::text,
+  mvd.card_key,
+  mvd.grade,
+  (mvd.market_value_usd)::float8  AS market_value_usd,
+  (mvd.range_low_usd)::float8     AS range_low_usd,
+  (mvd.range_high_usd)::float8    AS range_high_usd,
+  (mvd.last_sale_usd)::float8     AS last_sale_usd,
+  mvd.last_sale_at::text,
+  mvd.sales_count_180d,
+  mvd.confidence
+
+
+      FROM public.market_values_daily mvd
+      JOIN wanted w
+        ON w.card_key = mvd.card_key
+       AND w.grade = mvd.grade
+      WHERE mvd.as_of_date IN (CURRENT_DATE, CURRENT_DATE - INTERVAL '1 day')
+      ORDER BY mvd.as_of_date DESC
+    `);
+
+    for (const row of mvRes.rows ?? []) {
+      const k = `${row.card_key}||${row.grade}`;
+      const cur = mvMap.get(k) ?? { today: null, yesterday: null };
+
+      if (!cur.today) cur.today = row;
+      else if (!cur.yesterday) cur.yesterday = row;
+
+      mvMap.set(k, cur);
+    }
+  }
+
+  /* ---------------- Dashboard summary / filter options ---------------- */
+
   const setOptions = Array.from(
     new Set(
       items
@@ -178,7 +254,6 @@ export default async function CollectionPage({
     ),
   ).sort((a, b) => a.localeCompare(b));
 
-  // Summary numbers
   const distinctItems = items.length;
   const totalCopies = items.reduce((sum, r) => sum + (r.quantity ?? 0), 0);
 
@@ -195,7 +270,6 @@ export default async function CollectionPage({
   }, 0);
 
   const byGameMap = new Map<string, { copies: number; valueCents: number }>();
-
   for (const r of items) {
     const g = r.game ?? "other";
     const entry = byGameMap.get(g) ?? { copies: 0, valueCents: 0 };
@@ -218,13 +292,12 @@ export default async function CollectionPage({
   const portfolioGainPct =
     totalCostCents > 0 ? (portfolioGainCents / totalCostCents) * 100 : null;
 
-  // Valuation sparkline history (never crashes the page)
   const historyRes = await db.execute<{
     as_of_date: string;
     total_value_cents: number | string | null;
   }>(sql`
     SELECT as_of_date, total_value_cents
-    FROM user_collection_daily_valuations
+    FROM public.user_collection_daily_valuations
     WHERE user_id = ${userId}
     ORDER BY as_of_date ASC
     LIMIT 60
@@ -242,7 +315,6 @@ export default async function CollectionPage({
     sparklinePoints.map((p) => p.value),
   );
 
-  // Recently added
   const recentRes = await db.execute<CollectionItem>(sql`
     SELECT
       id,
@@ -261,7 +333,7 @@ export default async function CollectionPage({
       cost_cents,
       last_value_cents,
       created_at
-    FROM user_collection_items
+    FROM public.user_collection_items
     WHERE user_id = ${userId}
     ORDER BY created_at DESC
     LIMIT 5
@@ -280,10 +352,7 @@ export default async function CollectionPage({
           </p>
           <p className="mt-1 text-sm text-white/70">
             View detailed charts and historical valuations on the{" "}
-            <Link
-              href="/collection/analytics"
-              className="text-sky-300 hover:underline"
-            >
+            <Link href="/collection/analytics" className="text-sky-300 hover:underline">
               analytics page
             </Link>
             .
@@ -365,35 +434,23 @@ export default async function CollectionPage({
       {/* Analytics row */}
       <div className="grid gap-3 md:grid-cols-4">
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
-          <div className="text-xs uppercase tracking-wide text-white/60">
-            Distinct items
-          </div>
+          <div className="text-xs uppercase tracking-wide text-white/60">Distinct items</div>
           <div className="mt-1 text-2xl font-semibold">{distinctItems}</div>
-          <div className="mt-1 text-[11px] text-white/60">
-            Filtered by your current view.
-          </div>
+          <div className="mt-1 text-[11px] text-white/60">Filtered by your current view.</div>
         </div>
 
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
-          <div className="text-xs uppercase tracking-wide text-white/60">
-            Total copies
-          </div>
+          <div className="text-xs uppercase tracking-wide text-white/60">Total copies</div>
           <div className="mt-1 text-2xl font-semibold">{totalCopies}</div>
-          <div className="mt-1 text-[11px] text-white/60">
-            Sum of all quantities in this view.
-          </div>
+          <div className="mt-1 text-[11px] text-white/60">Sum of all quantities in this view.</div>
         </div>
 
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
-          <div className="text-xs uppercase tracking-wide text-white/60">
-            Est. collection value
-          </div>
+          <div className="text-xs uppercase tracking-wide text-white/60">Est. collection value</div>
           <div className="mt-1 text-2xl font-semibold">
             {hasValueData ? formatMoneyFromCents(estValueCents) : "—"}
           </div>
-          <div className="mt-1 text-[11px] text-white/60">
-            Based on latest price × quantity.
-          </div>
+          <div className="mt-1 text-[11px] text-white/60">Based on latest price × quantity.</div>
 
           {hasValueData && (
             <>
@@ -402,24 +459,17 @@ export default async function CollectionPage({
                 {portfolioGainPct != null && (
                   <span
                     className={
-                      portfolioGainCents >= 0
-                        ? "ml-2 text-emerald-300"
-                        : "ml-2 text-red-300"
+                      portfolioGainCents >= 0 ? "ml-2 text-emerald-300" : "ml-2 text-red-300"
                     }
                   >
-                    {portfolioGainCents >= 0 ? "▲" : "▼"}{" "}
-                    {Math.abs(portfolioGainPct).toFixed(1)}%
+                    {portfolioGainCents >= 0 ? "▲" : "▼"} {Math.abs(portfolioGainPct).toFixed(1)}%
                   </span>
                 )}
               </div>
 
               <div className="mt-3 h-10">
                 {sparklinePath ? (
-                  <svg
-                    viewBox="0 0 120 32"
-                    className="h-full w-full text-emerald-300/80"
-                    aria-hidden="true"
-                  >
+                  <svg viewBox="0 0 120 32" className="h-full w-full text-emerald-300/80" aria-hidden="true">
                     <path
                       d={sparklinePath}
                       fill="none"
@@ -441,24 +491,16 @@ export default async function CollectionPage({
 
         <div className="rounded-2xl border border-white/20 bg-black/40 px-4 py-3 backdrop-blur-sm">
           <div className="flex items-center justify-between text-xs">
-            <span className="uppercase tracking-wide text-white/60">
-              By game (this view)
-            </span>
+            <span className="uppercase tracking-wide text-white/60">By game (this view)</span>
           </div>
           <div className="mt-2 space-y-1.5">
             {byGame.length === 0 ? (
-              <div className="text-xs text-white/60">
-                No items yet. Add cards to see a breakdown.
-              </div>
+              <div className="text-xs text-white/60">No items yet. Add cards to see a breakdown.</div>
             ) : (
               byGame.map((g) => {
                 const label = formatGameLabel(g.game);
-                const totalForGame = byGame.reduce(
-                  (sum, x) => sum + x.valueCents,
-                  0,
-                );
-                const sharePct =
-                  totalForGame > 0 ? (g.valueCents / totalForGame) * 100 : 0;
+                const totalForGame = byGame.reduce((sum, x) => sum + x.valueCents, 0);
+                const sharePct = totalForGame > 0 ? (g.valueCents / totalForGame) * 100 : 0;
 
                 return (
                   <div key={g.game} className="space-y-0.5 text-xs">
@@ -470,14 +512,10 @@ export default async function CollectionPage({
                       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
                         <div
                           className="h-full rounded-full bg-white/70"
-                          style={{
-                            width: `${Math.max(8, Math.min(100, sharePct || 0))}%`,
-                          }}
+                          style={{ width: `${Math.max(8, Math.min(100, sharePct || 0))}%` }}
                         />
                       </div>
-                      <span className="text-[11px] text-white/70">
-                        {formatMoneyFromCents(g.valueCents)}
-                      </span>
+                      <span className="text-[11px] text-white/70">{formatMoneyFromCents(g.valueCents)}</span>
                     </div>
                   </div>
                 );
@@ -492,16 +530,13 @@ export default async function CollectionPage({
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold">Recently added</h2>
           <span className="text-xs text-white/60">
-            {recent.length > 0
-              ? "Most recent 5 items in your collection."
-              : "Nothing added yet."}
+            {recent.length > 0 ? "Most recent 5 items in your collection." : "Nothing added yet."}
           </span>
         </div>
 
         {recent.length === 0 ? (
           <div className="rounded-lg border border-dashed border-white/20 bg-black/40 p-4 text-sm text-white/70">
-            When you add cards to your collection, they’ll show up here for quick
-            access.
+            When you add cards to your collection, they’ll show up here for quick access.
           </div>
         ) : (
           <ul className="divide-y divide-white/10">
@@ -527,6 +562,7 @@ export default async function CollectionPage({
                       </div>
                     )}
                   </div>
+
                   <div className="flex-1">
                     <div className="line-clamp-1 text-sm font-medium">
                       {r.card_name ?? r.card_id ?? "Unknown card"}
@@ -535,6 +571,7 @@ export default async function CollectionPage({
                       {r.set_name ?? "—"} • {formatGameLabel(r.game)}
                     </div>
                   </div>
+
                   <div className="text-right text-xs text-white/60">
                     <div>{when}</div>
                     {r.quantity != null && <div>{r.quantity}x</div>}
@@ -549,31 +586,19 @@ export default async function CollectionPage({
       {/* Filter bar */}
       <div className="rounded-2xl border border-white/20 bg-black/40 p-4 backdrop-blur-sm">
         <form className="flex flex-wrap items-center gap-3">
-          <select
-            name="sort"
-            defaultValue={sort}
-            className="rounded-md bg-white/10 px-3 py-2 text-sm"
-          >
+          <select name="sort" defaultValue={sort} className="rounded-md bg-white/10 px-3 py-2 text-sm">
             <option value="date">Date Added</option>
             <option value="name">Name</option>
           </select>
 
-          <select
-            name="game"
-            defaultValue={game}
-            className="rounded-md bg-white/10 px-3 py-2 text-sm"
-          >
+          <select name="game" defaultValue={game} className="rounded-md bg-white/10 px-3 py-2 text-sm">
             <option value="all">All Games</option>
             <option value="pokemon">Pokémon</option>
             <option value="mtg">Magic</option>
             <option value="yugioh">Yu-Gi-Oh!</option>
           </select>
 
-          <select
-            name="set"
-            defaultValue={setName}
-            className="rounded-md bg-white/10 px-3 py-2 text-sm"
-          >
+          <select name="set" defaultValue={setName} className="rounded-md bg-white/10 px-3 py-2 text-sm">
             <option value="all">All Sets</option>
             {setOptions.map((s) => (
               <option key={s} value={s}>
@@ -582,11 +607,7 @@ export default async function CollectionPage({
             ))}
           </select>
 
-          <select
-            name="folder"
-            defaultValue={folder}
-            className="rounded-md bg-white/10 px-3 py-2 text-sm"
-          >
+          <select name="folder" defaultValue={folder} className="rounded-md bg-white/10 px-3 py-2 text-sm">
             <option value="all">All Folders</option>
             {folderOptions.map((f) => (
               <option key={f} value={f}>
@@ -603,10 +624,7 @@ export default async function CollectionPage({
             className="flex-1 rounded-md bg-white/10 px-3 py-2 text-sm"
           />
 
-          <button
-            type="submit"
-            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-700"
-          >
+          <button type="submit" className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-700">
             Filter
           </button>
         </form>
@@ -628,7 +646,7 @@ export default async function CollectionPage({
             </tr>
           </thead>
 
-          <CollectionTableBody items={items} />
+          <CollectionTableBody items={items} planTier={planTier} mvMap={mvMap} />
         </table>
       </div>
     </section>

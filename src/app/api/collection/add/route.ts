@@ -212,17 +212,30 @@ async function lookupPokemonDbPrice(cardId: string, variantType: CanonVariant) {
   return null;
 }
 
+/* ------------------ UPDATED: revalue enqueue helper ------------------ */
+
+async function ensureRevalueActiveIndexExists() {
+  // Partial unique index (NOT a constraint). Safe to run repeatedly.
+  await db.execute(sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_user_revalue_jobs_active_user
+    ON public.user_revalue_jobs (user_id)
+    WHERE status IN ('queued', 'running')
+  `);
+}
+
 /**
- * Enqueue a per-user revalue job (deduped by your partial unique index).
- * This is what makes dashboards update shortly after adding cards.
+ * Enqueue a per-user revalue job (deduped by the partial unique index).
+ * IMPORTANT: use ON CONFLICT DO NOTHING (not ON CONSTRAINT),
+ * because partial indexes cannot be referenced as constraints.
  */
 async function enqueueRevalueJob(userId: string) {
   try {
+    await ensureRevalueActiveIndexExists();
+
     await db.execute(sql`
       INSERT INTO public.user_revalue_jobs (user_id, status)
       VALUES (${userId}, 'queued')
-      ON CONFLICT ON CONSTRAINT ux_user_revalue_jobs_active_user
-      DO NOTHING
+      ON CONFLICT DO NOTHING
     `);
   } catch (err) {
     // Never block add() if queue insert fails
@@ -498,7 +511,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // ✅ enqueue per-user revalue (debounced by partial unique index)
+      // ✅ enqueue per-user revalue (deduped by partial unique index)
       await enqueueRevalueJob(userId);
 
       return NextResponse.json({
@@ -609,7 +622,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ enqueue per-user revalue (debounced by partial unique index)
+    // ✅ enqueue per-user revalue (deduped by partial unique index)
     await enqueueRevalueJob(userId);
 
     return NextResponse.json({

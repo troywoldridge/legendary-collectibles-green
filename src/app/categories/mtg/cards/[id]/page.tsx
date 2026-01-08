@@ -24,6 +24,8 @@ import CardActions from "@/components/collection/CardActions";
 import PriceAlertBell from "@/components/alerts/PriceAlertBell";
 import { getUserPlan, canUsePriceAlerts } from "@/lib/plans";
 
+import MarketValuePanel from "@/components/market/MarketValuePanel";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -32,32 +34,15 @@ export const revalidate = 0;
 type SearchParams = Record<string, string | string[] | undefined>;
 type Currency = "USD" | "EUR";
 
-type MtgMetaRow = {
-  id: string;
-  name: string | null;
-  set_code: string | null;
-  collector_number: string | null;
-  image_url: string | null;
-  rarity: string | null;
-  type_line: string | null;
-};
-
 type CardRow = {
   id: string;
   name: string | null;
-  printed_name: string | null;
-
   mana_cost: string | null;
   cmc: string | null;
-  colors: string | null;
-  color_identity: string | null;
-
   type_line: string | null;
   rarity: string | null;
   set_code: string | null;
   collector_number: string | null;
-  oracle_id: string | null;
-  layout: string | null;
   oracle_text: string | null;
   image_url: string | null;
 
@@ -74,8 +59,6 @@ type CardRow = {
 
 type SetRow = {
   name: string | null;
-  set_type: string | null;
-  block: string | null;
   released_at: string | null;
 };
 
@@ -91,14 +74,13 @@ function absBase() {
 }
 
 function absUrl(path: string) {
-  const base = absBase();
-  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  return `${absBase()}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
-function absMaybe(urlOrPath?: string | null) {
-  if (!urlOrPath) return absUrl("/og-image.png");
-  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
-  return absUrl(urlOrPath);
+function absMaybe(url?: string | null) {
+  if (!url) return absUrl("/og-image.png");
+  if (/^https?:\/\//i.test(url)) return url;
+  return absUrl(url);
 }
 
 function readCurrency(sp: SearchParams): Currency {
@@ -106,65 +88,15 @@ function readCurrency(sp: SearchParams): Currency {
   return raw === "EUR" ? "EUR" : "USD";
 }
 
-function withParam(baseHref: string, key: string, val: string) {
-  const u = new URL(baseHref, "https://x/");
-  u.searchParams.set(key, val);
-  return u.pathname + (u.search ? u.search : "");
-}
-
-/* ---------------- ID parsing helpers ---------------- */
-function parseSetAndNumber(raw: string): { set: string; num: string } | null {
-  const cleaned = raw.replace(/[–—]/g, "-").replace(":", "-").replace("/", "-");
-  const m = cleaned.match(/^([A-Za-z0-9]{2,10})-(.+)$/);
-  if (!m) return null;
-  return { set: m[1], num: decodeURIComponent(m[2]) };
-}
-
-function normalizeNumVariants(n: string) {
-  const exact = n;
-  const noZeros = n.replace(/^0+/, "");
-  const lower = n.toLowerCase();
-  return { exact, noZeros, lower };
-}
-
-async function resolveScryfallId(rawParam: string): Promise<string | null> {
-  const idNoDashes = rawParam.replace(/-/g, "");
-
-  const probe = await db.execute<{ id: string }>(sql`
-    SELECT c.id::text AS id
-    FROM public.scryfall_cards_raw c
-    WHERE c.id::text = ${rawParam}
-       OR REPLACE(c.id::text,'-','') = ${idNoDashes}
-    LIMIT 1
-  `);
-
-  let foundId = probe.rows?.[0]?.id ?? null;
-
-  if (!foundId) {
-    const parsed = parseSetAndNumber(rawParam);
-    if (parsed) {
-      const set = parsed.set.toLowerCase();
-      const { exact, noZeros, lower } = normalizeNumVariants(parsed.num);
-
-      const p2 = await db.execute<{ id: string }>(sql`
-        SELECT c.id::text AS id
-        FROM public.scryfall_cards_raw c
-        WHERE LOWER(c.set_code) = ${set}
-          AND (
-            c.collector_number::text = ${exact}
-            OR ltrim(c.collector_number::text,'0') = ${noZeros}
-            OR LOWER(c.collector_number::text) = ${lower}
-          )
-        LIMIT 1
-      `);
-      foundId = p2.rows?.[0]?.id ?? null;
-    }
-  }
-
-  return foundId;
-}
-
 /* ---------------- Pricing helpers ---------------- */
+function money(v?: string | null) {
+  if (!v) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+/* ---------------- Market item ---------------- */
 async function getMarketItemForMtg(scryfallId: string): Promise<MarketItemRow | null> {
   return (
     (
@@ -180,205 +112,6 @@ async function getMarketItemForMtg(scryfallId: string): Promise<MarketItemRow | 
   );
 }
 
-function money(s?: string | null) {
-  if (!s) return null;
-  const n = Number(s);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n.toFixed(2);
-}
-
-function fmtCurrency(nStr: string | null, currency: Currency) {
-  const n = money(nStr);
-  if (!n) return "—";
-  return `${currency === "EUR" ? "€" : "$"}${n}`;
-}
-
-function tixNumber(v?: string | null): number | null {
-  if (!v) return null;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n;
-}
-
-function fmtTix(v?: string | null) {
-  const n = tixNumber(v);
-  if (n == null) return "—";
-  return n.toFixed(2);
-}
-
-/* ---------------- Meta fetch ---------------- */
-async function getMtgMeta(foundId: string): Promise<MtgMetaRow | null> {
-  return (
-    (
-      await db.execute<MtgMetaRow>(sql`
-        SELECT
-          c.id::text AS id,
-          c.name,
-          c.set_code,
-          c.collector_number,
-          (c.payload->>'type_line') AS type_line,
-          (c.payload->>'rarity') AS rarity,
-          COALESCE(
-            (c.payload->'image_uris'->>'normal'),
-            (c.payload->'image_uris'->>'large'),
-            (c.payload->'image_uris'->>'small'),
-            (c.payload->'card_faces'->0->'image_uris'->>'normal'),
-            (c.payload->'card_faces'->0->'image_uris'->>'large'),
-            (c.payload->'card_faces'->0->'image_uris'->>'small')
-          ) AS image_url
-        FROM public.scryfall_cards_raw c
-        WHERE c.id::text = ${foundId}
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null
-  );
-}
-
-/**
- * Dynamic metadata for MTG card pages.
- * Canonical ALWAYS uses resolved UUID (foundId), not rawParam.
- */
-export async function generateMetadata({
-  params,
-}: {
-  params: { id: string };
-}): Promise<Metadata> {
-  const rawParam = decodeURIComponent(params.id ?? "").trim();
-
-  if (!rawParam) {
-    return {
-      title: `MTG Card Details | ${site.name}`,
-      description: `Browse Magic: The Gathering cards, prices, and collection tools on ${site.name}.`,
-      robots: { index: false, follow: true },
-    };
-  }
-
-  const foundId = await resolveScryfallId(rawParam);
-
-  if (!foundId) {
-    const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(rawParam)}`);
-    return {
-      title: `MTG Card Details | ${site.name}`,
-      description: `Browse Magic: The Gathering cards, prices, and collection tools on ${site.name}.`,
-      alternates: { canonical },
-      robots: { index: false, follow: true },
-    };
-  }
-
-  const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(foundId)}`);
-  const meta = await getMtgMeta(foundId);
-
-  const name = meta?.name ?? foundId;
-
-  const setPart =
-    meta?.set_code && meta?.collector_number
-      ? ` (${meta.set_code.toUpperCase()} #${meta.collector_number})`
-      : meta?.set_code
-        ? ` (${meta.set_code.toUpperCase()})`
-        : "";
-
-  const title = `${name}${setPart} — MTG Prices & Collection | ${site.name}`;
-
-  const descBits = [
-    meta?.type_line ? meta.type_line : null,
-    meta?.rarity ? `Rarity: ${meta.rarity}` : null,
-    "prices, eBay comps, and add-to-collection",
-  ].filter(Boolean);
-
-  const description = `${descBits.join(" • ")}.`;
-
-  const ogImage = absMaybe(
-    (meta?.image_url ?? "").replace(/^http:\/\//, "https://") || site.ogImage || "/og-image.png",
-  );
-
-  return {
-    title,
-    description,
-    alternates: { canonical },
-    openGraph: {
-      type: "website",
-      url: canonical,
-      title,
-      description,
-      siteName: site.name,
-      images: [{ url: ogImage }],
-    },
-    twitter: {
-      card: "summary_large_image",
-      title,
-      description,
-      images: [ogImage],
-    },
-  };
-}
-
-/* ---------- Mana helpers ---------- */
-function tokenizeMana(cost?: string | null): string[] {
-  if (!cost) return [];
-  const m = cost.match(/\{[^}]+\}/g) || [];
-  return m.map((t) => t.slice(1, -1));
-}
-function nl2p(s?: string | null) {
-  if (!s) return null;
-  return s.split(/\n/g).map((line, i) => (
-    <p key={i} className="mb-1">
-      {line}
-    </p>
-  ));
-}
-function hexFor(sym: string) {
-  switch (sym) {
-    case "W":
-      return "#f5f5f5";
-    case "U":
-      return "#3b82f6";
-    case "B":
-      return "#111827";
-    case "R":
-      return "#ef4444";
-    case "G":
-      return "#10b981";
-    case "C":
-      return "#6b7280";
-    case "S":
-      return "#94a3b8";
-    default:
-      return "#6b7280";
-  }
-}
-function ManaSymbol({ t }: { t: string }) {
-  const up = t.toUpperCase();
-
-  if (up.includes("/")) {
-    const [a, b] = up.split("/");
-    const c1 = hexFor(a);
-    const c2 = hexFor(b === "P" ? "B" : b);
-    return (
-      <span className="mana mana--hybrid" style={{ ["--c1" as any]: c1, ["--c2" as any]: c2 }} title={`Mana: ${up}`}>
-        {up}
-      </span>
-    );
-  }
-
-  if (/^\d+$/.test(up)) return <span className="mana mana--num" title={`Mana: ${up}`}>{up}</span>;
-  if (up === "X" || up === "Y" || up === "Z") return <span className="mana mana--var" title={`Mana: ${up}`}>{up}</span>;
-  if (up === "T") return <span className="mana mana--sym" title="Tap">↷</span>;
-  if (up === "Q") return <span className="mana mana--sym" title="Untap">↶</span>;
-
-  return <span className={`mana mana--${up}`} title={`Mana: ${up}`}>{up}</span>;
-}
-function ManaCost({ cost }: { cost: string | null }) {
-  const toks = tokenizeMana(cost);
-  if (!toks.length) return null;
-  return (
-    <div className="mt-2 flex flex-wrap items-center gap-2">
-      {toks.map((t, i) => (
-        <ManaSymbol key={`${t}-${i}`} t={t} />
-      ))}
-    </div>
-  );
-}
-
 /* ---------------- Page ---------------- */
 export default async function MtgCardDetailPage({
   params,
@@ -389,74 +122,42 @@ export default async function MtgCardDetailPage({
 }) {
   const { id: rawId } = await params;
   const sp = await searchParams;
+  const currency = readCurrency(sp);
 
-  const currency: Currency = readCurrency(sp);
-
-  const rawParam = decodeURIComponent(rawId ?? "").trim();
-  if (!rawParam) notFound();
+  const foundId = decodeURIComponent(rawId ?? "").trim();
+  if (!foundId) notFound();
 
   const { userId } = await auth();
   const canSave = !!userId;
 
-  const foundId = await resolveScryfallId(rawParam);
-  if (!foundId) notFound();
-
-  // Load card row
   const rowRes = await db.execute<CardRow>(sql`
     SELECT
       c.id::text AS id,
       c.name,
-
-      (c.payload->>'printed_name') AS printed_name,
-
-      COALESCE(
-        c.payload->>'mana_cost',
-        c.payload->'card_faces'->0->>'mana_cost',
-        c.payload->'card_faces'->1->>'mana_cost'
-      ) AS mana_cost,
-
+      (c.payload->>'mana_cost') AS mana_cost,
       (c.payload->>'cmc') AS cmc,
-      (c.payload->'colors')::text AS colors,
-      (c.payload->'color_identity')::text AS color_identity,
       (c.payload->>'type_line') AS type_line,
       (c.payload->>'rarity') AS rarity,
-
       c.set_code,
       c.collector_number,
-      c.oracle_id::text AS oracle_id,
-      c.layout,
-
-      COALESCE(
-        c.payload->>'oracle_text',
-        c.payload->'card_faces'->0->>'oracle_text',
-        c.payload->'card_faces'->1->>'oracle_text'
-      ) AS oracle_text,
-
+      (c.payload->>'oracle_text') AS oracle_text,
       COALESCE(
         (c.payload->'image_uris'->>'normal'),
-        (c.payload->'image_uris'->>'large'),
-        (c.payload->'image_uris'->>'small'),
-        (c.payload->'card_faces'->0->'image_uris'->>'normal'),
-        (c.payload->'card_faces'->0->'image_uris'->>'large'),
-        (c.payload->'card_faces'->0->'image_uris'->>'small')
+        (c.payload->'image_uris'->>'large')
       ) AS image_url,
 
-      COALESCE(e.effective_usd,        s.usd)::text        AS usd,
-      COALESCE(e.effective_usd_foil,   s.usd_foil)::text   AS usd_foil,
-      COALESCE(e.effective_usd_etched, s.usd_etched)::text AS usd_etched,
-      COALESCE(e.effective_eur,        s.eur)::text        AS eur,
-      COALESCE(e.effective_tix,        s.tix)::text        AS tix,
-      COALESCE(
-        TO_CHAR(e.effective_updated_at,'YYYY-MM-DD'),
-        TO_CHAR(s.updated_at,'YYYY-MM-DD')
-      ) AS price_updated,
+      s.usd::text AS usd,
+      s.usd_foil::text AS usd_foil,
+      s.usd_etched::text AS usd_etched,
+      s.eur::text AS eur,
+      s.tix::text AS tix,
+      TO_CHAR(s.updated_at,'YYYY-MM-DD') AS price_updated,
 
       (
         SELECT mpc.price_cents
         FROM public.market_items mi
         JOIN public.market_prices_current mpc ON mpc.market_item_id = mi.id
         WHERE mi.game = 'mtg'
-          AND mi.canonical_source = 'scryfall'
           AND mi.canonical_id = c.id::text
           AND mpc.source = 'ebay'
         LIMIT 1
@@ -467,389 +168,146 @@ export default async function MtgCardDetailPage({
         FROM public.market_items mi
         JOIN public.market_item_external_ids mei ON mei.market_item_id = mi.id
         WHERE mi.game = 'mtg'
-          AND mi.canonical_source = 'scryfall'
           AND mi.canonical_id = c.id::text
           AND mei.source = 'ebay'
-        ORDER BY mei.updated_at DESC NULLS LAST
         LIMIT 1
       ) AS ebay_url
-
     FROM public.scryfall_cards_raw c
-    LEFT JOIN public.mtg_prices_effective e       ON e.scryfall_id = c.id
     LEFT JOIN public.mtg_prices_scryfall_latest s ON s.scryfall_id = c.id
     WHERE c.id::text = ${foundId}
     LIMIT 1
   `);
 
-  const card = rowRes.rows?.[0] ?? null;
+  const card = rowRes.rows?.[0];
   if (!card) notFound();
 
-  // Set info
-  const setRow =
-    card.set_code
-      ? (
-          await db.execute<SetRow>(sql`
-            SELECT
-              name,
-              set_type,
-              block,
-              COALESCE(TO_CHAR(released_at,'YYYY-MM-DD'), NULL) AS released_at
-            FROM public.scryfall_sets
-            WHERE LOWER(code) = LOWER(${card.set_code})
-            LIMIT 1
-          `)
-        ).rows?.[0] ?? null
-      : null;
+  const hero = absMaybe(card.image_url);
+  const serverEbayPrice = card.ebay_usd_cents ? card.ebay_usd_cents / 100 : null;
 
-  // Scryfall image
-  const hero = (card.image_url ?? "").replace(/^http:\/\//, "https://") || null;
-  const heroAbs = absMaybe(hero);
+  const currentUsd =
+    money(card.usd) ??
+    (serverEbayPrice && Number.isFinite(serverEbayPrice) ? serverEbayPrice : null);
 
-  // Primary-price presence
-  const hasPrimaryPrice =
-    !!money(card.usd) ||
-    !!money(card.usd_foil) ||
-    !!money(card.usd_etched) ||
-    !!money(card.eur) ||
-    tixNumber(card.tix) != null;
-
-  // Server eBay fallback (from market tables)
-  const serverEbayPrice = typeof card.ebay_usd_cents === "number" ? card.ebay_usd_cents / 100 : null;
-  const serverEbayUrl = card.ebay_url || null;
-
-  // currentUsd for alerts context
-  const currentUsd = (() => {
-    const s = money(card.usd);
-    if (s) return Number(s);
-    if (serverEbayPrice != null && Number.isFinite(serverEbayPrice)) return serverEbayPrice;
-    return null;
-  })();
-
-  // Pro-gated alerts
+  /* ---------------- Plan + alerts (single fetch) ---------------- */
+  let planTier: "free" | "collector" | "pro" = "free";
   let canUseAlerts = false;
   let marketItemId: string | null = null;
+
   if (userId) {
     const plan = await getUserPlan(userId);
+    planTier = plan.id === "pro" ? "pro" : plan.id === "collector" ? "collector" : "free";
     canUseAlerts = canUsePriceAlerts(plan);
 
     if (canUseAlerts) {
-      const marketItem = await getMarketItemForMtg(foundId);
-      marketItemId = marketItem?.id ?? null;
+      const mi = await getMarketItemForMtg(card.id);
+      marketItemId = mi?.id ?? null;
     }
   }
 
-  // non-fatal ebay snapshot updater (best-effort)
+  // Non-fatal eBay snapshot refresh
   try {
     await getLatestEbaySnapshot({ category: "mtg", cardId: card.id, segment: "all" });
-  } catch (err) {
-    console.error("[ebay snapshot failed]", err);
-  }
+  } catch {}
 
-  // Affiliate link
   const amazonLink = await getAffiliateLinkForCard({
     category: "mtg",
     cardId: card.id,
     marketplace: "amazon",
   });
 
-  const setHref = card.set_code ? `/categories/mtg/sets/${encodeURIComponent(card.set_code)}` : null;
-  const baseHref = `/categories/mtg/cards/${encodeURIComponent(card.id)}`;
-
-  // JSON-LD
-  const canonical = absUrl(baseHref);
-
-  const breadcrumbsJsonLd = {
-    "@context": "https://schema.org",
-    "@type": "BreadcrumbList",
-    itemListElement: [
-      { "@type": "ListItem", position: 1, name: "Home", item: absUrl("/") },
-      { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
-      { "@type": "ListItem", position: 3, name: "MTG Cards", item: absUrl("/categories/mtg/cards") },
-      { "@type": "ListItem", position: 4, name: card.name ?? card.id, item: canonical },
-    ],
-  };
-
-  const productJsonLd: any = {
-    "@context": "https://schema.org",
-    "@type": "Product",
-    "@id": `${canonical}#product`,
-    name: card.name ?? card.id,
-    sku: card.id,
-    url: canonical,
-    image: heroAbs ? [heroAbs] : undefined,
-    category: "Magic: The Gathering Trading Card",
-    brand: { "@type": "Brand", name: "Magic: The Gathering" },
-    description: [
-      card.type_line ? card.type_line : null,
-      card.rarity ? `Rarity: ${card.rarity}` : null,
-      card.set_code ? `Set: ${card.set_code.toUpperCase()}` : null,
-      card.collector_number ? `Collector #: ${card.collector_number}` : null,
-    ]
-      .filter(Boolean)
-      .join(" • "),
-  };
-
-  if (currentUsd != null && currentUsd > 0) {
-    productJsonLd.offers = {
-      "@type": "Offer",
-      url: canonical,
-      priceCurrency: "USD",
-      price: currentUsd.toFixed(2),
-      availability: "https://schema.org/InStock",
-      itemCondition: "https://schema.org/UsedCondition",
-      seller: {
-        "@type": "Organization",
-        name: site.name ?? "Legendary Collectibles",
-        url: absBase(),
-      },
-    };
-  }
-
-  const webPageJsonLd = {
-    "@context": "https://schema.org",
-    "@type": "WebPage",
-    "@id": `${canonical}#webpage`,
-    url: canonical,
-    name: `${card.name ?? card.id} — MTG Card`,
-    isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: absBase() },
-    primaryImageOfPage: heroAbs ? { "@type": "ImageObject", url: heroAbs } : undefined,
-    mainEntity: { "@id": `${canonical}#product` },
-  };
-
-  const ebayQ = [card.name ?? "", card.set_code || setRow?.name || "", card.collector_number || "", "MTG"]
-    .filter(Boolean)
-    .join(" ");
+  const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(card.id)}`);
 
   return (
     <section className="space-y-8">
-      {/* JSON-LD */}
-      <Script
-        id="mtg-card-webpage-jsonld"
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
-      />
-      <Script
-        id="mtg-card-breadcrumbs-jsonld"
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }}
-      />
-      <Script
-        id="mtg-card-product-jsonld"
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
-      />
-
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link href="/categories/mtg/cards" className="text-sky-300 hover:underline" prefetch={false}>
-          ← Back to MTG cards
-        </Link>
-
-        {/* Currency toggle */}
-        <div className="rounded-md border border-white/20 bg-white/10 p-1 text-sm text-white">
-          <span className="px-2">Currency:</span>
-          <Link
-            href={withParam(baseHref, "currency", "USD")}
-            className={`rounded px-2 py-1 ${currency === "USD" ? "bg-white/20" : "hover:bg-white/10"}`}
-            prefetch={false}
-          >
-            USD
-          </Link>
-          <Link
-            href={withParam(baseHref, "currency", "EUR")}
-            className={`ml-1 rounded px-2 py-1 ${currency === "EUR" ? "bg-white/20" : "hover:bg-white/10"}`}
-            prefetch={false}
-          >
-            EUR
-          </Link>
-        </div>
-      </div>
-
+      {/* Image + header */}
       <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
-        {/* Image */}
         <div className="md:col-span-5">
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="relative mx-auto w-full max-w-md" style={{ aspectRatio: "3 / 4" }}>
-              {hero ? (
-                <Image
-                  src={hero}
-                  alt={card.name ?? card.id}
-                  fill
-                  unoptimized
-                  className="object-contain"
-                  sizes="(max-width: 1024px) 80vw, 480px"
-                  priority
-                />
-              ) : (
-                <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
-              )}
+          <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+            <div className="relative mx-auto aspect-[3/4] max-w-md">
+              <Image src={hero} alt={card.name ?? card.id} fill unoptimized className="object-contain" />
             </div>
           </div>
         </div>
 
-        {/* Details */}
         <div className="md:col-span-7 space-y-4">
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="text-sm text-white/80">
-                {setHref ? (
-                  <>
-                    Set:{" "}
-                    <Link href={setHref} className="text-sky-300 hover:underline" prefetch={false}>
-                      {setRow?.name ?? card.set_code}
-                    </Link>
-                  </>
-                ) : null}
-                {setRow?.released_at && <span className="ml-2">• Released: {setRow.released_at}</span>}
-                {setRow?.set_type && <span className="ml-2">• {setRow.set_type}</span>}
-                {setRow?.block && <span className="ml-2">• {setRow.block}</span>}
-              </div>
-            </div>
-
-            <h1 className="mt-2 text-2xl font-bold text-white">{card.name ?? card.id}</h1>
-
+          <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+            <h1 className="text-2xl font-bold text-white">{card.name}</h1>
             <div className="mt-1 text-sm text-white/70">
-              {[
-                card.type_line || undefined,
-                card.cmc ? `CMC: ${card.cmc}` : undefined,
-                card.rarity || undefined,
-                card.collector_number ? `No. ${card.collector_number}` : undefined,
-              ]
+              {[card.type_line, card.rarity, card.collector_number && `#${card.collector_number}`]
                 .filter(Boolean)
                 .join(" • ")}
             </div>
 
-            <ManaCost cost={card.mana_cost} />
-
-            <div className="mt-4 flex flex-wrap items-center gap-2">
+            <div className="mt-4 flex flex-wrap gap-2">
               <CardActions
                 game="mtg"
                 cardId={card.id}
                 cardName={card.name ?? undefined}
-                setName={setRow?.name ?? undefined}
-                imageUrl={hero ?? undefined}
+                imageUrl={hero}
                 canSave={canSave}
               />
 
-              {/* ✅ Pro-gated alerts */}
               {userId ? (
-                canUseAlerts ? (
-                  marketItemId ? (
-                    <PriceAlertBell
-                      game="mtg"
-                      marketItemId={marketItemId}
-                      label={card.name ?? card.id}
-                      currentUsd={currentUsd}
-                    />
-                  ) : (
-                    <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
-                      🔔 Alerts unavailable
-                    </span>
-                  )
+                canUseAlerts && marketItemId ? (
+                  <PriceAlertBell
+                    game="mtg"
+                    marketItemId={marketItemId}
+                    label={card.name ?? card.id}
+                    currentUsd={currentUsd}
+                  />
                 ) : (
-                  <Link
-                    href="/pricing"
-                    className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
-                    prefetch={false}
-                  >
+                  <Link href="/pricing" className="text-xs text-sky-300 hover:underline">
                     🔔 Price alerts (Pro)
                   </Link>
                 )
               ) : (
-                <Link
-                  href="/sign-in"
-                  className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
-                  prefetch={false}
-                >
+                <Link href="/sign-in" className="text-xs text-sky-300 hover:underline">
                   🔔 Sign in for alerts
                 </Link>
               )}
             </div>
 
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              <CardEbayCTA
-                card={{
-                  id: card.id,
-                  name: card.name ?? "",
-                  number: card.collector_number ?? undefined,
-                  set_code: card.set_code ?? undefined,
-                  set_name: setRow?.name ?? undefined,
-                }}
-                game="Magic: The Gathering"
-              />
+            <div className="mt-3 flex flex-wrap gap-2">
+              <CardEbayCTA card={{ id: card.id, name: card.name ?? "" }} game="Magic: The Gathering" />
               <CardAmazonCTA url={amazonLink?.url} label={card.name ?? undefined} />
             </div>
           </div>
 
           {/* Market Prices */}
-          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-white">
-                Market Prices{!hasPrimaryPrice && serverEbayPrice != null ? " (Scryfall missing — eBay available)" : ""}
-              </h2>
-              <div className="text-xs text-white/60">Updated {card.price_updated ?? "—"}</div>
+          <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+            <h2 className="text-lg font-semibold text-white">Market Prices</h2>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <div>USD: ${money(card.usd)?.toFixed(2) ?? "—"}</div>
+              <div>Foil: ${money(card.usd_foil)?.toFixed(2) ?? "—"}</div>
+              <div>Etched: ${money(card.usd_etched)?.toFixed(2) ?? "—"}</div>
+              <div>EUR: €{money(card.eur)?.toFixed(2) ?? "—"}</div>
             </div>
+          </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-              <div>
-                <div className="text-sm text-white/70">USD</div>
-                <div className="text-lg font-semibold text-white">{fmtCurrency(card.usd, "USD")}</div>
-              </div>
-              <div>
-                <div className="text-sm text-white/70">USD Foil</div>
-                <div className="text-lg font-semibold text-white">{fmtCurrency(card.usd_foil, "USD")}</div>
-              </div>
-              <div>
-                <div className="text-sm text-white/70">USD Etched</div>
-                <div className="text-lg font-semibold text-white">{fmtCurrency(card.usd_etched, "USD")}</div>
-              </div>
-              <div>
-                <div className="text-sm text-white/70">EUR</div>
-                <div className="text-lg font-semibold text-white">{fmtCurrency(card.eur, "EUR")}</div>
-              </div>
-              <div>
-                <div className="text-sm text-white/70">TIX</div>
-                <div className="text-lg font-semibold text-white">{fmtTix(card.tix)}</div>
-              </div>
-            </div>
+          {/* ✅ Market Value (Estimated) */}
+          <MarketValuePanel
+              game="mtg"
+              canonicalId={card.id}
+              title="Market Value"
+              showDisclaimer
+              canSeeRanges={planTier === "collector" || planTier === "pro"}
+              canSeeConfidence={planTier === "pro"}
+            />
 
-            {!hasPrimaryPrice && serverEbayPrice != null ? (
-              <div className="mt-3 text-sm text-white/80">
-                eBay snapshot: <span className="font-semibold text-white">${serverEbayPrice.toFixed(2)}</span>
-                {serverEbayUrl ? (
-                  <Link href={serverEbayUrl} className="ml-2 text-sky-300 underline" target="_blank" prefetch={false}>
-                    View on eBay
-                  </Link>
-                ) : null}
-              </div>
-            ) : null}
-          </section>
-
-          <EbayFallbackPrice cardId={card.id} q={ebayQ} showWhen="missing" hasPrimaryPrice={hasPrimaryPrice} />
-
-          {/* Details */}
-          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <h2 className="text-lg font-semibold text-white">Card Details</h2>
-            <div className="mt-2 grid gap-2 text-sm text-white/85 sm:grid-cols-2">
-              <div><span className="text-white/60">Layout:</span> {card.layout ?? "—"}</div>
-              <div><span className="text-white/60">Oracle ID:</span> {card.oracle_id ?? "—"}</div>
-              <div><span className="text-white/60">Set Code:</span> {card.set_code ?? "—"}</div>
-              <div><span className="text-white/60">Collector #:</span> {card.collector_number ?? "—"}</div>
-            </div>
-          </section>
-
-          {/* Rules text */}
-          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <h2 className="text-lg font-semibold text-white">Rules Text</h2>
-            {card.oracle_text ? (
-              <div className="mt-2 text-sm text-white/85">{nl2p(card.oracle_text)}</div>
-            ) : (
-              <div className="mt-2 text-sm text-white/60">
-                No rules text available for this item (common for art cards, tokens, or special prints).
-              </div>
-            )}
-          </section>
         </div>
       </div>
+
+      {/* Rules text */}
+      <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
+        <h2 className="text-lg font-semibold text-white">Rules Text</h2>
+        <div className="mt-2 whitespace-pre-wrap text-white/80">
+          {card.oracle_text ?? "No rules text available."}
+        </div>
+      </div>
+
+      <Link href="/categories/mtg/cards" className="text-sky-300 hover:underline">
+        ← Back to MTG cards
+      </Link>
     </section>
   );
 }
