@@ -1,3 +1,4 @@
+// src/app/products/[id]/page.tsx
 import "server-only";
 
 import { notFound } from "next/navigation";
@@ -66,6 +67,16 @@ function money(cents?: number | null) {
   return (cents / 100).toFixed(2);
 }
 
+function normalizeCloudflareVariant(
+  url: string | null | undefined,
+  variant = "productTile",
+) {
+  const u = String(url ?? "").trim();
+  if (!u) return u;
+  if (!u.includes("imagedelivery.net/")) return u;
+  return u.replace(/\/[^/]+$/, `/${variant}`);
+}
+
 export default async function ProductDetailPage(props: {
   params: { id: string } | Promise<{ id: string }>;
 }) {
@@ -79,6 +90,7 @@ export default async function ProductDetailPage(props: {
   const priceText = money(product.price_cents);
   const compareAtText = money(product.compare_at_cents);
 
+  // Build image list (prefer explicit images[], fall back to image_url)
   const images =
     Array.isArray(product.images) && product.images.length > 0
       ? product.images
@@ -86,7 +98,16 @@ export default async function ProductDetailPage(props: {
         ? [{ url: product.image_url, alt: product.title, sort: 0 }]
         : [];
 
-  const mainImage = images[0]?.url ?? "";
+  // Normalize ONLY Cloudflare Image Delivery URLs to the desired variants.
+  // - Main image: use productDetail (or productTile if you don’t have another variant yet)
+  // - Thumbs: use productTile
+  const mainImageRaw = images[0]?.url ?? "";
+  const mainImage = normalizeCloudflareVariant(mainImageRaw, "productDetail") || mainImageRaw;
+
+  const thumbImages = images.map((im) => ({
+    ...im,
+    url: normalizeCloudflareVariant(im.url, "productTile") || im.url,
+  }));
 
   const qty = typeof product.quantity === "number" ? product.quantity : null;
   const status = (product.status ?? "").toLowerCase();
@@ -96,7 +117,8 @@ export default async function ProductDetailPage(props: {
     Number.isFinite(product.price_cents) &&
     product.price_cents > 0;
 
-  const soldOut = (qty !== null && qty <= 0) || status === "sold" || status === "sold_out";
+  const soldOut =
+    (qty !== null && qty <= 0) || status === "sold" || status === "sold_out";
 
   const unavailableByStatus = status === "inactive" || status === "disabled";
 
@@ -123,9 +145,9 @@ export default async function ProductDetailPage(props: {
             )}
           </div>
 
-          {images.length > 1 ? (
+          {thumbImages.length > 1 ? (
             <div className="mt-3 grid grid-cols-5 gap-2">
-              {images.slice(0, 10).map((im, i) => (
+              {thumbImages.slice(0, 10).map((im, i) => (
                 <div
                   key={`${im.url}-${i}`}
                   className="aspect-square overflow-hidden rounded-xl border border-white/10 bg-black/30"
@@ -144,7 +166,9 @@ export default async function ProductDetailPage(props: {
 
         <div>
           <h1 className="text-3xl font-bold">{product.title}</h1>
-          {product.subtitle ? <p className="mt-2 text-white/70">{product.subtitle}</p> : null}
+          {product.subtitle ? (
+            <p className="mt-2 text-white/70">{product.subtitle}</p>
+          ) : null}
 
           <div className="mt-4 flex items-end gap-3">
             {priceText ? (
@@ -153,7 +177,9 @@ export default async function ProductDetailPage(props: {
               <div className="text-3xl font-extrabold">—</div>
             )}
             {compareAtText && compareAtText !== priceText ? (
-              <div className="text-lg text-white/50 line-through">${compareAtText}</div>
+              <div className="text-lg text-white/50 line-through">
+                ${compareAtText}
+              </div>
             ) : null}
           </div>
 
@@ -179,7 +205,9 @@ export default async function ProductDetailPage(props: {
             {product.is_graded ? (
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
                 {product.grader ?? "Graded"}{" "}
-                {typeof product.grade_x10 === "number" ? (product.grade_x10 / 10).toFixed(1) : ""}
+                {typeof product.grade_x10 === "number"
+                  ? (product.grade_x10 / 10).toFixed(1)
+                  : ""}
               </span>
             ) : null}
 
@@ -213,13 +241,17 @@ export default async function ProductDetailPage(props: {
           ) : null}
 
           {unavailableByStatus ? (
-            <p className="mt-2 text-sm text-white/60">This item is currently unavailable.</p>
+            <p className="mt-2 text-sm text-white/60">
+              This item is currently unavailable.
+            </p>
           ) : null}
 
           {product.description ? (
             <div className="mt-8">
               <h2 className="text-lg font-semibold">Description</h2>
-              <p className="mt-2 whitespace-pre-wrap text-sm text-white/70">{product.description}</p>
+              <p className="mt-2 whitespace-pre-wrap text-sm text-white/70">
+                {product.description}
+              </p>
             </div>
           ) : null}
         </div>

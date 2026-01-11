@@ -255,7 +255,7 @@ export const cartLines = pgTable(
     // OLD flow (products table)
     productId: integer("product_id"), // now nullable
 
-    // NEW store flow (store_listings table)
+  
     listingId: uuid("listing_id"),
 
     qty: integer("qty").notNull(),

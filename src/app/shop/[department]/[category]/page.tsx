@@ -1,3 +1,4 @@
+// src/app/shop/[department]/[category]/page.tsx
 import "server-only";
 
 import type { Metadata } from "next";
@@ -7,6 +8,7 @@ import { notFound, redirect } from "next/navigation";
 
 import AddToCartButton from "@/components/shop/AddToCartButton";
 import ShopFilters from "@/components/shop/ShopFilters";
+import { buildImageAlt } from "@/lib/seo/imageAlt";
 
 import {
   categoryToApi,
@@ -54,6 +56,25 @@ function buildQueryString(
   return qs.toString();
 }
 
+/**
+ * Normalize Cloudflare Images variant.
+ * Your "bad" tiles are coming through as .../public.
+ * This forces them to render using a consistent tile variant.
+ */
+function normalizeCloudflareVariant(
+  url: string | null | undefined,
+  variant = "productTile",
+) {
+  const u = String(url ?? "").trim();
+  if (!u) return u;
+
+  // Only touch Cloudflare Image Delivery URLs
+  if (!u.includes("imagedelivery.net/")) return u;
+
+  // Replace the last path segment (variant) with the variant we want
+  return u.replace(/\/[^/]+$/, `/${variant}`);
+}
+
 export async function generateMetadata(props: {
   params: Params | Promise<Params>;
 }): Promise<Metadata> {
@@ -67,19 +88,21 @@ export async function generateMetadata(props: {
   if (!dept || !category) {
     return {
       title: `Shop | ${site.name}`,
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
     };
   }
 
   const deptCfg = getDepartmentConfig(dept);
   const cfg = categoryToApi(dept, category);
 
-  const canonical = `${site.url}/shop/${encodeURIComponent(dept)}/${encodeURIComponent(category)}`;
+  const canonical = `${site.url}/shop/${encodeURIComponent(dept)}/${encodeURIComponent(
+    category,
+  )}`;
 
   if (!deptCfg || !cfg) {
     return {
       title: `Shop | ${site.name}`,
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
       alternates: { canonical },
     };
   }
@@ -169,7 +192,6 @@ export default async function ShopCategoryPage(props: {
             <ShopFilters game={dept} format={category} />
           </div>
         </details>
-
       </header>
 
       <section className="shopSection">
@@ -185,8 +207,23 @@ export default async function ShopCategoryPage(props: {
               {data.items.map((pItem) => {
                 const p = pItem as any;
 
-                const imgUrl = p?.image?.url || null;
-                const imgAlt = p?.image?.alt || p?.title || "Product image";
+                const rawImgUrl: string | null = p?.image?.url || null;
+                const imgAlt = buildImageAlt({
+                  title: p?.title,
+                  subtitle: p?.subtitle,
+                  game: dept,                 // dept is already pokemon/yugioh/mtg
+                  setName: p?.setName ?? p?.set?.name ?? null,
+                  cardNumber: p?.number ?? null,
+                  condition: p?.condition ?? null,
+                  isGraded: p?.isGraded ?? null,
+                  grader: p?.grader ?? null,
+                  grade: p?.gradeLabel ?? p?.grade ?? null,
+                  sealed: p?.sealed ?? null,
+                });
+
+                // ✅ Normalize Cloudflare variant for tile rendering
+                // This specifically fixes tcg_cards that are stored as .../public
+                const imgUrl = normalizeCloudflareVariant(rawImgUrl, "productTile") || rawImgUrl;
 
                 // ✅ IMPORTANT: your product detail route is /products/[id] (UUID)
                 const href = `/products/${p.id}`;
@@ -225,7 +262,6 @@ export default async function ShopCategoryPage(props: {
                     </Link>
 
                     <div className="productTile__body productTile__body--tight">
-
                       <div className="productTile__title">
                         <Link className="hover:underline" href={href}>
                           {p.title}
@@ -260,10 +296,7 @@ export default async function ShopCategoryPage(props: {
                         <Link href={href} className="btn btnGhost btnInline">
                           View
                         </Link>
-                        <AddToCartButton
-                          productId={p.id}
-                          availableQty={p.quantity ?? undefined}
-                        />
+                        <AddToCartButton productId={p.id} availableQty={p.quantity ?? undefined} />
                       </div>
                     </div>
                   </article>

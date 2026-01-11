@@ -31,7 +31,7 @@ export async function generateMetadata(props: {
   if (!dept) {
     return {
       title: `Shop | ${site.name}`,
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
       alternates: { canonical },
     };
   }

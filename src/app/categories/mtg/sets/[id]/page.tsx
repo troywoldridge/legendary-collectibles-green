@@ -180,7 +180,7 @@ export async function generateMetadata({
       title: `MTG Set Not Found | ${site.name}`,
       description: "We couldn’t find that MTG set. Browse sets and try again.",
       alternates: { canonical },
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
     };
   }
 

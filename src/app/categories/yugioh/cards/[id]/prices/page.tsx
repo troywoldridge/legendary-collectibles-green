@@ -177,7 +177,7 @@ export async function generateMetadata(
     return {
       title: `Yu-Gi-Oh! Prices | ${site.name}`,
       description: `Track Yu-Gi-Oh! card prices, trends, and graded values on ${site.name}.`,
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
     };
   }
 
@@ -190,7 +190,7 @@ export async function generateMetadata(
       title: `Yu-Gi-Oh! Prices | ${site.name}`,
       description: `Track Yu-Gi-Oh! card prices, trends, and graded values on ${site.name}.`,
       alternates: { canonical },
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
     };
   }
 

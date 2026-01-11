@@ -156,7 +156,7 @@ export async function generateMetadata({
       title: `Pokémon Card Details | ${site.name}`,
       description: `Browse Pokémon cards, track prices, manage your collection, and shop on ${site.name}.`,
       alternates: { canonical },
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
     };
   }
 

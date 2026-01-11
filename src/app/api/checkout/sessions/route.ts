@@ -1,4 +1,4 @@
-// src/app/api/checkout/session/route.ts
+// src/app/api/checkout/sessions/route.ts
 import "server-only";
 
 import { NextResponse } from "next/server";
@@ -7,9 +7,13 @@ import Stripe from "stripe";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
+import { baseShippingCentsForWeight } from "@/lib/shipping/rates";
+import { insuranceCentsForShipment } from "@/lib/shipping/insurance";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// ---- helpers ----
 function s(v: unknown): string {
   return String(v ?? "");
 }
@@ -17,7 +21,23 @@ function n(v: unknown, fallback = 0): number {
   const x = Number(v);
   return Number.isFinite(x) ? x : fallback;
 }
+function toInt(v: unknown, def = 0) {
+  const x = Number(v);
+  return Number.isFinite(x) ? Math.floor(x) : def;
+}
+function toBool(v: unknown, def = false) {
+  if (typeof v === "boolean") return v;
+  const str = String(v ?? "").trim().toLowerCase();
+  if (str === "true" || str === "1" || str === "yes") return true;
+  if (str === "false" || str === "0" || str === "no") return false;
+  return def;
+}
+function toNumber(v: unknown): number {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+}
 
+// ---- config ----
 const STRIPE_SECRET_KEY = s(process.env.STRIPE_SECRET_KEY).trim();
 
 const SITE_URL = s(
@@ -32,14 +52,19 @@ const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: "2025-10-29.clover",
 });
 
+// ---- db types ----
 type CartRow = { id: string };
 
 type LineRow = {
+  productId: string;
   qty: number;
   title: string;
   priceCents: number;
   imageUrl: string | null;
   slug: string | null;
+
+  shippingWeightLbs: number | null;
+  shippingClass: string | null;
 };
 
 export async function POST() {
@@ -55,6 +80,12 @@ export async function POST() {
     if (!userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    const FREE_SHIPPING_THRESHOLD_CENTS = toInt(
+      process.env.FREE_SHIPPING_THRESHOLD_CENTS,
+      15000,
+    );
+    const ALLOW_INTERNATIONAL = toBool(process.env.ALLOW_INTERNATIONAL, false);
 
     // 1) active cart
     const cartRes = await db.execute<CartRow>(sql`
@@ -74,17 +105,22 @@ export async function POST() {
     // 2) purchasable lines: cart_lines.listing_id -> products.id
     const linesRes = await db.execute<LineRow>(sql`
       select
+        p.id as "productId",
         cl.qty as "qty",
         p.title as "title",
         p.price_cents as "priceCents",
-        p.image_url as "imageUrl",
-        p.slug as "slug"
+        -- image_url isn't on products in your current schema; use product_images first if you want.
+        null::text as "imageUrl",
+        p.slug as "slug",
+        p.shipping_weight_lbs as "shippingWeightLbs",
+        p.shipping_class as "shippingClass"
       from cart_lines cl
       join products p on p.id = cl.listing_id
       where cl.cart_id = ${cartId}
         and cl.listing_id is not null
         and p.price_cents is not null
         and p.price_cents > 0
+        and p.status = 'active'::product_status
       order by cl.id asc
     `);
 
@@ -96,25 +132,45 @@ export async function POST() {
       );
     }
 
+    // --- subtotal + weight + insurance ---
+    let subtotalCents = 0;
+    let totalWeight = 0;
+
+    const insuranceItems: Array<{ shippingClass?: string | null; qty?: number | null }> = [];
+
+    for (const r of rows) {
+      const qty = Math.max(1, Math.min(99, n(r.qty, 1)));
+      const unit = Math.max(0, n(r.priceCents, 0));
+      subtotalCents += qty * unit;
+
+      const shippingClass = r.shippingClass ? String(r.shippingClass) : null;
+      const w = toNumber(r.shippingWeightLbs);
+
+      // fallback weights (paranoid safety)
+      const fallbackW =
+        String(shippingClass || "").toLowerCase() === "graded" ? 0.5 :
+        String(shippingClass || "").toLowerCase() === "etb" ? 2.0 :
+        String(shippingClass || "").toLowerCase() === "booster_box" ? 3.0 :
+        String(shippingClass || "").toLowerCase() === "accessory" ? 0.5 :
+        0.25;
+
+      totalWeight += (w > 0 ? w : fallbackW) * qty;
+      insuranceItems.push({ shippingClass, qty });
+    }
+
+    const insuranceCents = insuranceCentsForShipment(insuranceItems);
+    const freeShipping = subtotalCents >= FREE_SHIPPING_THRESHOLD_CENTS;
+    const baseShippingCents = freeShipping ? 0 : baseShippingCentsForWeight(totalWeight);
+
+    // Stripe line_items for products
     const line_items: Stripe.Checkout.SessionCreateParams.LineItem[] = rows.map(
       (r) => {
-        const qty = Math.max(1, n(r.qty, 1));
+        const qty = Math.max(1, Math.min(99, n(r.qty, 1)));
         const unitAmount = Math.max(1, n(r.priceCents, 0));
-
         const title = s(r.title).trim() || "Item";
 
         const product_data: Stripe.Checkout.SessionCreateParams.LineItem.PriceData.ProductData =
           { name: title };
-
-        const rawImg = s(r.imageUrl).trim();
-        if (rawImg) {
-          const isAbs = /^https?:\/\//i.test(rawImg);
-          const abs = isAbs
-            ? rawImg
-            : `${SITE_URL}${rawImg.startsWith("/") ? "" : "/"}${rawImg}`;
-
-          product_data.images = [abs];
-        }
 
         return {
           quantity: qty,
@@ -127,34 +183,104 @@ export async function POST() {
       },
     );
 
-    // 3) create Stripe checkout session
-   const session = await stripe.checkout.sessions.create({
-  mode: "payment",
-  line_items,
-  success_url: `${SITE_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
-  cancel_url: `${SITE_URL}/cart`,
-  metadata: {
-    cart_id: String(cartId),
-    user_id: String(userId),
-  },
-});
+    // Append shipping as a line item (so it matches your exact rules)
+    line_items.push({
+      quantity: 1,
+      price_data: {
+        currency: "usd",
+        unit_amount: Math.max(0, Math.floor(baseShippingCents)),
+        product_data: {
+          name: freeShipping
+            ? "Shipping (Free)"
+            : "Shipping (USPS Ground Advantage)",
+          metadata: {
+            model: "weight_tiers",
+            weight_lbs: String(Number(totalWeight.toFixed(2))),
+          },
+        },
+      },
+    });
 
-// ✅ Always return sessionId (url is optional)
-return NextResponse.json(
-  {
-    sessionId: session.id,
-    url: session.url ?? null,
-  },
-  { status: 200 },
-);
+    // Append insurance if needed
+    if (insuranceCents > 0) {
+      line_items.push({
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: Math.max(0, Math.floor(insuranceCents)),
+          product_data: {
+            name: "Insurance (Graded Card Coverage)",
+            metadata: { model: "graded_rule" },
+          },
+        },
+      });
+    }
 
+    // Allowed countries (typed)
+    const allowed_countries: Stripe.Checkout.SessionCreateParams.ShippingAddressCollection.AllowedCountry[] =
+      ALLOW_INTERNATIONAL ? ["US", "CA"] : ["US"];
 
-    return NextResponse.json({ URL }, { status: 200 });
+    // Snapshot items for webhook mapping
+    const items_json = JSON.stringify(
+      rows.map((r) => ({
+        productId: String(r.productId),
+        qty: Math.max(1, n(r.qty, 1)),
+        unitCents: Math.max(0, n(r.priceCents, 0)),
+        title: s(r.title).trim() || "Item",
+        shippingClass: r.shippingClass ? String(r.shippingClass) : null,
+        shippingWeightLbs: r.shippingWeightLbs ? Number(r.shippingWeightLbs) : null,
+      })),
+    );
+
+    // Create checkout session
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      line_items,
+
+      // Collect address (useful for tax + fulfillment), but don't use Stripe shipping_options
+      shipping_address_collection: { allowed_countries },
+
+      // Stripe Tax
+      automatic_tax: { enabled: true },
+      customer_update: { address: "auto", name: "auto" },
+      billing_address_collection: "required",
+
+      success_url: `${SITE_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${SITE_URL}/cart/review`,
+
+      metadata: {
+        cartId: String(cartId),
+        userId: String(userId),
+        subtotalCents: String(Math.max(0, Math.floor(subtotalCents))),
+        items_json,
+
+        shippingModel: "weight_tiers+insurance_line_items",
+        freeShippingThresholdCents: String(FREE_SHIPPING_THRESHOLD_CENTS),
+
+        // Debug-friendly
+        weightLbs: String(Number(totalWeight.toFixed(2))),
+        baseShippingCents: String(Math.floor(baseShippingCents)),
+        insuranceCents: String(Math.floor(insuranceCents)),
+        freeShipping: String(Boolean(freeShipping)),
+      },
+    });
+   
+    const url = session.url;
+
+    if (!url) {
+      return NextResponse.json(
+        { error: "Checkout failed: missing Stripe URL" },
+        { status: 500 },
+      );
+    }
+
+    return NextResponse.redirect(url, 303);
   } catch (err: any) {
-    console.error("[api/checkout/session] error", err);
+    console.error("[api/checkout/sessions] error", err);
     return NextResponse.json(
       { error: s(err?.message || err) || "Internal Server Error" },
       { status: 500 },
     );
   }
 }
+

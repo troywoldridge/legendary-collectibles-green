@@ -182,7 +182,7 @@ export async function generateMetadata({
       title: `Yu-Gi-Oh! Set Not Found | ${site.name}`,
       description: "We couldn’t find that Yu-Gi-Oh! set. Browse sets and try again.",
       alternates: { canonical },
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
     };
   }
 

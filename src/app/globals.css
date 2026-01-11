@@ -951,3 +951,9 @@ body::after {
 @media (min-width: 1024px) {
   .filtersRow:first-child { grid-column: span 2; }
 }
+
+.productTile__img {
+  object-fit: contain; /* or cover if you want full-bleed crop */
+  object-position: center;
+}
+

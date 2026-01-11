@@ -12,6 +12,8 @@ import { site } from "@/config/site";
 import { cfUrl } from "@/lib/cf";
 import { ClerkProvider } from "@clerk/nextjs";
 import { getClerkFrontendConfig } from "@/lib/clerk/config";
+import GoogleStoreWidget from "@/app/checkout/success/_components/GoogleStoreWidget";
+
 
 // Fonts
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
@@ -231,6 +233,9 @@ export default function RootLayout({
               gtag('config', '${GA_ID}', { anonymize_ip: true });
             `}
           </Script>
+
+          {/* Google Store Widget (Customer Reviews badge replacement) */}
+            <GoogleStoreWidget position="RIGHT_BOTTOM" />
 
           {/* Background image + overlays */}
           <div className="pointer-events-none fixed inset-0 -z-10">

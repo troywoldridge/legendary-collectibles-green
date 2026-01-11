@@ -162,7 +162,7 @@ export async function generateMetadata({
       title: `Pokémon Card Prices | ${site.name}`,
       description: `View Pokémon card price history and market trends on ${site.name}.`,
       alternates: { canonical },
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
     };
   }
 

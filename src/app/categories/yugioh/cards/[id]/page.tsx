@@ -283,7 +283,7 @@ export async function generateMetadata({ params }: { params: { id: string } }): 
       title: `Yu-Gi-Oh! Card Not Found | ${site.name}`,
       description: "We couldn’t find that Yu-Gi-Oh! card. Try searching by name or card ID.",
       alternates: { canonical },
-      robots: { index: false, follow: true },
+      robots: { index: true, follow: true },
     };
   }
 

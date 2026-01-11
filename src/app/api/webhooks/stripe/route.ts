@@ -16,17 +16,18 @@ import { notifyDiscordSale } from "@/lib/notify/discordSales";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+
+const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: "2025-10-29.clover",
 });
-
-const secret = process.env.STRIPE_WEBHOOK_SECRET!;
 
 // strict UUID check (so we NEVER insert non-uuid into uuid column)
 function isUuid(v: unknown): v is string {
   if (typeof v !== "string") return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    v
+    v,
   );
 }
 
@@ -84,7 +85,6 @@ async function notifySaleEmail(input: {
 }) {
   const to = process.env.SALES_NOTIFY_EMAIL_TO || "";
   const from = process.env.SALES_NOTIFY_EMAIL_FROM || "";
-
   if (!to || !from) return;
 
   const baseUrl = getBaseUrl();
@@ -93,7 +93,7 @@ async function notifySaleEmail(input: {
   const subjectPrefix = input.needsManualReview ? "⚠️ REVIEW" : "💰 Sale";
   const subject = `${subjectPrefix}: ${input.items.length} item(s) • ${money(
     input.totalCents,
-    input.currency
+    input.currency,
   )}`;
 
   const linesHtml = input.items
@@ -165,10 +165,10 @@ function safeParseItemsJson(v: unknown): CheckoutItemsSnapshot | null {
       (x) =>
         x &&
         typeof x === "object" &&
-        typeof x.productId === "string" &&
-        typeof x.title === "string" &&
-        typeof x.qty !== "undefined" &&
-        typeof x.unitCents !== "undefined"
+        typeof (x as any).productId === "string" &&
+        typeof (x as any).title === "string" &&
+        typeof (x as any).qty !== "undefined" &&
+        typeof (x as any).unitCents !== "undefined",
     );
 
     return ok ? (parsed as CheckoutItemsSnapshot) : null;
@@ -177,7 +177,19 @@ function safeParseItemsJson(v: unknown): CheckoutItemsSnapshot | null {
   }
 }
 
+function getMetaString(session: Stripe.Checkout.Session, key: string): string {
+  const v = (session.metadata as any)?.[key];
+  return typeof v === "string" ? v : v == null ? "" : String(v);
+}
+
 export async function POST(req: Request) {
+  if (!STRIPE_WEBHOOK_SECRET) {
+    return NextResponse.json(
+      { error: "STRIPE_WEBHOOK_SECRET is not set" },
+      { status: 500 },
+    );
+  }
+
   const sig = req.headers.get("stripe-signature");
   if (!sig) return NextResponse.json({ error: "No signature" }, { status: 400 });
 
@@ -185,15 +197,21 @@ export async function POST(req: Request) {
 
   let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(Buffer.from(raw), sig, secret);
+    event = stripe.webhooks.constructEvent(
+      Buffer.from(raw),
+      sig,
+      STRIPE_WEBHOOK_SECRET,
+    );
   } catch (e) {
     console.error("[stripe webhook] signature verify failed", e);
 
     // Red discord ping for signature issues (optional)
-    await notifyDiscordSale({
-      severity: "error",
-      reason: "Stripe signature verification failed.",
-    });
+    try {
+      await notifyDiscordSale({
+        severity: "error",
+        reason: "Stripe signature verification failed.",
+      });
+    } catch {}
 
     return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
   }
@@ -204,13 +222,13 @@ export async function POST(req: Request) {
   }
 
   try {
-    const s = event.data.object as Stripe.Checkout.Session;
+    const session = event.data.object as Stripe.Checkout.Session;
 
-    if (s.payment_status !== "paid") {
+    if (session.payment_status !== "paid") {
       return NextResponse.json({ received: true });
     }
 
-    const stripeSessionId = s.id;
+    const stripeSessionId = session.id;
 
     // Idempotency (Stripe retries)
     const existing = await db
@@ -224,18 +242,35 @@ export async function POST(req: Request) {
     }
 
     const paymentIntentId =
-      typeof s.payment_intent === "string"
-        ? s.payment_intent
-        : s.payment_intent?.id ?? undefined;
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent?.id ?? undefined;
 
-    const cartId = isUuid((s.metadata as any)?.cartId) ? ((s.metadata as any).cartId as string) : undefined;
+    // Metadata (support both camel + snake)
+    const meta = (session.metadata as any) || {};
+    const cartIdRaw = meta.cartId ?? meta.cart_id ?? "";
+    const cartId = isUuid(cartIdRaw) ? String(cartIdRaw) : undefined;
 
-    const currency = (s.currency ?? "usd").toLowerCase();
-    const totalCents = Number(s.amount_total ?? 0);
-    const subtotalCents = Number(s.amount_subtotal ?? totalCents);
+    const currency = (session.currency ?? "usd").toLowerCase();
 
-    // Stripe line items (always)
-    const li = await stripe.checkout.sessions.listLineItems(stripeSessionId, { limit: 100 });
+    // Totals (authoritative from Stripe session)
+    const totalCents = Number(session.amount_total ?? 0);
+    const subtotalCents = Number(session.amount_subtotal ?? totalCents);
+
+    const anyS = session as any;
+
+    const taxCents = Number(anyS?.total_details?.amount_tax ?? 0);
+
+    const shippingFromStripe = Number(anyS?.total_details?.amount_shipping ?? NaN);
+    const shippingCents = Number.isFinite(shippingFromStripe)
+      ? shippingFromStripe
+      : Math.max(0, totalCents - subtotalCents - taxCents);
+
+    // Stripe line items (always available)
+    const li = await stripe.checkout.sessions.listLineItems(stripeSessionId, {
+      limit: 100,
+    });
+
     const displayItems = li.data.map((x) => ({
       title: x.description || "Item",
       qty: Number(x.quantity ?? 1),
@@ -244,7 +279,7 @@ export async function POST(req: Request) {
     }));
 
     // Snapshot mapping (preferred)
-    const itemsSnapshot = safeParseItemsJson((s.metadata as any)?.items_json);
+    const itemsSnapshot = safeParseItemsJson(meta.items_json);
 
     let needsManualReview = false;
     let manualReason: string | undefined;
@@ -255,21 +290,30 @@ export async function POST(req: Request) {
     }
 
     // Customer/shipping
-    const anyS = s as any;
-    const customerEmail = s.customer_details?.email ?? undefined;
-    const customerName = s.customer_details?.name ?? undefined;
-    const customerPhone = s.customer_details?.phone ?? undefined;
-    const billingAddress = (s.customer_details?.address as any) ?? undefined;
+    const customerEmail = session.customer_details?.email ?? undefined;
+    const customerName = session.customer_details?.name ?? undefined;
+    const customerPhone = session.customer_details?.phone ?? undefined;
+    const billingAddress = (session.customer_details?.address as any) ?? undefined;
 
     const shippingDetails = anyS.shipping_details ?? null;
-    const shippingName = (shippingDetails?.name as string | undefined) ?? customerName ?? undefined;
-    const shippingPhone = (shippingDetails?.phone as string | undefined) ?? customerPhone ?? undefined;
+    const shippingName =
+      (shippingDetails?.name as string | undefined) ?? customerName ?? undefined;
+    const shippingPhone =
+      (shippingDetails?.phone as string | undefined) ??
+      customerPhone ??
+      undefined;
+
     const shippingAddress =
-      (shippingDetails?.address as any) ?? (s.customer_details?.address as any) ?? undefined;
+      (shippingDetails?.address as any) ??
+      (session.customer_details?.address as any) ??
+      undefined;
 
     const stripeSessionRaw = anyS ?? undefined;
 
-    const snapshotProductIds = (itemsSnapshot ?? []).map((x) => x.productId).filter(isUuid);
+    // If we have snapshot, load products/images for validation + order items
+    const snapshotProductIds = (itemsSnapshot ?? [])
+      .map((x) => x.productId)
+      .filter(isUuid);
 
     const prows =
       snapshotProductIds.length > 0
@@ -286,7 +330,9 @@ export async function POST(req: Request) {
 
     const byId = new Map(prows.map((p) => [p.id, p]));
     const imageById =
-      snapshotProductIds.length > 0 ? await getPrimaryImages(snapshotProductIds) : new Map<string, string>();
+      snapshotProductIds.length > 0
+        ? await getPrimaryImages(snapshotProductIds)
+        : new Map<string, string>();
 
     const dbItems: Array<{
       productId?: string;
@@ -300,7 +346,7 @@ export async function POST(req: Request) {
     if (itemsSnapshot) {
       for (const it of itemsSnapshot) {
         const qty = Math.max(1, Math.min(99, Number(it.qty) || 1));
-        const unit = Number(it.unitCents ?? 0);
+        const unit = Math.max(0, Number(it.unitCents ?? 0));
         const lineTotal = unit * qty;
 
         const pid = isUuid(it.productId) ? it.productId : undefined;
@@ -351,8 +397,8 @@ export async function POST(req: Request) {
         currency,
 
         subtotalCents,
-        taxCents: 0,
-        shippingCents: 0,
+        taxCents,
+        shippingCents,
         totalCents,
 
         email: customerEmail,
@@ -376,9 +422,10 @@ export async function POST(req: Request) {
           qty: it.qty,
           lineTotalCents: it.lineTotalCents,
           imageUrl: it.imageUrl ?? undefined,
-        }))
+        })),
       );
 
+      // Only decrement stock when snapshot exists AND validation passed
       if (itemsSnapshot && !needsManualReview) {
         for (const it of itemsSnapshot) {
           if (!isUuid(it.productId)) continue;
@@ -392,6 +439,7 @@ export async function POST(req: Request) {
         }
       }
 
+      // Mark cart checked out (best effort)
       if (cartId) {
         try {
           await tx

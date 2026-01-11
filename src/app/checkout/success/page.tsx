@@ -1,8 +1,11 @@
+// src/app/checkout/success/page.tsx
 import "server-only";
+
 import Link from "next/link";
 import { db } from "@/lib/db";
 import { orders, orderItems } from "@/lib/db/schema/orders";
 import { eq } from "drizzle-orm";
+import GoogleCustomerReviewsOptIn from "./GoogleCustomerReviewsOptIn";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +15,37 @@ function fmtMoney(cents: number, currency: string) {
     style: "currency",
     currency: cur,
   }).format((Number(cents || 0) / 100));
+}
+
+function yyyyMmDd(d: Date) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function pickCountryCode(order: any): string {
+  // Drizzle model uses camelCase fields based on your schema
+  const ship = order?.shippingAddress;
+  const bill = order?.billingAddress;
+
+  // Stripe-ish address JSON commonly has `country` (ISO 2-letter)
+  const shipCountry =
+    ship?.country ||
+    ship?.country_code ||
+    ship?.countryCode ||
+    ship?.address?.country ||
+    ship?.address?.country_code;
+
+  const billCountry =
+    bill?.country ||
+    bill?.country_code ||
+    bill?.countryCode ||
+    bill?.address?.country ||
+    bill?.address?.country_code;
+
+  const c = String(shipCountry || billCountry || "US").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(c) ? c : "US";
 }
 
 type Props = {
@@ -95,6 +129,25 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
     .from(orderItems)
     .where(eq(orderItems.orderId, order.id));
 
+  // --- Google Customer Reviews values ---
+  const merchantId = process.env.GCR_MERCHANT_ID || "";
+  const orderId = String(order.id);
+  const email = String(order.email ?? "");
+  const deliveryCountry = pickCountryCode(order);
+
+  // Estimated delivery date: best-effort placeholder (+7 days)
+  const created = new Date(order.createdAt);
+  const est = new Date(created);
+  est.setDate(est.getDate() + 7);
+  const estimatedDeliveryDate = yyyyMmDd(est);
+
+  const showGcr =
+    merchantId.length > 0 &&
+    orderId.length > 0 &&
+    email.length > 0 &&
+    deliveryCountry.length === 2 &&
+    estimatedDeliveryDate.length === 10;
+
   return (
     <main className="min-h-screen">
       <div className="mx-auto max-w-[1100px] px-4 py-10">
@@ -134,7 +187,10 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
 
             <ul className="mt-4 space-y-3">
               {items.map((it) => (
-                <li key={it.id} className="rounded-xl border border-white/10 bg-white/5 p-4">
+                <li
+                  key={it.id}
+                  className="rounded-xl border border-white/10 bg-white/5 p-4"
+                >
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-white line-clamp-2">
@@ -184,9 +240,25 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
 
               <div className="pt-3 text-xs text-white/60">
                 Status:{" "}
-                <span className="text-white/80">{String(order.status).toUpperCase()}</span>
+                <span className="text-white/80">
+                  {String(order.status).toUpperCase()}
+                </span>
               </div>
             </div>
+
+            {/* ✅ Google Customer Reviews Opt-in (don’t obscure it) */}
+            {showGcr ? (
+              <div className="mt-6">
+                <GoogleCustomerReviewsOptIn
+                  merchantId={merchantId}
+                  orderId={orderId}
+                  email={email}
+                  deliveryCountry={deliveryCountry}
+                  estimatedDeliveryDate={estimatedDeliveryDate}
+                  optInStyle="CENTER_DIALOG"
+                />
+              </div>
+            ) : null}
           </aside>
         </div>
       </div>
