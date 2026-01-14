@@ -10,6 +10,8 @@ import { db } from "@/lib/db";
 import YgoCardSearch from "@/components/ygo/YgoCardSearch";
 import YgoCardsClient from "./YgoCardsClient";
 import { site } from "@/config/site";
+import { absUrl as absURL, absMaybe } from "@/lib/urls";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

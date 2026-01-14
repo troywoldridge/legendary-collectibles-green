@@ -10,6 +10,8 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
 
+
+
 import YgoCardSearch from "@/components/ygo/YgoCardSearch";
 import CardActions from "@/components/collection/CardActions";
 
@@ -228,15 +230,16 @@ async function getCard(param: string): Promise<{
   return { card, images, prices, banlist, sets };
 }
 
-/* ---------------- SEO: Dynamic Metadata ---------------- */
 export async function generateMetadata({ params }: { params: { id: string } }): Promise<Metadata> {
   const id = decodeURIComponent(params.id ?? "").trim();
+
   if (!id) {
     const canonical = absUrl("/categories/yugioh/cards");
     return {
       title: `Yu-Gi-Oh! Cards | ${site.name}`,
       description: "Browse Yu-Gi-Oh! cards, track prices, and manage your collection.",
       alternates: { canonical },
+      robots: { index: false, follow: true },
     };
   }
 
@@ -283,7 +286,7 @@ export async function generateMetadata({ params }: { params: { id: string } }): 
       title: `Yu-Gi-Oh! Card Not Found | ${site.name}`,
       description: "We couldn’t find that Yu-Gi-Oh! card. Try searching by name or card ID.",
       alternates: { canonical },
-      robots: { index: true, follow: true },
+      robots: { index: false, follow: true },
     };
   }
 
@@ -304,6 +307,7 @@ export async function generateMetadata({ params }: { params: { id: string } }): 
     title,
     description,
     alternates: { canonical },
+    robots: { index: true, follow: true },
     openGraph: {
       type: "website",
       url: canonical,
@@ -320,6 +324,7 @@ export async function generateMetadata({ params }: { params: { id: string } }): 
     },
   };
 }
+
 
 /* ---------------- Page ---------------- */
 export default async function YugiohCardDetailPage({

@@ -1,3 +1,4 @@
+// src/app/cart/review/page.tsx
 import "server-only";
 
 import Link from "next/link";
@@ -6,6 +7,7 @@ import { db } from "@/lib/db";
 import { sql } from "drizzle-orm";
 import { baseShippingCentsForWeight } from "@/lib/shipping/rates";
 import { insuranceCentsForShipment } from "@/lib/shipping/insurance";
+import CheckoutButton from "@/app/cart/CheckoutButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,9 +33,7 @@ export default async function CartReviewPage() {
     return (
       <main className="mx-auto max-w-4xl px-4 py-10">
         <h1 className="text-2xl font-semibold">Review your cart</h1>
-        <p className="mt-3 text-sm opacity-80">
-          Please sign in to review your cart.
-        </p>
+        <p className="mt-3 text-sm opacity-80">Please sign in to review your cart.</p>
         <div className="mt-6">
           <Link className="underline" href="/sign-in">
             Sign in
@@ -42,6 +42,12 @@ export default async function CartReviewPage() {
       </main>
     );
   }
+
+  // Keep review math consistent with /api/checkout/sessions
+  const FREE_SHIPPING_THRESHOLD_CENTS = Math.max(
+    0,
+    toInt(process.env.FREE_SHIPPING_THRESHOLD_CENTS, 15000),
+  );
 
   // Get latest open cart (create one if missing)
   const cartRes = await db.execute(sql`
@@ -68,9 +74,7 @@ export default async function CartReviewPage() {
     return (
       <main className="mx-auto max-w-4xl px-4 py-10">
         <h1 className="text-2xl font-semibold">Review your cart</h1>
-        <p className="mt-3 text-sm opacity-80">
-          Could not load your cart. Please try again.
-        </p>
+        <p className="mt-3 text-sm opacity-80">Could not load your cart. Please try again.</p>
       </main>
     );
   }
@@ -101,8 +105,10 @@ export default async function CartReviewPage() {
     FROM cart_lines cl
     JOIN products p ON p.id = cl.listing_id
     LEFT JOIN first_image fi ON fi.product_id = p.id
-    WHERE cl.cart_id = ${cartId}
+    WHERE cl.cart_id = ${cartId}::uuid
       AND cl.listing_id IS NOT NULL
+      AND p.status = 'active'::product_status
+      AND p.quantity > 0
     ORDER BY cl.created_at ASC
   `);
 
@@ -142,22 +148,29 @@ export default async function CartReviewPage() {
 
     // fallback weights if any product is missing weight
     const fallbackW =
-      String(shippingClass || "").toLowerCase() === "graded" ? 0.5 :
-      String(shippingClass || "").toLowerCase() === "etb" ? 2.0 :
-      String(shippingClass || "").toLowerCase() === "booster_box" ? 3.0 :
-      String(shippingClass || "").toLowerCase() === "accessory" ? 0.5 :
-      0.25;
+      String(shippingClass || "").toLowerCase() === "graded"
+        ? 0.5
+        : String(shippingClass || "").toLowerCase() === "etb"
+          ? 2.0
+          : String(shippingClass || "").toLowerCase() === "booster_box"
+            ? 3.0
+            : String(shippingClass || "").toLowerCase() === "accessory"
+              ? 0.5
+              : 0.25;
 
     totalWeight += (w > 0 ? w : fallbackW) * qty;
 
     insuranceItems.push({ shippingClass, qty });
   }
 
-  const baseShippingCents = baseShippingCentsForWeight(totalWeight);
+  // Match checkout sessions logic: free shipping threshold applies to base shipping (not insurance)
+  const freeShipping = subtotalCents >= FREE_SHIPPING_THRESHOLD_CENTS;
+
+  const baseShippingCents = freeShipping ? 0 : baseShippingCentsForWeight(totalWeight);
   const insuranceCents = insuranceCentsForShipment(insuranceItems);
   const shippingTotalCents = baseShippingCents + insuranceCents;
 
-  // Taxes: leave 0 for now (until you add tax engine)
+  // Taxes: leave 0 for now (Stripe will calculate real tax at checkout)
   const taxCents = 0;
 
   const estimatedTotalCents = subtotalCents + shippingTotalCents + taxCents;
@@ -169,6 +182,9 @@ export default async function CartReviewPage() {
           <h1 className="text-2xl font-semibold">Review your order</h1>
           <p className="mt-2 text-sm opacity-80">
             Shipping is estimated using weight + your USPS Ground Advantage tiers.
+          </p>
+          <p className="mt-1 text-xs opacity-70">
+            Tax is calculated at checkout.
           </p>
         </div>
 
@@ -227,9 +243,7 @@ export default async function CartReviewPage() {
 
                     <div className="mt-2 text-xs opacity-70">
                       Weight:{" "}
-                      {r.shipping_weight_lbs
-                        ? `${Number(r.shipping_weight_lbs)} lb`
-                        : "default"}
+                      {r.shipping_weight_lbs ? `${Number(r.shipping_weight_lbs)} lb` : "default"}
                     </div>
                   </div>
                 </div>
@@ -249,8 +263,8 @@ export default async function CartReviewPage() {
             </div>
 
             <div className="flex justify-between">
-              <span>Estimated shipping</span>
-              <span>{money(baseShippingCents)}</span>
+              <span>Shipping</span>
+              <span>{freeShipping ? "$0.00" : money(baseShippingCents)}</span>
             </div>
 
             <div className="flex justify-between">
@@ -259,33 +273,34 @@ export default async function CartReviewPage() {
             </div>
 
             <div className="flex justify-between">
-              <span>Estimated tax</span>
+              <span>Final tax and shipping confirmed at checkout</span>
               <span>{money(taxCents)}</span>
             </div>
 
-            <div className="my-3 border-t pt-3 flex justify-between font-semibold">
+            <div className="my-3 flex justify-between border-t pt-3 font-semibold">
               <span>Estimated total</span>
               <span>{money(estimatedTotalCents)}</span>
             </div>
 
-            <div className="text-xs opacity-70">
-              Total weight: {Number(totalWeight.toFixed(2))} lb
-            </div>
+            
+
+
+            {freeShipping && (
+              <div className="text-xs opacity-70">
+                Free shipping applied (subtotal ≥ {money(FREE_SHIPPING_THRESHOLD_CENTS)}).
+              </div>
+            )}
           </div>
 
           <div className="mt-5 grid gap-2">
-           <form action="/api/checkout/sessions" method="POST">
-            <button
-                type="submit"
-                className="inline-flex w-full items-center justify-center rounded-md border px-4 py-2 text-sm font-medium"
-            >
-                Proceed to checkout
-            </button>
-            </form>
+            <CheckoutButton mode="checkout" />
 
-            <div className="text-xs opacity-70">
-              Insurance is automatically added when your cart includes graded cards.
-            </div>
+
+            {insuranceCents > 0 && (
+              <div className="text-xs opacity-70">
+                Insurance is automatically added for graded cards.
+              </div>
+            )}
           </div>
         </aside>
       </div>

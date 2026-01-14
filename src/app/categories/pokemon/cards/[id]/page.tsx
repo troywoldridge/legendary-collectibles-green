@@ -1,11 +1,13 @@
-// src/app/categories/pokemon/cards/[id]/page.tsx
 /* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
 
 import type { Metadata } from "next";
 import Script from "next/script";
 import Image from "next/image";
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { unstable_noStore as noStore } from "next/cache";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
@@ -86,8 +88,9 @@ type MarketItemRow = {
 };
 
 /* ------------------------------------------------
-   SEO: Dynamic metadata (per card)
+   SEO helpers (absolute URLs) + lightweight meta query
 ------------------------------------------------- */
+
 type CardMetaRow = {
   id: string;
   name: string | null;
@@ -99,7 +102,28 @@ type CardMetaRow = {
   large_image: string | null;
 };
 
+function absBase() {
+  return (
+    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+    process.env.SITE_URL?.replace(/\/+$/, "") ||
+    site?.url?.replace(/\/+$/, "") ||
+    "https://legendary-collectibles.com"
+  );
+}
+
+function absUrl(path: string) {
+  const base = absBase().replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function absMaybe(urlOrPath: string | null | undefined) {
+  if (!urlOrPath) return absUrl("/og-image.png");
+  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
+  return absUrl(urlOrPath);
+}
+
 async function getCardMeta(cardId: string): Promise<CardMetaRow | null> {
+  noStore();
   return (
     (
       await db.execute<CardMetaRow>(sql`
@@ -120,43 +144,33 @@ async function getCardMeta(cardId: string): Promise<CardMetaRow | null> {
   );
 }
 
-function absBase() {
-  return (
-    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
-    (site?.url ? site.url.replace(/\/+$/, "") : "") ||
-    "https://legendary-collectibles.com"
-  );
-}
-
-function absUrl(path: string) {
-  const base = absBase().replace(/\/+$/, "");
-  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
-}
-
-function absMaybe(urlOrPath: string | null | undefined) {
-  if (!urlOrPath) return absUrl("/og-image.png");
-  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
-  return absUrl(urlOrPath);
-}
-
 export async function generateMetadata({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }): Promise<Metadata> {
-  const raw = decodeURIComponent(params.id ?? "").trim();
+  const p = await params;
+  const raw = decodeURIComponent(String(p?.id ?? "")).trim();
+
+  if (!raw) {
+    return {
+      title: `Pokémon Cards | ${site.name}`,
+      description: `Browse Pokémon cards, track prices, manage your collection, and shop on ${site.name}.`,
+      alternates: { canonical: absUrl("/categories/pokemon/cards") },
+      robots: { index: false, follow: true },
+    };
+  }
+
   const card = await getCardMeta(raw);
 
-  const canonical = absUrl(
-    `/categories/pokemon/cards/${encodeURIComponent(card?.id ?? raw)}`
-  );
+  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card?.id ?? raw)}`);
 
   if (!card) {
     return {
-      title: `Pokémon Card Details | ${site.name}`,
-      description: `Browse Pokémon cards, track prices, manage your collection, and shop on ${site.name}.`,
+      title: `Pokémon Card Not Found | ${site.name}`,
+      description: `We couldn’t find that Pokémon card. Browse cards and try again.`,
       alternates: { canonical },
-      robots: { index: true, follow: true },
+      robots: { index: false, follow: true },
     };
   }
 
@@ -168,21 +182,20 @@ export async function generateMetadata({
     `View ${name} Pokémon card details`,
     card.rarity ? `rarity: ${card.rarity}` : null,
     card.set_name ? `set: ${card.set_name}` : null,
-    `market prices and trends`,
-    `add to your collection`,
+    "market prices and trends",
+    "add to your collection",
   ]
     .filter(Boolean)
     .join(", ")
     .concat(".");
 
-  const ogImage = absMaybe(
-    card.large_image || card.small_image || site.ogImage || "/og-image.png"
-  );
+  const ogImage = absMaybe(card.large_image || card.small_image || site.ogImage || "/og-image.png");
 
   return {
     title,
     description,
     alternates: { canonical },
+    robots: { index: true, follow: true },
     openGraph: {
       type: "website",
       url: canonical,
@@ -316,6 +329,7 @@ function pickBestOffer(rows: OfferRow[]): {
 }
 
 async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | null> {
+  noStore();
   return (
     (
       await db.execute<MarketItemRow>(sql`
@@ -330,6 +344,7 @@ async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | 
 }
 
 async function getSchemaOfferFromTcgplayer(cardId: string) {
+  noStore();
   const rows =
     (
       await db.execute<OfferRow>(sql`
@@ -355,6 +370,7 @@ async function getSchemaOfferFromTcgplayer(cardId: string) {
 }
 
 async function getCardById(cardId: string): Promise<CardRow | null> {
+  noStore();
   return (
     (
       await db.execute<CardRow>(sql`
@@ -403,6 +419,7 @@ async function getCardById(cardId: string): Promise<CardRow | null> {
 }
 
 async function getVariantsByCardId(cardId: string): Promise<PokemonVariants> {
+  noStore();
   const row =
     (
       await db.execute<{
@@ -433,6 +450,7 @@ async function getVariantsByCardId(cardId: string): Promise<PokemonVariants> {
 async function getOwnedVariantCounts(userId: string | null, cardId: string) {
   if (!userId) return {};
 
+  noStore();
   const res = await db.execute<{ variant_type: string | null; qty: number }>(sql`
     SELECT variant_type, COALESCE(SUM(quantity),0)::int AS qty
     FROM public.user_collection_items
@@ -496,23 +514,30 @@ export default async function PokemonCardDetailPage({
   params: Promise<{ id: string }>;
   searchParams: Promise<SearchParams>;
 }) {
-  const { id: rawId } = await params;
+  const p = await params;
   const sp = await searchParams;
 
+  const rawId = decodeURIComponent(String(p?.id ?? "")).trim();
   const { userId } = await auth();
   const canSave = !!userId;
 
+  // ✅ Canonical ignores display/currency -> redirect if present
+  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(rawId)}`);
+  const hasUiCurrencyParams = sp?.display !== undefined || sp?.currency !== undefined;
+
+  if (hasUiCurrencyParams) {
+    redirect(`/categories/pokemon/cards/${encodeURIComponent(rawId)}`);
+  }
+
   const display = readDisplay(sp);
-  const id = decodeURIComponent(rawId ?? "").trim();
 
   const [card, variants, offer] = await Promise.all([
-    getCardById(id),
-    getVariantsByCardId(id),
-    getSchemaOfferFromTcgplayer(id),
+    getCardById(rawId),
+    getVariantsByCardId(rawId),
+    getSchemaOfferFromTcgplayer(rawId),
   ]);
 
   if (!card) {
-    const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(id)}`);
     return (
       <section className="space-y-6">
         <Script
@@ -530,7 +555,7 @@ export default async function PokemonCardDetailPage({
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
           <h1 className="text-2xl font-bold text-white">Card not found</h1>
           <p className="mt-2 break-all text-sm text-white/70">
-            Looked up: <code>{id}</code>
+            Looked up: <code>{rawId}</code>
           </p>
           <Link href="/categories/pokemon/cards" className="mt-4 inline-block text-sky-300 hover:underline">
             ← Back to cards
@@ -541,7 +566,7 @@ export default async function PokemonCardDetailPage({
   }
 
   const cardName = (card.name ?? card.id).trim();
-  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card.id)}`);
+  const canonicalCard = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card.id)}`);
   const cover = bestImage(card);
   const coverAbs = cover ? absMaybe(cover) : null;
 
@@ -573,11 +598,10 @@ export default async function PokemonCardDetailPage({
     }
   }
 
-  const marketUsd =
-    offer.price != null && Number.isFinite(offer.price) && offer.price > 0 ? offer.price : null;
+  const marketUsd = offer.price != null && Number.isFinite(offer.price) && offer.price > 0 ? offer.price : null;
 
   // ---------------------------
-  // JSON-LD: Breadcrumbs + Product (+Offer if price exists)
+  // JSON-LD: Breadcrumbs + WebPage + Card entity (NOT Product)
   // ---------------------------
   const productName = cardName;
   const sku = card.id;
@@ -590,20 +614,23 @@ export default async function PokemonCardDetailPage({
       { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
       { "@type": "ListItem", position: 3, name: "Pokémon", item: absUrl("/categories/pokemon/sets") },
       { "@type": "ListItem", position: 4, name: "Pokémon Cards", item: absUrl("/categories/pokemon/cards") },
-      { "@type": "ListItem", position: 5, name: productName, item: canonical },
+      { "@type": "ListItem", position: 5, name: productName, item: canonicalCard },
     ],
   };
 
+  // ✅ IMPORTANT: This page is informational/collection oriented, not a store offer page.
+  // Using Product without offers triggers Google "Either offers/review/aggregateRating required".
+  const cardEntityId = `${canonicalCard}#card`;
+
   const productJsonLd: any = {
     "@context": "https://schema.org",
-    "@type": "Product",
-    "@id": `${canonical}#product`,
+    "@type": "Thing",
+    "@id": cardEntityId,
     name: productName,
-    sku,
-    url: canonical,
+    // keep sku-like identifier as a property (fine for Thing)
+    identifier: sku,
+    url: canonicalCard,
     image: coverAbs ? [coverAbs] : undefined,
-    category: "Pokémon Trading Card",
-    brand: { "@type": "Brand", name: "Pokémon" },
     description: [
       card.rarity ? `Rarity: ${card.rarity}` : null,
       card.set_name ? `Set: ${card.set_name}` : null,
@@ -621,40 +648,20 @@ export default async function PokemonCardDetailPage({
       card.supertype ? { "@type": "PropertyValue", name: "Supertype", value: card.supertype } : null,
       types.length ? { "@type": "PropertyValue", name: "Types", value: types.join(", ") } : null,
       subtypes.length ? { "@type": "PropertyValue", name: "Subtypes", value: subtypes.join(", ") } : null,
-      card.regulation_mark
-        ? { "@type": "PropertyValue", name: "Regulation Mark", value: card.regulation_mark }
-        : null,
-      offer.variantType
-        ? { "@type": "PropertyValue", name: "Variant Type (priced)", value: offer.variantType }
-        : null,
+      card.regulation_mark ? { "@type": "PropertyValue", name: "Regulation Mark", value: card.regulation_mark } : null,
+      offer.variantType ? { "@type": "PropertyValue", name: "Variant Type (priced)", value: offer.variantType } : null,
     ].filter(Boolean),
   };
-
-  if (offer.price != null && offer.price > 0) {
-    productJsonLd.offers = {
-      "@type": "Offer",
-      url: canonical,
-      priceCurrency: offer.currency || "USD",
-      price: offer.price.toFixed(2),
-      availability: "https://schema.org/InStock",
-      itemCondition: "https://schema.org/UsedCondition",
-      seller: {
-        "@type": "Organization",
-        name: site.name ?? "Legendary Collectibles",
-        url: absBase(),
-      },
-    };
-  }
 
   const webPageJsonLd = {
     "@context": "https://schema.org",
     "@type": "WebPage",
-    "@id": `${canonical}#webpage`,
-    url: canonical,
+    "@id": `${canonicalCard}#webpage`,
+    url: canonicalCard,
     name: `${productName} — Pokémon Card`,
     isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: absBase() },
     primaryImageOfPage: coverAbs ? { "@type": "ImageObject", url: coverAbs } : undefined,
-    mainEntity: { "@id": `${canonical}#product` },
+    mainEntity: { "@id": cardEntityId },
   };
 
   return (
@@ -671,7 +678,7 @@ export default async function PokemonCardDetailPage({
         dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }}
       />
       <Script
-        id="pokemon-card-product-jsonld"
+        id="pokemon-card-entity-jsonld"
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
       />
@@ -679,13 +686,21 @@ export default async function PokemonCardDetailPage({
       {/* Visible breadcrumbs */}
       <nav className="text-xs text-white/70">
         <div className="flex flex-wrap items-center gap-2">
-          <Link href="/" className="hover:underline">Home</Link>
+          <Link href="/" className="hover:underline">
+            Home
+          </Link>
           <span className="text-white/40">/</span>
-          <Link href="/categories" className="hover:underline">Categories</Link>
+          <Link href="/categories" className="hover:underline">
+            Categories
+          </Link>
           <span className="text-white/40">/</span>
-          <Link href="/categories/pokemon/sets" className="hover:underline">Pokémon</Link>
+          <Link href="/categories/pokemon/sets" className="hover:underline">
+            Pokémon
+          </Link>
           <span className="text-white/40">/</span>
-          <Link href="/categories/pokemon/cards" className="hover:underline">Cards</Link>
+          <Link href="/categories/pokemon/cards" className="hover:underline">
+            Cards
+          </Link>
           <span className="text-white/40">/</span>
           <span className="text-white/90">{productName}</span>
         </div>
@@ -694,7 +709,7 @@ export default async function PokemonCardDetailPage({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="relative mx-auto w-full max-w-md" style={{ aspectRatio: "3 / 4" }}>
+            <div className="relative mx-auto aspect-[3/4] w-full max-w-md">
               {cover ? (
                 <Image
                   src={cover}
@@ -841,16 +856,14 @@ export default async function PokemonCardDetailPage({
 
           <MarketPrices category="pokemon" cardId={card.id} display={display} />
 
-          {/* ✅ Market Value (Estimate) — plan gated */}
           <MarketValuePanel
-              game="pokemon"
-              canonicalId={card.id}
-              title="Market Value"
-              showDisclaimer
-              canSeeRanges={planTier === "collector" || planTier === "pro"}
-              canSeeConfidence={planTier === "pro"}
-            />
-
+            game="pokemon"
+            canonicalId={card.id}
+            title="Market Value"
+            showDisclaimer
+            canSeeRanges={planTier === "collector" || planTier === "pro"}
+            canSeeConfidence={planTier === "pro"}
+          />
         </div>
       </div>
 

@@ -4,7 +4,7 @@ import "server-only";
 import type { Metadata } from "next";
 import Link from "next/link";
 import Script from "next/script";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { unstable_noStore as noStore } from "next/cache";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
@@ -36,12 +36,14 @@ type CardThumb = {
 };
 
 const PER_PAGE_OPTIONS = [30, 60, 120, 240] as const;
+const DEFAULT_PP = 60;
 
 /* ---------------- SEO helpers ---------------- */
 function absUrl(path: string) {
   const base = (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
 }
+
 function absMaybe(urlOrPath: string) {
   if (!urlOrPath) return absUrl("/og-image.png");
   if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
@@ -56,8 +58,8 @@ function lastVal(v?: string | string[]) {
 
 function parsePerPage(sp: SearchParams) {
   const raw = lastVal(sp?.pp) ?? lastVal(sp?.perPage);
-  const n = Number(raw ?? 60);
-  return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : 60;
+  const n = Number(raw ?? DEFAULT_PP);
+  return (PER_PAGE_OPTIONS as readonly number[]).includes(n) ? n : DEFAULT_PP;
 }
 
 function parsePage(sp: SearchParams) {
@@ -66,17 +68,30 @@ function parsePage(sp: SearchParams) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
+/**
+ * ✅ Link builder: keeps URLs clean by dropping default query.
+ * Default is page=1 and pp=DEFAULT_PP.
+ */
 function buildHref(base: string, qs: { p?: number; pp?: number }) {
+  const page = qs.p ?? 1;
+  const pp = qs.pp ?? DEFAULT_PP;
+
+  if (page === 1 && pp === DEFAULT_PP) return base;
+
   const p = new URLSearchParams();
-  p.set("p", String(qs.p ?? 1));
-  p.set("pp", String(qs.pp ?? 60));
-  const s = p.toString();
-  return s ? `${base}?${s}` : base;
+  p.set("p", String(page));
+  p.set("pp", String(pp));
+  return `${base}?${p.toString()}`;
 }
 
 function httpsify(u?: string | null) {
   if (!u) return null;
   return u.replace(/^http:\/\//i, "https://");
+}
+
+function canonicalSetAbs(baseHref: string, page: number, perPage: number) {
+  if (page === 1 && perPage === DEFAULT_PP) return absUrl(baseHref);
+  return absUrl(`${baseHref}?p=${page}&pp=${perPage}`);
 }
 
 /* ---------------- DB ---------------- */
@@ -164,7 +179,12 @@ export async function generateMetadata({
 
   const id = decodeURIComponent(String(p.id ?? "")).trim();
   if (!id) {
-    return { alternates: { canonical: absUrl("/categories/mtg/sets") } };
+    return {
+      title: `MTG Sets | ${site.name}`,
+      description: "Browse Magic: The Gathering sets.",
+      alternates: { canonical: absUrl("/categories/mtg/sets") },
+      robots: { index: false, follow: true },
+    };
   }
 
   const perPage = parsePerPage(sp);
@@ -173,14 +193,14 @@ export async function generateMetadata({
   const s = await getSet(id);
 
   const baseHref = `/categories/mtg/sets/${encodeURIComponent(id)}`;
-  const canonical = absUrl(`${baseHref}?p=${page}&pp=${perPage}`);
+  const canonical = canonicalSetAbs(baseHref, page, perPage);
 
   if (!s) {
     return {
       title: `MTG Set Not Found | ${site.name}`,
       description: "We couldn’t find that MTG set. Browse sets and try again.",
       alternates: { canonical },
-      robots: { index: true, follow: true },
+      robots: { index: false, follow: true },
     };
   }
 
@@ -202,6 +222,7 @@ export async function generateMetadata({
     title,
     description: desc,
     alternates: { canonical },
+    robots: { index: true, follow: true },
     openGraph: {
       title,
       description: desc,
@@ -219,6 +240,7 @@ export async function generateMetadata({
   };
 }
 
+
 /* ---------------- Page ---------------- */
 export default async function MtgSetDetailPage({
   params,
@@ -230,30 +252,52 @@ export default async function MtgSetDetailPage({
   const { id: rawId } = await params;
   const sp = await searchParams;
 
-  const id = decodeURIComponent(String(rawId ?? "")).trim();
-  if (!id) notFound();
+  const requestedId = decodeURIComponent(String(rawId ?? "")).trim();
+  if (!requestedId) notFound();
 
-  const perPage = parsePerPage(sp);
-  const reqPage = parsePage(sp);
+  const requestedPerPage = parsePerPage(sp);
+  const requestedPage = parsePage(sp);
 
-  const s = await getSet(id);
+  const s = await getSet(requestedId);
   if (!s) notFound();
 
   const total = await getTotalCards(s.code);
-  const totalPages = Math.max(1, Math.ceil(total / perPage));
-  const page = Math.max(1, Math.min(totalPages, reqPage));
-  const offset = (page - 1) * perPage;
+  const totalPages = Math.max(1, Math.ceil(total / requestedPerPage));
 
+  // Clamp page
+  const page = Math.max(1, Math.min(totalPages, requestedPage));
+  const perPage = requestedPerPage;
+
+  // Canonical base uses normalized set code from DB
+  const baseHref = `/categories/mtg/sets/${encodeURIComponent(s.code)}`;
+  const canonicalRel = buildHref(baseHref, { p: page, pp: perPage }); // relative for redirect
+  const canonicalAbs = canonicalSetAbs(baseHref, page, perPage); // absolute for JSON-LD
+
+  // ✅ Redirect any non-canonical query shape to the canonical URL
+  const hasAliasParams = sp?.perPage !== undefined || sp?.page !== undefined;
+  const needsClampRedirect = page !== requestedPage;
+
+  const hasAnyQuery =
+    sp?.p !== undefined ||
+    sp?.pp !== undefined ||
+    sp?.page !== undefined ||
+    sp?.perPage !== undefined;
+
+  const shouldDropDefaultQuery = page === 1 && perPage === DEFAULT_PP && hasAnyQuery;
+
+  if (hasAliasParams || needsClampRedirect || shouldDropDefaultQuery) {
+    redirect(canonicalRel);
+  }
+
+  const offset = (page - 1) * perPage;
   const rows = await getCardsInSet({ setCode: s.code, offset, limit: perPage });
 
-  const baseHref = `/categories/mtg/sets/${encodeURIComponent(s.code)}`;
   const pricesHref = `${baseHref}/prices`;
 
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + perPage, total);
 
   // --- JSON-LD: Breadcrumbs + CollectionPage/ItemList ---
-  const canonicalUrl = absUrl(`${baseHref}?p=${page}&pp=${perPage}`);
   const listItems = rows.map((c, i) => ({
     "@type": "ListItem",
     position: offset + i + 1,
@@ -269,7 +313,7 @@ export default async function MtgSetDetailPage({
       { "@type": "ListItem", position: 1, name: "Home", item: absUrl("/") },
       { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
       { "@type": "ListItem", position: 3, name: "MTG Sets", item: absUrl("/categories/mtg/sets") },
-      { "@type": "ListItem", position: 4, name: s.name ?? s.code.toUpperCase(), item: canonicalUrl },
+      { "@type": "ListItem", position: 4, name: s.name ?? s.code.toUpperCase(), item: canonicalAbs },
     ],
   };
 
@@ -278,7 +322,7 @@ export default async function MtgSetDetailPage({
     "@type": "CollectionPage",
     name: `${s.name ?? s.code.toUpperCase()} (${s.code.toUpperCase()}) — MTG Set Cards`,
     description: `Browse Magic: The Gathering cards in ${s.name ?? s.code.toUpperCase()}.`,
-    url: canonicalUrl,
+    url: canonicalAbs,
     mainEntity: {
       "@type": "ItemList",
       numberOfItems: total,
@@ -306,21 +350,19 @@ export default async function MtgSetDetailPage({
             {s.name ?? s.code.toUpperCase()} ({s.code.toUpperCase()})
           </h1>
           <div className="text-sm text-white/70">
-            {[
-              s.set_type ?? undefined,
-              s.block ? `Block: ${s.block}` : undefined,
-              s.released_at ? `Released: ${s.released_at}` : undefined,
-            ]
+            {[s.set_type ?? undefined, s.block ? `Block: ${s.block}` : undefined, s.released_at ? `Released: ${s.released_at}` : undefined]
               .filter(Boolean)
               .join(" • ")}
           </div>
-          <div className="mt-1 text-sm text-white/80">
-            {total.toLocaleString()} cards
-          </div>
+          <div className="mt-1 text-sm text-white/80">{total.toLocaleString()} cards</div>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <Link href={pricesHref} className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/20" prefetch={false}>
+          <Link
+            href={pricesHref}
+            className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white hover:bg-white/20"
+            prefetch={false}
+          >
             View set price averages →
           </Link>
           <Link href="/categories/mtg/sets" className="text-sky-300 hover:underline" prefetch={false}>
@@ -330,9 +372,7 @@ export default async function MtgSetDetailPage({
       </div>
 
       {total === 0 ? (
-        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90">
-          No cards in this set yet.
-        </div>
+        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90">No cards in this set yet.</div>
       ) : (
         <>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -343,7 +383,9 @@ export default async function MtgSetDetailPage({
             {/* Per-page */}
             <form action={baseHref} method="get" className="flex items-center gap-2">
               <input type="hidden" name="p" value="1" />
-              <label htmlFor="pp" className="sr-only">Per page</label>
+              <label htmlFor="pp" className="sr-only">
+                Per page
+              </label>
               <select
                 id="pp"
                 name="pp"
@@ -351,7 +393,9 @@ export default async function MtgSetDetailPage({
                 className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-white"
               >
                 {PER_PAGE_OPTIONS.map((n) => (
-                  <option key={n} value={n}>{n}</option>
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
                 ))}
               </select>
               <button

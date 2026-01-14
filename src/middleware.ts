@@ -27,6 +27,55 @@ function getClientIp(req: NextRequest): string {
   return "unknown";
 }
 
+function isAuthPage(pathname: string) {
+  return (
+    pathname.startsWith("/sign-in") ||
+    pathname.startsWith("/sign-up") ||
+    pathname.startsWith("/post-auth")
+  );
+}
+
+/**
+ * ✅ Ensure redirect_url is ALWAYS a relative path (never absolute).
+ * - Converts "http(s)://host/path?x=y" -> "/path?x=y"
+ * - Converts "localhost / 127.0.0.1" redirects -> "/"
+ * - Ensures it starts with "/"
+ */
+function sanitizeRedirectUrl(raw: string, req: NextRequest): string {
+  const v = String(raw ?? "").trim();
+  if (!v) return "/";
+
+  // If absolute URL, strip to path+query
+  if (/^https?:\/\//i.test(v)) {
+    try {
+      const u = new URL(v);
+
+      // Block local dev URLs in production (these caused your Search Console noise)
+      const host = (u.hostname || "").toLowerCase();
+      const isLocal =
+        host === "localhost" ||
+        host === "127.0.0.1" ||
+        host.endsWith(".local") ||
+        host === req.nextUrl.hostname.toLowerCase() ? false : false;
+
+      // If it's explicitly localhost-ish, just go home.
+      if (host === "localhost" || host === "127.0.0.1" || host.endsWith(".local")) {
+        return "/";
+      }
+
+      const path = u.pathname || "/";
+      const qs = u.search || "";
+      return `${path.startsWith("/") ? path : `/${path}`}${qs}`;
+    } catch {
+      return "/";
+    }
+  }
+
+  // If already relative, ensure it starts with "/"
+  if (!v.startsWith("/")) return `/${v}`;
+  return v;
+}
+
 export default clerkMiddleware(async (auth, req: NextRequest) => {
   const p = req.nextUrl.pathname;
 
@@ -64,6 +113,14 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
     );
   }
 
+  // ✅ Extra: set a strong noindex header on auth utility pages
+  // (metadata is good, but this header is even more crawler-proof)
+  if (isAuthPage(p)) {
+    const res = NextResponse.next();
+    res.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet");
+    return res;
+  }
+
   // ✅ Public by default
   if (!isProtectedRoute(req)) return NextResponse.next();
 
@@ -77,12 +134,14 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Pages: redirect to sign-in with return url
+    // Pages: redirect to sign-in with return url (sanitized)
     const redirectPath = `${req.nextUrl.pathname}${req.nextUrl.search}`;
     const signInUrl = req.nextUrl.clone();
     signInUrl.pathname = "/sign-in";
     signInUrl.search = "";
-    signInUrl.searchParams.set("redirect_url", redirectPath);
+
+    // ✅ Always relative, never absolute
+    signInUrl.searchParams.set("redirect_url", sanitizeRedirectUrl(redirectPath, req));
 
     console.log("[AUTH] redirect", "ip=", ip, req.method, p, "-> /sign-in");
     return NextResponse.redirect(signInUrl);

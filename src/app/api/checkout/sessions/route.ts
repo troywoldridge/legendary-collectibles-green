@@ -13,9 +13,8 @@ import { insuranceCentsForShipment } from "@/lib/shipping/insurance";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// ---- helpers ----
 function s(v: unknown): string {
-  return String(v ?? "");
+  return String(v ?? "").trim();
 }
 function n(v: unknown, fallback = 0): number {
   const x = Number(v);
@@ -37,22 +36,17 @@ function toNumber(v: unknown): number {
   return Number.isFinite(x) ? x : 0;
 }
 
-// ---- config ----
-const STRIPE_SECRET_KEY = s(process.env.STRIPE_SECRET_KEY).trim();
-
+const STRIPE_SECRET_KEY = s(process.env.STRIPE_SECRET_KEY);
 const SITE_URL = s(
   process.env.NEXT_PUBLIC_SITE_URL ||
     process.env.SITE_URL ||
     "https://legendary-collectibles.com",
-)
-  .trim()
-  .replace(/\/+$/, "");
+).replace(/\/+$/, "");
 
 const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: "2025-10-29.clover",
 });
 
-// ---- db types ----
 type CartRow = { id: string };
 
 type LineRow = {
@@ -60,14 +54,13 @@ type LineRow = {
   qty: number;
   title: string;
   priceCents: number;
-  imageUrl: string | null;
   slug: string | null;
-
   shippingWeightLbs: number | null;
   shippingClass: string | null;
 };
 
-export async function POST() {
+export async function POST(req: Request) {
+
   try {
     if (!STRIPE_SECRET_KEY) {
       return NextResponse.json(
@@ -87,7 +80,7 @@ export async function POST() {
     );
     const ALLOW_INTERNATIONAL = toBool(process.env.ALLOW_INTERNATIONAL, false);
 
-    // 1) active cart
+    // 1) active cart for this user
     const cartRes = await db.execute<CartRow>(sql`
       select id
       from carts
@@ -97,30 +90,29 @@ export async function POST() {
       limit 1
     `);
 
-    const cartId = s(cartRes.rows?.[0]?.id).trim();
+    const cartId = s(cartRes.rows?.[0]?.id);
     if (!cartId) {
       return NextResponse.json({ error: "Cart is empty" }, { status: 400 });
     }
 
-    // 2) purchasable lines: cart_lines.listing_id -> products.id
+    // 2) purchasable lines
     const linesRes = await db.execute<LineRow>(sql`
       select
         p.id as "productId",
         cl.qty as "qty",
         p.title as "title",
         p.price_cents as "priceCents",
-        -- image_url isn't on products in your current schema; use product_images first if you want.
-        null::text as "imageUrl",
         p.slug as "slug",
         p.shipping_weight_lbs as "shippingWeightLbs",
         p.shipping_class as "shippingClass"
       from cart_lines cl
       join products p on p.id = cl.listing_id
-      where cl.cart_id = ${cartId}
+      where cl.cart_id = ${cartId}::uuid
         and cl.listing_id is not null
         and p.price_cents is not null
         and p.price_cents > 0
         and p.status = 'active'::product_status
+        and p.quantity > 0
       order by cl.id asc
     `);
 
@@ -132,7 +124,7 @@ export async function POST() {
       );
     }
 
-    // --- subtotal + weight + insurance ---
+    // subtotal + weight + insurance
     let subtotalCents = 0;
     let totalWeight = 0;
 
@@ -146,7 +138,6 @@ export async function POST() {
       const shippingClass = r.shippingClass ? String(r.shippingClass) : null;
       const w = toNumber(r.shippingWeightLbs);
 
-      // fallback weights (paranoid safety)
       const fallbackW =
         String(shippingClass || "").toLowerCase() === "graded" ? 0.5 :
         String(shippingClass || "").toLowerCase() === "etb" ? 2.0 :
@@ -158,41 +149,34 @@ export async function POST() {
       insuranceItems.push({ shippingClass, qty });
     }
 
-    const insuranceCents = insuranceCentsForShipment(insuranceItems);
     const freeShipping = subtotalCents >= FREE_SHIPPING_THRESHOLD_CENTS;
     const baseShippingCents = freeShipping ? 0 : baseShippingCentsForWeight(totalWeight);
+    const insuranceCents = insuranceCentsForShipment(insuranceItems);
 
-    // Stripe line_items for products
-    const line_items: Stripe.Checkout.SessionCreateParams.LineItem[] = rows.map(
-      (r) => {
-        const qty = Math.max(1, Math.min(99, n(r.qty, 1)));
-        const unitAmount = Math.max(1, n(r.priceCents, 0));
-        const title = s(r.title).trim() || "Item";
+    // Stripe line_items
+    const line_items: Stripe.Checkout.SessionCreateParams.LineItem[] = rows.map((r) => {
+      const qty = Math.max(1, Math.min(99, n(r.qty, 1)));
+      const unitAmount = Math.max(1, n(r.priceCents, 0));
+      const title = s(r.title) || "Item";
 
-        const product_data: Stripe.Checkout.SessionCreateParams.LineItem.PriceData.ProductData =
-          { name: title };
+      return {
+        quantity: qty,
+        price_data: {
+          currency: "usd",
+          unit_amount: unitAmount,
+          product_data: { name: title },
+        },
+      };
+    });
 
-        return {
-          quantity: qty,
-          price_data: {
-            currency: "usd",
-            unit_amount: unitAmount,
-            product_data,
-          },
-        };
-      },
-    );
-
-    // Append shipping as a line item (so it matches your exact rules)
+    // shipping line item
     line_items.push({
       quantity: 1,
       price_data: {
         currency: "usd",
         unit_amount: Math.max(0, Math.floor(baseShippingCents)),
         product_data: {
-          name: freeShipping
-            ? "Shipping (Free)"
-            : "Shipping (USPS Ground Advantage)",
+          name: freeShipping ? "Shipping (Free)" : "Shipping (USPS Ground Advantage)",
           metadata: {
             model: "weight_tiers",
             weight_lbs: String(Number(totalWeight.toFixed(2))),
@@ -201,7 +185,7 @@ export async function POST() {
       },
     });
 
-    // Append insurance if needed
+    // insurance line item
     if (insuranceCents > 0) {
       line_items.push({
         quantity: 1,
@@ -216,34 +200,30 @@ export async function POST() {
       });
     }
 
-    // Allowed countries (typed)
     const allowed_countries: Stripe.Checkout.SessionCreateParams.ShippingAddressCollection.AllowedCountry[] =
       ALLOW_INTERNATIONAL ? ["US", "CA"] : ["US"];
 
-    // Snapshot items for webhook mapping
     const items_json = JSON.stringify(
       rows.map((r) => ({
         productId: String(r.productId),
         qty: Math.max(1, n(r.qty, 1)),
         unitCents: Math.max(0, n(r.priceCents, 0)),
-        title: s(r.title).trim() || "Item",
+        title: s(r.title) || "Item",
         shippingClass: r.shippingClass ? String(r.shippingClass) : null,
         shippingWeightLbs: r.shippingWeightLbs ? Number(r.shippingWeightLbs) : null,
       })),
     );
 
-    // Create checkout session
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       line_items,
 
-      // Collect address (useful for tax + fulfillment), but don't use Stripe shipping_options
+      // Collect address
       shipping_address_collection: { allowed_countries },
 
       // Stripe Tax
-      automatic_tax: { enabled: true },
-      customer_update: { address: "auto", name: "auto" },
       billing_address_collection: "required",
+      automatic_tax: { enabled: true },
 
       success_url: `${SITE_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${SITE_URL}/cart/review`,
@@ -251,21 +231,19 @@ export async function POST() {
       metadata: {
         cartId: String(cartId),
         userId: String(userId),
-        subtotalCents: String(Math.max(0, Math.floor(subtotalCents))),
         items_json,
-
+        subtotalCents: String(Math.max(0, Math.floor(subtotalCents))),
         shippingModel: "weight_tiers+insurance_line_items",
         freeShippingThresholdCents: String(FREE_SHIPPING_THRESHOLD_CENTS),
 
-        // Debug-friendly
         weightLbs: String(Number(totalWeight.toFixed(2))),
         baseShippingCents: String(Math.floor(baseShippingCents)),
         insuranceCents: String(Math.floor(insuranceCents)),
         freeShipping: String(Boolean(freeShipping)),
       },
     });
-   
-    const url = session.url;
+
+        const url = session.url;
 
     if (!url) {
       return NextResponse.json(
@@ -274,7 +252,17 @@ export async function POST() {
       );
     }
 
-    return NextResponse.redirect(url, 303);
+    // If request came from a normal <form> submit, redirect the browser.
+    // If it came from fetch(), return JSON so the client can do window.location.assign().
+    const accept = (req.headers.get("accept") || "").toLowerCase();
+    const wantsHtml = accept.includes("text/html");
+
+    if (wantsHtml) {
+      return NextResponse.redirect(url, 303);
+    }
+
+    return NextResponse.json({ url }, { status: 200 });
+
   } catch (err: any) {
     console.error("[api/checkout/sessions] error", err);
     return NextResponse.json(
@@ -283,4 +271,3 @@ export async function POST() {
     );
   }
 }
-

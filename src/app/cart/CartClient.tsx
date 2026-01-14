@@ -279,8 +279,7 @@ export default function CartClient() {
               <span>Subtotal</span>
               <span className="font-semibold">{money(subtotal)}</span>
             </div>
-
-            <CheckoutButton disabled={disabledCheckout} />
+            <CheckoutButton mode="review" />
           </aside>
         </div>
       )}

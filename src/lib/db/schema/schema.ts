@@ -854,5 +854,3 @@ export const pricechartingPricesRaw = pgTable("pricecharting_prices_raw", {
 ]);
 
 
-// src/lib/db/schema/schema.ts
-export * from "./store";

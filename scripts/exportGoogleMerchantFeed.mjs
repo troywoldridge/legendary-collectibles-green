@@ -1,8 +1,17 @@
 // scripts/exportGoogleMerchantFeed.mjs
 // Usage:
 //   node scripts/exportGoogleMerchantFeed.mjs
+//
 // Optional env overrides:
-//   SITE_URL="https://legendary-collectibles.com" FEED_OUT="./google-feed.csv" node scripts/exportGoogleMerchantFeed.mjs
+//   DATABASE_URL="postgres://..."
+//   SITE_URL="https://legendary-collectibles.com"
+//   FEED_OUT="./public/google-feed.tsv"
+//   FEED_FORMAT="tsv"   // or "csv" (default: tsv)
+//
+// Notes:
+// - URL-based Merchant Center feeds often choke on literal newlines inside fields.
+//   This script strips \r/\n from ALL fields (critical fix for "Too few column delimiters").
+// - TSV is strongly recommended for URL feeds (commas in descriptions won't matter).
 
 import "dotenv/config";
 import pg from "pg";
@@ -17,9 +26,15 @@ const SITE_URL =
     "https://legendary-collectibles.com"
   ).replace(/\/+$/, "");
 
-const OUT_PATH = process.env.FEED_OUT || "./google-merchant-feed.csv";
+const FEED_FORMAT = String(process.env.FEED_FORMAT || "tsv").toLowerCase(); // tsv | csv
+const DELIM = FEED_FORMAT === "csv" ? "," : "\t";
 
-// EXACT headers you asked for (keep as-is)
+const OUT_PATH =
+  process.env.FEED_OUT ||
+  (FEED_FORMAT === "csv" ? "./google-merchant-feed.csv" : "./google-merchant-feed.tsv");
+
+// Google headers (deduped + cleaned)
+// NOTE: your prior script had "min energy efficiency class" twice — removed the duplicate.
 const HEADERS = [
   "id",
   "title",
@@ -56,36 +71,63 @@ const HEADERS = [
   "unit pricing base measure",
   "energy efficiency class",
   "min energy efficiency class",
-  "min energy efficiency class",
   "item group id",
   "sell on google quantity",
 ];
 
 function moneyUSDFromCents(cents) {
   const v = Number(cents ?? 0) / 100;
+  // Google expects currency like "12.34 USD"
   return `${v.toFixed(2)} USD`;
 }
 
-function csvEscape(value) {
+function sanitizeField(value) {
   if (value === null || value === undefined) return "";
-  const s = String(value);
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  let s = String(value);
+
+  // CRITICAL for Merchant Center URL feeds:
+  // remove literal newlines and carriage returns (they often cause row-splitting)
+  s = s.replace(/\r\n/g, " ").replace(/\r/g, " ").replace(/\n/g, " ");
+
+  // Remove NULL bytes (rare but can break parsers)
+  s = s.replace(/\u0000/g, "");
+
+  // Optional: trim insane whitespace
+  s = s.replace(/\s\s+/g, " ").trim();
+
   return s;
 }
 
+function escapeForFormat(value) {
+  const s = sanitizeField(value);
+
+  if (FEED_FORMAT === "csv") {
+    // CSV escaping: wrap in quotes if delimiter/quote present
+    if (/[",]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  }
+
+  // TSV: tabs must be removed/replaced, because tab IS the delimiter
+  // (commas are fine; no quoting needed in most cases)
+  return s.replace(/\t/g, " ");
+}
+
 function buildProductLink(slug) {
-  // adjust if your route differs
-  return `${SITE_URL}/products/${slug}`;
+  // Adjust if your route differs. This matches your previous script.
+  return `${SITE_URL}/products/${encodeURIComponent(String(slug || ""))}`;
 }
 
 function mapGoogleCondition(_conditionText) {
-  // Most collectible shops keep this "new" and put NM/LP inside title/description.
+  // Google "condition" is typically: new / used / refurbished
+  // For collectibles, many stores keep "new" and describe NM/LP in title/description.
   return "new";
 }
 
 function mapAvailability(status, qty) {
   const q = Number(qty ?? 0);
   const s = String(status ?? "").toLowerCase();
+
+  // Customize if your DB uses different status values.
   if (s !== "active") return "out_of_stock";
   return q > 0 ? "in_stock" : "out_of_stock";
 }
@@ -128,13 +170,11 @@ function extractScryfallImage(payload) {
   const p = safeJsonParse(payload);
   if (!p) return null;
 
-  // typical: payload.image_uris.{large,normal,small}
   const iu = p.image_uris;
   if (iu?.large) return iu.large;
   if (iu?.normal) return iu.normal;
   if (iu?.small) return iu.small;
 
-  // double-faced cards: payload.card_faces[].image_uris
   const faces = Array.isArray(p.card_faces) ? p.card_faces : [];
   for (const f of faces) {
     const fiu = f?.image_uris;
@@ -146,7 +186,6 @@ function extractScryfallImage(payload) {
   return null;
 }
 
-// --- Find what FK column your products table uses for cards ---
 async function detectCardIdColumn(client) {
   const { rows } = await client.query(`
     SELECT column_name
@@ -157,7 +196,6 @@ async function detectCardIdColumn(client) {
 
   const cols = new Set(rows.map((r) => r.column_name));
 
-  // common possibilities (we’ll pick the first that exists)
   const candidates = [
     "card_id",
     "tcg_card_id",
@@ -176,12 +214,15 @@ async function detectCardIdColumn(client) {
 }
 
 function placeholderImageFor(r) {
-  // You can replace these with real category images later.
   const game = String(r.game || "").toLowerCase();
   if (game === "pokemon") return `${SITE_URL}/images/placeholder-pokemon.jpg`;
   if (game === "yugioh") return `${SITE_URL}/images/placeholder-yugioh.jpg`;
   if (game === "mtg") return `${SITE_URL}/images/placeholder-mtg.jpg`;
   return `${SITE_URL}/images/placeholder.jpg`;
+}
+
+function joinRow(obj) {
+  return HEADERS.map((h) => escapeForFormat(obj[h] ?? "")).join(DELIM);
 }
 
 async function main() {
@@ -198,11 +239,22 @@ async function main() {
   const client = await pool.connect();
 
   try {
+    // --- DB debug: THIS will explain 82 vs 237 instantly ---
+    const info = await client.query(`
+      SELECT current_database() as db,
+             current_user as usr,
+             inet_server_addr() as host,
+             inet_server_port() as port
+    `);
+    console.log("DB INFO:", info.rows[0]);
+
+    const cnt = await client.query(`SELECT COUNT(*)::int AS n FROM products`);
+    console.log("products count in THIS DB:", cnt.rows[0].n);
+
     const cardIdCol = await detectCardIdColumn(client);
     console.log("Detected products card id column:", cardIdCol || "(none)");
 
-    // Build SQL that only tries joins if we have some card id column.
-    // If you later add products.feed_image_url, it will automatically be used if present.
+    // check for products.feed_image_url column
     const { rows: prodCols } = await client.query(`
       SELECT column_name
       FROM information_schema.columns
@@ -212,22 +264,21 @@ async function main() {
     `);
     const hasFeedImageUrl = prodCols.some((r) => r.column_name === "feed_image_url");
 
-    const selectFeedImage = hasFeedImageUrl ? "p.feed_image_url AS feed_image_url," : "NULL::text AS feed_image_url,";
+    const selectFeedImage = hasFeedImageUrl
+      ? "p.feed_image_url AS feed_image_url,"
+      : "NULL::text AS feed_image_url,";
 
-    const joinPokemon =
-      cardIdCol
-        ? `LEFT JOIN tcg_cards tcg ON (p.game='pokemon' AND tcg.id = p.${cardIdCol})`
-        : `LEFT JOIN tcg_cards tcg ON false`;
+    const joinPokemon = cardIdCol
+      ? `LEFT JOIN tcg_cards tcg ON (p.game='pokemon' AND tcg.id = p.${cardIdCol})`
+      : `LEFT JOIN tcg_cards tcg ON false`;
 
-    const joinYgo =
-      cardIdCol
-        ? `LEFT JOIN ygo_card_images ygoi ON (p.game='yugioh' AND ygoi.card_id = p.${cardIdCol})`
-        : `LEFT JOIN ygo_card_images ygoi ON false`;
+    const joinYgo = cardIdCol
+      ? `LEFT JOIN ygo_card_images ygoi ON (p.game='yugioh' AND ygoi.card_id = p.${cardIdCol})`
+      : `LEFT JOIN ygo_card_images ygoi ON false`;
 
-    const joinMtg =
-      cardIdCol
-        ? `LEFT JOIN scryfall_cards_raw scr ON (p.game='mtg' AND scr.id = p.${cardIdCol})`
-        : `LEFT JOIN scryfall_cards_raw scr ON false`;
+    const joinMtg = cardIdCol
+      ? `LEFT JOIN scryfall_cards_raw scr ON (p.game='mtg' AND scr.id = p.${cardIdCol})`
+      : `LEFT JOIN scryfall_cards_raw scr ON false`;
 
     const sql = `
       SELECT
@@ -263,7 +314,7 @@ async function main() {
     const { rows } = await client.query(sql);
 
     const lines = [];
-    lines.push(HEADERS.map(csvEscape).join(","));
+    lines.push(HEADERS.map((h) => escapeForFormat(h)).join(DELIM));
 
     for (const r of rows) {
       const availability = mapAvailability(r.status, r.quantity);
@@ -272,7 +323,9 @@ async function main() {
       // price / sale price
       const pc = Number(r.price_cents ?? 0);
       const compare =
-        r.compare_at_cents === null || r.compare_at_cents === undefined || r.compare_at_cents === ""
+        r.compare_at_cents === null ||
+        r.compare_at_cents === undefined ||
+        r.compare_at_cents === ""
           ? null
           : Number(r.compare_at_cents);
 
@@ -280,17 +333,11 @@ async function main() {
       let salePriceOut = "";
 
       if (compare && compare > pc) {
-        priceOut = moneyUSDFromCents(compare);   // regular
-        salePriceOut = moneyUSDFromCents(pc);    // discounted
+        priceOut = moneyUSDFromCents(compare); // regular
+        salePriceOut = moneyUSDFromCents(pc); // discounted
       }
 
-      // --- image selection ---
-      // Priority:
-      // 1) products.feed_image_url (if exists + populated)
-      // 2) pokemon large_image then small_image
-      // 3) ygo image_url
-      // 4) scryfall payload-derived url
-      // 5) placeholder
+      // image selection priority:
       let imageLink =
         (r.feed_image_url && String(r.feed_image_url).trim()) ||
         (r.pokemon_large_image && String(r.pokemon_large_image).trim()) ||
@@ -342,15 +389,19 @@ async function main() {
         "sell on google quantity": String(qtyForGoogle),
       };
 
-      lines.push(HEADERS.map((h) => csvEscape(row[h] ?? "")).join(","));
+      lines.push(joinRow(row));
     }
 
     const outAbs = path.resolve(OUT_PATH);
-    fs.writeFileSync(outAbs, lines.join("\n"), "utf-8");
+
+    // CRLF line endings are safest for many feed processors
+    fs.writeFileSync(outAbs, lines.join("\r\n"), "utf-8");
 
     console.log(`✅ Exported ${rows.length} products`);
-    console.log(`✅ CSV written to: ${outAbs}`);
+    console.log(`✅ Feed format: ${FEED_FORMAT.toUpperCase()} (delimiter: ${FEED_FORMAT === "csv" ? "comma" : "TAB"})`);
+    console.log(`✅ File written to: ${outAbs}`);
     console.log(`SITE_URL: ${SITE_URL}`);
+
     if (!cardIdCol) {
       console.log("⚠️ No products card-id column detected. Pokémon/YGO/MTG joins will be skipped until you add one.");
     }

@@ -1,509 +1,267 @@
-// src/app/api/webhooks/stripe/route.ts
 import "server-only";
 
 import { NextResponse } from "next/server";
 import Stripe from "stripe";
-import { randomUUID } from "crypto";
-import { asc, eq, inArray, sql } from "drizzle-orm";
-
+import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { carts } from "@/lib/db/schema/cart";
-import { products, productImages } from "@/lib/db/schema/shop";
-import { orders, orderItems } from "@/lib/db/schema/orders";
-import { sendEmailResend } from "@/lib/email/resend";
-import { notifyDiscordSale } from "@/lib/notify/discordSales";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+function s(v: unknown): string {
+  return String(v ?? "").trim();
+}
+function toInt(v: unknown, fallback = 0): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.floor(n) : fallback;
+}
+
+const STRIPE_SECRET_KEY = s(process.env.STRIPE_SECRET_KEY);
+const STRIPE_WEBHOOK_SECRET = s(process.env.STRIPE_WEBHOOK_SECRET);
 
 const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: "2025-10-29.clover",
 });
 
-// strict UUID check (so we NEVER insert non-uuid into uuid column)
-function isUuid(v: unknown): v is string {
-  if (typeof v !== "string") return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    v,
-  );
-}
-
-// pick first image by sort
-async function getPrimaryImages(productIds: string[]) {
-  if (!productIds.length) return new Map<string, string>();
-
-  const imgs = await db
-    .select({
-      productId: productImages.productId,
-      url: productImages.url,
-      sort: productImages.sort,
-    })
-    .from(productImages)
-    .where(inArray(productImages.productId, productIds))
-    .orderBy(asc(productImages.productId), asc(productImages.sort));
-
-  const map = new Map<string, string>();
-  for (const i of imgs) if (!map.has(i.productId)) map.set(i.productId, i.url);
-  return map;
-}
-
-function money(cents: number, currency: string) {
-  const cur = (currency || "usd").toUpperCase();
-  const v = (Number(cents || 0) / 100).toFixed(2);
-  return `${cur} $${v}`;
-}
-
-function escapeHtml(s: string) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function getBaseUrl(): string {
-  const envBase =
-    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
-    process.env.SITE_URL?.replace(/\/+$/, "");
-  return envBase || "http://127.0.0.1:3001";
-}
-
-async function notifySaleEmail(input: {
-  orderId: string;
-  stripeSessionId: string;
-  currency: string;
-  totalCents: number;
-  customerEmail?: string;
-  customerName?: string;
-  shippingName?: string;
-  needsManualReview?: boolean;
-  items: Array<{ title: string; qty: number; unit: number; lineTotal: number }>;
-}) {
-  const to = process.env.SALES_NOTIFY_EMAIL_TO || "";
-  const from = process.env.SALES_NOTIFY_EMAIL_FROM || "";
-  if (!to || !from) return;
-
-  const baseUrl = getBaseUrl();
-  const adminOrderUrl = `${baseUrl}/admin/orders/${input.orderId}`;
-
-  const subjectPrefix = input.needsManualReview ? "⚠️ REVIEW" : "💰 Sale";
-  const subject = `${subjectPrefix}: ${input.items.length} item(s) • ${money(
-    input.totalCents,
-    input.currency,
-  )}`;
-
-  const linesHtml = input.items
-    .map((it) => {
-      const title = escapeHtml(it.title);
-      return `<tr>
-        <td style="padding:6px 0;">${title}</td>
-        <td style="padding:6px 0; text-align:center;">x${it.qty}</td>
-        <td style="padding:6px 0; text-align:right;">${money(it.unit, input.currency)}</td>
-        <td style="padding:6px 0; text-align:right;">${money(it.lineTotal, input.currency)}</td>
-      </tr>`;
-    })
-    .join("");
-
-  const html = `
-  <div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
-    <h2 style="margin:0 0 10px;">${
-      input.needsManualReview ? "Sale captured (manual review needed) ⚠️" : "New sale 🎉"
-    }</h2>
-    <div style="margin:0 0 14px; color:#555;">
-      <div><strong>Order:</strong> ${escapeHtml(input.orderId)}</div>
-      <div><strong>Stripe Session:</strong> ${escapeHtml(input.stripeSessionId)}</div>
-      <div><strong>Total:</strong> ${money(input.totalCents, input.currency)}</div>
-    </div>
-
-    <table style="width:100%; border-collapse: collapse;">
-      <thead>
-        <tr>
-          <th style="text-align:left; padding:6px 0; border-bottom:1px solid #eee;">Item</th>
-          <th style="text-align:center; padding:6px 0; border-bottom:1px solid #eee;">Qty</th>
-          <th style="text-align:right; padding:6px 0; border-bottom:1px solid #eee;">Unit</th>
-          <th style="text-align:right; padding:6px 0; border-bottom:1px solid #eee;">Total</th>
-        </tr>
-      </thead>
-      <tbody>${linesHtml}</tbody>
-    </table>
-
-    <div style="margin-top:16px;">
-      <a href="${adminOrderUrl}" style="display:inline-block; padding:10px 14px; border-radius:8px; text-decoration:none; background:#111; color:#fff;">
-        View Order
-      </a>
-    </div>
-  </div>`;
-
-  await sendEmailResend({
-    to,
-    from,
-    subject,
-    html,
-    text: `New sale: ${input.orderId}\nTotal: ${money(input.totalCents, input.currency)}`,
-    idempotencyKey: `sale_${input.orderId}`,
-  });
-}
-
-type CheckoutItemsSnapshot = Array<{
+type ItemsJsonRow = {
   productId: string;
   qty: number;
   unitCents: number;
   title: string;
-}>;
-
-function safeParseItemsJson(v: unknown): CheckoutItemsSnapshot | null {
-  if (!v) return null;
-  try {
-    const parsed = JSON.parse(String(v));
-    if (!Array.isArray(parsed)) return null;
-
-    const ok = parsed.every(
-      (x) =>
-        x &&
-        typeof x === "object" &&
-        typeof (x as any).productId === "string" &&
-        typeof (x as any).title === "string" &&
-        typeof (x as any).qty !== "undefined" &&
-        typeof (x as any).unitCents !== "undefined",
-    );
-
-    return ok ? (parsed as CheckoutItemsSnapshot) : null;
-  } catch {
-    return null;
-  }
-}
-
-function getMetaString(session: Stripe.Checkout.Session, key: string): string {
-  const v = (session.metadata as any)?.[key];
-  return typeof v === "string" ? v : v == null ? "" : String(v);
-}
+  shippingClass?: string | null;
+  shippingWeightLbs?: number | null;
+};
 
 export async function POST(req: Request) {
-  if (!STRIPE_WEBHOOK_SECRET) {
-    return NextResponse.json(
-      { error: "STRIPE_WEBHOOK_SECRET is not set" },
-      { status: 500 },
-    );
-  }
-
-  const sig = req.headers.get("stripe-signature");
-  if (!sig) return NextResponse.json({ error: "No signature" }, { status: 400 });
-
-  const raw = await req.arrayBuffer();
-
-  let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(
-      Buffer.from(raw),
-      sig,
-      STRIPE_WEBHOOK_SECRET,
-    );
-  } catch (e) {
-    console.error("[stripe webhook] signature verify failed", e);
+    if (!STRIPE_SECRET_KEY) {
+      return NextResponse.json({ error: "Missing STRIPE_SECRET_KEY" }, { status: 500 });
+    }
+    if (!STRIPE_WEBHOOK_SECRET) {
+      return NextResponse.json({ error: "Missing STRIPE_WEBHOOK_SECRET" }, { status: 500 });
+    }
 
-    // Red discord ping for signature issues (optional)
+    const sig = req.headers.get("stripe-signature");
+    if (!sig) return NextResponse.json({ error: "Missing stripe-signature" }, { status: 400 });
+
+    // IMPORTANT: use RAW body for signature verification
+    const rawBody = await req.text();
+
+    let event: Stripe.Event;
     try {
-      await notifyDiscordSale({
-        severity: "error",
-        reason: "Stripe signature verification failed.",
-      });
-    } catch {}
+      event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
+    } catch (err: any) {
+      console.error("[stripe/webhook] signature error", err?.message || err);
+      return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+    }
 
-    return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
-  }
+    // We only need to finalize on session completed (paid or async)
+    if (
+      event.type !== "checkout.session.completed" &&
+      event.type !== "checkout.session.async_payment_succeeded"
+    ) {
+      return new NextResponse("ok", { status: 200 });
+    }
 
-  // Only handle this event
-  if (event.type !== "checkout.session.completed") {
-    return NextResponse.json({ received: true });
-  }
-
-  try {
     const session = event.data.object as Stripe.Checkout.Session;
 
-    if (session.payment_status !== "paid") {
-      return NextResponse.json({ received: true });
+    const stripeSessionId = s(session.id);
+    const paymentIntentId = s(session.payment_intent);
+    const currency = s(session.currency || "usd").toLowerCase();
+
+    const md = (session.metadata || {}) as Record<string, string>;
+
+    const cartId = s(md.cartId || md.cart_id);
+    const userId = s(md.userId || md.user_id);
+    const subtotalCents = toInt(md.subtotalCents, 0);
+
+    const baseShippingCents = toInt(md.baseShippingCents, 0);
+    const insuranceCents = toInt(md.insuranceCents, 0);
+    const shippingCents = Math.max(0, baseShippingCents + insuranceCents);
+
+    const taxCents =
+      // Stripe Tax puts details here on completed sessions
+      toInt((session.total_details as any)?.amount_tax, 0);
+
+    const totalCents = toInt(session.amount_total, 0);
+
+    const email = s((session.customer_details as any)?.email || session.customer_email);
+    const customerName = s((session.customer_details as any)?.name);
+    const customerPhone = s((session.customer_details as any)?.phone);
+
+    const shippingDetails = (session as any).shipping_details || null;
+
+    const shippingName = s(shippingDetails?.name);
+    const shippingPhone = s(shippingDetails?.phone);
+
+    const billingAddress = (session.customer_details as any)?.address || null;
+    const shippingAddress = shippingDetails?.address || null;
+
+    // Items snapshot from metadata (the stuff you want as order_items)
+    let items: ItemsJsonRow[] = [];
+    try {
+      items = JSON.parse(md.items_json || "[]");
+      if (!Array.isArray(items)) items = [];
+    } catch {
+      items = [];
     }
 
-    const stripeSessionId = session.id;
-
-    // Idempotency (Stripe retries)
-    const existing = await db
-      .select({ id: orders.id })
-      .from(orders)
-      .where(eq(orders.stripeSessionId, stripeSessionId))
-      .limit(1);
-
-    if (existing.length) {
-      return NextResponse.json({ received: true });
+    // If items_json missing, don't create an empty order.
+    if (!items.length) {
+      console.error("[stripe/webhook] missing items_json; session:", stripeSessionId);
+      return NextResponse.json({ error: "Missing items_json in session metadata" }, { status: 400 });
     }
 
-    const paymentIntentId =
-      typeof session.payment_intent === "string"
-        ? session.payment_intent
-        : session.payment_intent?.id ?? undefined;
+    // pull first image per product for order_items.image_url
+    const productIds = items.map((it) => it.productId).filter(Boolean);
 
-    // Metadata (support both camel + snake)
-    const meta = (session.metadata as any) || {};
-    const cartIdRaw = meta.cartId ?? meta.cart_id ?? "";
-    const cartId = isUuid(cartIdRaw) ? String(cartIdRaw) : undefined;
-
-    const currency = (session.currency ?? "usd").toLowerCase();
-
-    // Totals (authoritative from Stripe session)
-    const totalCents = Number(session.amount_total ?? 0);
-    const subtotalCents = Number(session.amount_subtotal ?? totalCents);
-
-    const anyS = session as any;
-
-    const taxCents = Number(anyS?.total_details?.amount_tax ?? 0);
-
-    const shippingFromStripe = Number(anyS?.total_details?.amount_shipping ?? NaN);
-    const shippingCents = Number.isFinite(shippingFromStripe)
-      ? shippingFromStripe
-      : Math.max(0, totalCents - subtotalCents - taxCents);
-
-    // Stripe line items (always available)
-    const li = await stripe.checkout.sessions.listLineItems(stripeSessionId, {
-      limit: 100,
-    });
-
-    const displayItems = li.data.map((x) => ({
-      title: x.description || "Item",
-      qty: Number(x.quantity ?? 1),
-      unit: Number(x.price?.unit_amount ?? 0),
-      lineTotal: Number(x.amount_total ?? 0),
-    }));
-
-    // Snapshot mapping (preferred)
-    const itemsSnapshot = safeParseItemsJson(meta.items_json);
-
-    let needsManualReview = false;
-    let manualReason: string | undefined;
-
-    if (!itemsSnapshot) {
-      needsManualReview = true;
-      manualReason = "Missing items_json snapshot (cannot map items -> products).";
-    }
-
-    // Customer/shipping
-    const customerEmail = session.customer_details?.email ?? undefined;
-    const customerName = session.customer_details?.name ?? undefined;
-    const customerPhone = session.customer_details?.phone ?? undefined;
-    const billingAddress = (session.customer_details?.address as any) ?? undefined;
-
-    const shippingDetails = anyS.shipping_details ?? null;
-    const shippingName =
-      (shippingDetails?.name as string | undefined) ?? customerName ?? undefined;
-    const shippingPhone =
-      (shippingDetails?.phone as string | undefined) ??
-      customerPhone ??
-      undefined;
-
-    const shippingAddress =
-      (shippingDetails?.address as any) ??
-      (session.customer_details?.address as any) ??
-      undefined;
-
-    const stripeSessionRaw = anyS ?? undefined;
-
-    // If we have snapshot, load products/images for validation + order items
-    const snapshotProductIds = (itemsSnapshot ?? [])
-      .map((x) => x.productId)
-      .filter(isUuid);
-
-    const prows =
-      snapshotProductIds.length > 0
-        ? await db
-            .select({
-              id: products.id,
-              title: products.title,
-              status: products.status,
-              quantity: products.quantity,
-            })
-            .from(products)
-            .where(inArray(products.id, snapshotProductIds))
-        : [];
-
-    const byId = new Map(prows.map((p) => [p.id, p]));
-    const imageById =
-      snapshotProductIds.length > 0
-        ? await getPrimaryImages(snapshotProductIds)
-        : new Map<string, string>();
-
-    const dbItems: Array<{
-      productId?: string;
-      title: string;
-      unitPriceCents: number;
-      qty: number;
-      lineTotalCents: number;
-      imageUrl?: string;
-    }> = [];
-
-    if (itemsSnapshot) {
-      for (const it of itemsSnapshot) {
-        const qty = Math.max(1, Math.min(99, Number(it.qty) || 1));
-        const unit = Math.max(0, Number(it.unitCents ?? 0));
-        const lineTotal = unit * qty;
-
-        const pid = isUuid(it.productId) ? it.productId : undefined;
-        const p = pid ? byId.get(pid) ?? null : null;
-
-        if (!p) {
-          needsManualReview = true;
-          manualReason = manualReason || "Some productIds could not be found in DB.";
-        } else if (p.status !== "active") {
-          needsManualReview = true;
-          manualReason = manualReason || "Some products are not active.";
-        } else if (Number(p.quantity ?? 0) < qty) {
-          needsManualReview = true;
-          manualReason = manualReason || "Stock validation failed (insufficient quantity).";
-        }
-
-        dbItems.push({
-          ...(pid ? { productId: pid } : {}),
-          title: (p?.title ?? it.title) || "Item",
-          unitPriceCents: unit,
-          qty,
-          lineTotalCents: lineTotal,
-          imageUrl: pid ? imageById.get(pid) ?? undefined : undefined,
-        });
-      }
-    } else {
-      for (const it of displayItems) {
-        dbItems.push({
-          title: it.title,
-          unitPriceCents: it.unit,
-          qty: it.qty,
-          lineTotalCents: it.lineTotal,
-        });
-      }
-    }
-
-    const orderId = randomUUID();
-    const adminOrderUrl = `${getBaseUrl()}/admin/orders/${orderId}`;
-
+    // Use a DB transaction: create order, create items, mark cart checked_out, decrement inventory
     await db.transaction(async (tx) => {
-      await tx.insert(orders).values({
-        id: orderId,
-        cartId,
-        stripeSessionId,
-        stripePaymentIntentId: paymentIntentId,
+      // 1) create order (idempotent via UNIQUE stripe_session_id)
+      const orderRes = await tx.execute(sql`
+        INSERT INTO orders (
+          user_id,
+          cart_id,
+          stripe_session_id,
+          stripe_payment_intent_id,
+          status,
+          currency,
+          subtotal_cents,
+          tax_cents,
+          shipping_cents,
+          total_cents,
+          email,
+          customer_name,
+          customer_phone,
+          billing_address,
+          shipping_name,
+          shipping_phone,
+          shipping_address,
+          stripe_session_raw,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          ${userId || null},
+          ${cartId ? sql`${cartId}::uuid` : null},
+          ${stripeSessionId},
+          ${paymentIntentId || null},
+          'paid'::order_status,
+          ${currency || "usd"},
+          ${Math.max(0, subtotalCents)},
+          ${Math.max(0, taxCents)},
+          ${Math.max(0, shippingCents)},
+          ${Math.max(0, totalCents)},
+          ${email || null},
+          ${customerName || null},
+          ${customerPhone || null},
+          ${billingAddress ? sql`${JSON.stringify(billingAddress)}::jsonb` : null},
+          ${shippingName || null},
+          ${shippingPhone || null},
+          ${shippingAddress ? sql`${JSON.stringify(shippingAddress)}::jsonb` : null},
+          ${sql`${JSON.stringify(session)}::jsonb`},
+          now(),
+          now()
+        )
+        ON CONFLICT (stripe_session_id) DO UPDATE
+        SET
+          stripe_payment_intent_id = EXCLUDED.stripe_payment_intent_id,
+          status = EXCLUDED.status,
+          subtotal_cents = EXCLUDED.subtotal_cents,
+          tax_cents = EXCLUDED.tax_cents,
+          shipping_cents = EXCLUDED.shipping_cents,
+          total_cents = EXCLUDED.total_cents,
+          email = COALESCE(EXCLUDED.email, orders.email),
+          customer_name = COALESCE(EXCLUDED.customer_name, orders.customer_name),
+          customer_phone = COALESCE(EXCLUDED.customer_phone, orders.customer_phone),
+          billing_address = COALESCE(EXCLUDED.billing_address, orders.billing_address),
+          shipping_name = COALESCE(EXCLUDED.shipping_name, orders.shipping_name),
+          shipping_phone = COALESCE(EXCLUDED.shipping_phone, orders.shipping_phone),
+          shipping_address = COALESCE(EXCLUDED.shipping_address, orders.shipping_address),
+          stripe_session_raw = EXCLUDED.stripe_session_raw,
+          updated_at = now()
+        RETURNING id
+      `);
 
-        status: "paid",
-        currency,
+      const orderId = (orderRes as any)?.rows?.[0]?.id as string | undefined;
+      if (!orderId) throw new Error("Failed to create order");
 
-        subtotalCents,
-        taxCents,
-        shippingCents,
-        totalCents,
+      // 2) get images
+      const imgRes = await tx.execute(sql`
+        WITH first_image AS (
+          SELECT DISTINCT ON (pi.product_id)
+            pi.product_id,
+            pi.url
+          FROM product_images pi
+          WHERE pi.product_id = ANY(${productIds}::uuid[])
+          ORDER BY pi.product_id, pi.sort ASC, pi.created_at ASC
+        )
+        SELECT product_id, url
+        FROM first_image
+      `);
 
-        email: customerEmail,
-        customerName,
-        customerPhone,
+      const imgRows: Array<{ product_id: string; url: string }> = (imgRes as any)?.rows ?? [];
+      const imgByProductId = new Map(imgRows.map((r) => [String(r.product_id), String(r.url)]));
 
-        billingAddress,
-        shippingName,
-        shippingPhone,
-        shippingAddress,
+      // 3) wipe existing order_items (safe for idempotent retries), then insert
+      await tx.execute(sql`DELETE FROM order_items WHERE order_id = ${orderId}::uuid`);
 
-        stripeSessionRaw,
-      });
+      for (const it of items) {
+        const pid = s(it.productId);
+        const qty = Math.max(1, toInt(it.qty, 1));
+        const unit = Math.max(0, toInt(it.unitCents, 0));
+        const title = s(it.title) || "Item";
+        const img = imgByProductId.get(pid) || null;
 
-      await tx.insert(orderItems).values(
-        dbItems.map((it) => ({
-          orderId,
-          ...(it.productId ? { productId: it.productId } : {}),
-          title: it.title,
-          unitPriceCents: it.unitPriceCents,
-          qty: it.qty,
-          lineTotalCents: it.lineTotalCents,
-          imageUrl: it.imageUrl ?? undefined,
-        })),
-      );
+        await tx.execute(sql`
+          INSERT INTO order_items (
+            order_id,
+            product_id,
+            title,
+            unit_price_cents,
+            qty,
+            line_total_cents,
+            image_url,
+            created_at
+          )
+          VALUES (
+            ${orderId}::uuid,
+            ${pid ? sql`${pid}::uuid` : null},
+            ${title},
+            ${unit},
+            ${qty},
+            ${unit * qty},
+            ${img},
+            now()
+          )
+        `);
 
-      // Only decrement stock when snapshot exists AND validation passed
-      if (itemsSnapshot && !needsManualReview) {
-        for (const it of itemsSnapshot) {
-          if (!isUuid(it.productId)) continue;
-          await tx
-            .update(products)
-            .set({
-              quantity: sql`${products.quantity} - ${Number(it.qty)}`,
-              updatedAt: sql`now()`,
-            })
-            .where(eq(products.id, it.productId));
-        }
+        // 4) decrement inventory (only if product still exists)
+        await tx.execute(sql`
+          UPDATE products
+          SET quantity = GREATEST(COALESCE(quantity, 0) - ${qty}, 0),
+              updated_at = now()
+          WHERE id = ${pid}::uuid
+        `);
       }
 
-      // Mark cart checked out (best effort)
+      // 5) mark cart checked_out (optional but nice)
       if (cartId) {
-        try {
-          await tx
-            .update(carts)
-            .set({ status: sql`'checked_out'`, updatedAt: sql`now()` } as any)
-            .where(eq(carts.id, cartId));
-        } catch {
-          // ignore
-        }
+        await tx.execute(sql`
+          UPDATE carts
+          SET status = 'checked_out',
+              updated_at = now()
+          WHERE id = ${cartId}::uuid
+        `);
       }
     });
 
-    // Notifications (never block webhook)
-    try {
-      await notifyDiscordSale({
-        severity: needsManualReview ? "warning" : "success",
-        orderId,
-        stripeSessionId,
-        paymentIntentId,
-        currency,
-        totalCents,
-        itemCount: dbItems.length,
-        customerEmail,
-        needsManualReview,
-        reason: needsManualReview ? manualReason : undefined,
-        adminOrderUrl,
-      });
-    } catch (e) {
-      console.error("[discord notify] failed", e);
-    }
-
-    try {
-      await notifySaleEmail({
-        orderId,
-        stripeSessionId,
-        currency,
-        totalCents,
-        customerEmail,
-        customerName,
-        shippingName,
-        needsManualReview,
-        items: dbItems.map((n) => ({
-          title: n.title,
-          qty: n.qty,
-          unit: n.unitPriceCents,
-          lineTotal: n.lineTotalCents,
-        })),
-      });
-    } catch (e) {
-      console.error("[sale notify] email failed", e);
-    }
-
-    return NextResponse.json({ received: true });
-  } catch (e: any) {
-    console.error("[stripe webhook] handler failed", e);
-
-    // red discord (best effort)
-    try {
-      await notifyDiscordSale({
-        severity: "error",
-        reason: e?.message ? String(e.message) : "Webhook handler threw an error.",
-      });
-    } catch {}
-
-    return NextResponse.json({ error: "Webhook handler failed" }, { status: 500 });
+    return new NextResponse("ok", { status: 200 });
+  } catch (err: any) {
+    console.error("[stripe/webhook] error", err);
+    return NextResponse.json(
+      { error: String(err?.message || err) || "Webhook error" },
+      { status: 500 },
+    );
   }
 }

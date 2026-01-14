@@ -2,6 +2,7 @@
 import "server-only";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { auth } from "@clerk/nextjs/server";
 import { db } from "@/lib/db";
 import { asc, eq, inArray, sql } from "drizzle-orm";
 
@@ -29,14 +30,8 @@ function isUuid(v: string) {
   );
 }
 
-async function getOrCreateCartId(): Promise<string> {
+async function setCartCookie(id: string) {
   const jar = await cookies();
-  const existing = jar.get(CART_COOKIE)?.value?.trim();
-  if (existing && isUuid(existing)) return existing;
-
-  const id = randomUUID();
-  await db.insert(carts).values({ id, status: "open" });
-
   jar.set(CART_COOKIE, id, {
     httpOnly: true,
     sameSite: "lax",
@@ -44,8 +39,72 @@ async function getOrCreateCartId(): Promise<string> {
     path: "/",
     maxAge: 60 * 60 * 24 * 14,
   });
+}
 
-  return id;
+async function getOrCreateCartId(): Promise<{ cartId: string; userId: string | null }> {
+  const { userId } = await auth();
+  const jar = await cookies();
+
+  const cookieId = jar.get(CART_COOKIE)?.value?.trim();
+  const cookieCartId = cookieId && isUuid(cookieId) ? cookieId : null;
+
+  // 1) If signed in, ALWAYS prefer user's open cart
+  if (userId) {
+    const found = await db.execute<{ id: string }>(sql`
+      SELECT id
+      FROM carts
+      WHERE user_id = ${userId}
+        AND status = 'open'
+      ORDER BY updated_at DESC NULLS LAST, created_at DESC
+      LIMIT 1
+    `);
+
+    let cartId = found.rows?.[0]?.id;
+
+    // 2) If none, but we have a cookie cart, try to "claim" it IF it's open
+    if (!cartId && cookieCartId) {
+      const claimed = await db.execute<{ id: string }>(sql`
+        UPDATE carts
+        SET user_id = ${userId}, updated_at = now()
+        WHERE id = ${cookieCartId}::uuid
+          AND status = 'open'
+          AND (user_id IS NULL OR user_id = '')
+        RETURNING id
+      `);
+
+      cartId = claimed.rows?.[0]?.id;
+    }
+
+    // 3) If still none, create a new open cart for the user
+    if (!cartId) {
+      const id = randomUUID();
+      await db.insert(carts).values({ id, status: "open", user_id: userId });
+      cartId = id;
+    }
+
+    // Ensure cookie matches the authoritative open cart
+    await setCartCookie(cartId);
+    return { cartId, userId };
+  }
+
+  // Anonymous flow (cookie cart), but NEVER allow checked_out
+  if (cookieCartId) {
+    const ok = await db.execute<{ ok: boolean }>(sql`
+      SELECT EXISTS(
+        SELECT 1 FROM carts WHERE id = ${cookieCartId}::uuid AND status = 'open'
+      ) AS ok
+    `);
+
+    if (ok.rows?.[0]?.ok) {
+      return { cartId: cookieCartId, userId: null };
+    }
+  }
+
+  // create anonymous open cart
+  const id = randomUUID();
+  await db.insert(carts).values({ id, status: "open" });
+  await setCartCookie(id);
+  return { cartId: id, userId: null };
 }
 
 // (Optional) handle preflight / odd clients so you never see 405 from OPTIONS
@@ -55,7 +114,7 @@ export async function OPTIONS() {
 
 export async function GET() {
   try {
-    const cartId = await getOrCreateCartId();
+    const { cartId } = await getOrCreateCartId();
 
     // Load cart lines
     const rawLines = await db
@@ -87,11 +146,11 @@ export async function GET() {
         quantity: products.quantity,
       })
       .from(products)
-      .where(inArray(products.id, listingIds));
+      .where(inArray(products.id, listingIds as any));
 
     const prodById = new Map(prodRows.map((p) => [p.id, p]));
 
-    // ✅ Self-heal (no transaction): remove invalid/inactive/out-of-stock, clamp qty
+    // ✅ Self-heal: remove invalid/inactive/out-of-stock, clamp qty
     for (const l of rawLines) {
       try {
         const pid = l.listingId;

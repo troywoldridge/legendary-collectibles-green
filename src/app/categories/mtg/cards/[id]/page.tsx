@@ -1,4 +1,3 @@
-// src/app/categories/mtg/cards/[id]/page.tsx
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
 
@@ -57,11 +56,6 @@ type CardRow = {
   ebay_url: string | null;
 };
 
-type SetRow = {
-  name: string | null;
-  released_at: string | null;
-};
-
 type MarketItemRow = { id: string };
 
 /* ---------------- URL helpers ---------------- */
@@ -94,6 +88,100 @@ function money(v?: string | null) {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return null;
   return n;
+}
+
+/* ---------------- Metadata (✅ canonical ignores currency param) ---------------- */
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const p = await params;
+  const foundId = decodeURIComponent(String(p.id ?? "")).trim();
+
+  // No id -> don't index
+  if (!foundId) {
+    return {
+      title: `MTG Cards | ${site.name}`,
+      description: "Browse Magic: The Gathering cards.",
+      alternates: { canonical: absUrl("/categories/mtg/cards") },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const metaRes = await db.execute<{
+    name: string | null;
+    type_line: string | null;
+    rarity: string | null;
+    collector_number: string | null;
+    set_code: string | null;
+    image_url: string | null;
+  }>(sql`
+    SELECT
+      c.name,
+      (c.payload->>'type_line') AS type_line,
+      (c.payload->>'rarity') AS rarity,
+      c.collector_number,
+      c.set_code,
+      COALESCE(
+        (c.payload->'image_uris'->>'large'),
+        (c.payload->'image_uris'->>'normal'),
+        (c.payload->'card_faces'->0->'image_uris'->>'large'),
+        (c.payload->'card_faces'->0->'image_uris'->>'normal')
+      ) AS image_url
+    FROM public.scryfall_cards_raw c
+    WHERE c.id::text = ${foundId}
+    LIMIT 1
+  `);
+
+  const m = metaRes.rows?.[0];
+  const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(foundId)}`);
+
+  // Not found -> noindex (important!)
+  if (!m) {
+    return {
+      title: `MTG Card Not Found | ${site.name}`,
+      description: "We couldn’t find that MTG card.",
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+    };
+  }
+
+  const title = `${m.name ?? foundId} — MTG Card | ${site.name}`;
+
+  const descParts = [
+    m.type_line ? `${m.type_line}.` : null,
+    m.rarity ? `Rarity: ${m.rarity}.` : null,
+    m.collector_number ? `#${m.collector_number}.` : null,
+    m.set_code ? `Set: ${String(m.set_code).toUpperCase()}.` : null,
+  ].filter(Boolean);
+
+  const description =
+    descParts.length ? descParts.join(" ") : `MTG card details for ${m.name ?? foundId}.`;
+
+  const ogImage = absMaybe(m.image_url || site.ogImage || "/og-image.png");
+
+  // Found -> indexable (this is the missing piece)
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    robots: { index: true, follow: true },
+    openGraph: {
+      title,
+      description,
+      url: canonical,
+      siteName: site.name,
+      type: "website",
+      images: [{ url: ogImage }],
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [ogImage],
+    },
+  };
 }
 
 /* ---------------- Market item ---------------- */
@@ -286,14 +374,13 @@ export default async function MtgCardDetailPage({
 
           {/* ✅ Market Value (Estimated) */}
           <MarketValuePanel
-              game="mtg"
-              canonicalId={card.id}
-              title="Market Value"
-              showDisclaimer
-              canSeeRanges={planTier === "collector" || planTier === "pro"}
-              canSeeConfidence={planTier === "pro"}
-            />
-
+            game="mtg"
+            canonicalId={card.id}
+            title="Market Value"
+            showDisclaimer
+            canSeeRanges={planTier === "collector" || planTier === "pro"}
+            canSeeConfidence={planTier === "pro"}
+          />
         </div>
       </div>
 
