@@ -20,6 +20,9 @@ function getBaseUrl(): string {
 
 type ApiProduct = {
   id: string;
+  slug?: string | null;
+  sku?: string | null;
+
   title: string;
   subtitle?: string | null;
   description?: string | null;
@@ -64,6 +67,7 @@ async function fetchProduct(id: string): Promise<ApiProduct | null> {
 
 function money(cents?: number | null) {
   if (typeof cents !== "number") return null;
+  if (!Number.isFinite(cents)) return null;
   return (cents / 100).toFixed(2);
 }
 
@@ -75,6 +79,30 @@ function normalizeCloudflareVariant(
   if (!u) return u;
   if (!u.includes("imagedelivery.net/")) return u;
   return u.replace(/\/[^/]+$/, `/${variant}`);
+}
+
+function brandName(game?: string | null) {
+  const g = String(game ?? "").toLowerCase();
+  if (g === "pokemon") return "Pokémon";
+  if (g === "yugioh") return "Yu-Gi-Oh!";
+  if (g === "mtg") return "Magic: The Gathering";
+  if (g === "sports") return "Sports Cards";
+  return "Legendary Collectibles";
+}
+
+function conditionUrl(cond?: string | null) {
+  const c = String(cond ?? "").toLowerCase();
+
+  // Your enums are likely nm/lp/mp/hp/dmg.
+  // Map to Schema.org itemCondition URLs.
+  if (c === "nm" || c === "near mint" || c === "new") {
+    return "https://schema.org/NewCondition";
+  }
+  if (c === "dmg" || c === "damaged") {
+    return "https://schema.org/DamagedCondition";
+  }
+  // lp/mp/hp and anything else => Used
+  return "https://schema.org/UsedCondition";
 }
 
 export default async function ProductDetailPage(props: {
@@ -102,7 +130,8 @@ export default async function ProductDetailPage(props: {
   // - Main image: use productDetail (or productTile if you don’t have another variant yet)
   // - Thumbs: use productTile
   const mainImageRaw = images[0]?.url ?? "";
-  const mainImage = normalizeCloudflareVariant(mainImageRaw, "productDetail") || mainImageRaw;
+  const mainImage =
+    normalizeCloudflareVariant(mainImageRaw, "productDetail") || mainImageRaw;
 
   const thumbImages = images.map((im) => ({
     ...im,
@@ -126,8 +155,54 @@ export default async function ProductDetailPage(props: {
 
   const lowStock = qty !== null && qty > 0 && qty <= 3;
 
+  // Canonical URL (prefer slug if available)
+  const base = getBaseUrl();
+  const canonicalPath = product.slug
+    ? `/products/${encodeURIComponent(product.slug)}`
+    : `/products/${encodeURIComponent(product.id)}`;
+  const canonical = `${base}${canonicalPath}`;
+
+  // ✅ Structured data: only include if we actually have a valid price
+  // (prevents schema errors for incomplete listings)
+  const includeJsonLd = hasPrice;
+
+  const productJsonLd = includeJsonLd
+    ? {
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: product.title,
+        description: product.description || undefined,
+        image: thumbImages
+          .map((im) => String(im.url || "").trim())
+          .filter(Boolean),
+        sku: product.sku || undefined,
+        brand: {
+          "@type": "Brand",
+          name: brandName(product.game ?? null),
+        },
+        offers: {
+          "@type": "Offer",
+          url: canonical,
+          priceCurrency: "USD",
+          price: String(priceText), // e.g. "1.25"
+          availability: soldOut
+            ? "https://schema.org/OutOfStock"
+            : "https://schema.org/InStock",
+          itemCondition: conditionUrl(product.condition ?? null),
+        },
+      }
+    : null;
+
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-8 text-white">
+      {/* ✅ Product structured data (fixes Search Console: missing offers/review/aggregateRating) */}
+      {productJsonLd ? (
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
+        />
+      ) : null}
+
       <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
         <div>
           <div className="aspect-[3/4] w-full overflow-hidden rounded-2xl border border-white/10 bg-black/30">

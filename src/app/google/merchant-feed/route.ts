@@ -7,44 +7,31 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+// Use underscore attribute names (Merchant Center references them this way)
 const HEADERS = [
   "id",
   "title",
   "description",
   "availability",
-  "availability date",
-  "expiration date",
+  "availability_date",
+  "expiration_date",
   "link",
-  "mobile link",
-  "image link",
+  "mobile_link",
+  "image_link",
+  "additional_image_link",
   "price",
-  "sale price",
-  "sale price effective date",
-  "identifier exists",
+  "sale_price",
+  "sale_price_effective_date",
+  "shipping_weight",
+  "condition",
+  "brand",
+  "identifier_exists",
   "gtin",
   "mpn",
-  "brand",
-  "product highlight",
-  "product detail",
-  "additional image link",
-  "condition",
-  "adult",
-  "color",
-  "size",
-  "size type",
-  "size system",
-  "gender",
-  "material",
-  "pattern",
-  "age group",
-  "multipack",
-  "is bundle",
-  "unit pricing measure",
-  "unit pricing base measure",
-  "energy efficiency class",
-  "min energy efficiency class",
-  "item group id",
-  "sell on google quantity",
+  "product_highlight",
+  "product_detail",
+  "item_group_id",
+  "sell_on_google_quantity",
 ];
 
 const DELIM = "\t";
@@ -58,7 +45,7 @@ function sanitize(value: unknown) {
   if (value === null || value === undefined) return "";
   let s = String(value);
 
-  // Kill newlines (Google URL feeds often choke even if CSV-legal)
+  // Kill newlines (feeds can choke)
   s = s.replace(/\r\n/g, " ").replace(/\r/g, " ").replace(/\n/g, " ");
   // Remove tabs because TSV delimiter
   s = s.replace(/\t/g, " ");
@@ -71,7 +58,6 @@ function sanitize(value: unknown) {
 }
 
 function buildSiteUrl(req: Request) {
-  // Prefer env, otherwise derive from request
   const env =
     process.env.SITE_URL?.replace(/\/+$/, "") ||
     process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "");
@@ -100,6 +86,7 @@ function sellOnGoogleQty(status: unknown, qty: unknown) {
 }
 
 function mapGoogleCondition(_cond: unknown) {
+  // You can refine later (used/new) based on your own condition field.
   return "new";
 }
 
@@ -141,9 +128,11 @@ function extractScryfallImage(payload: any) {
   if (!p) return null;
 
   const iu = p.image_uris;
+  // Prefer JPGs for Merchant Center; PNG is also ok, but JPG is safest for "type" issues.
   if (iu?.large) return iu.large;
   if (iu?.normal) return iu.normal;
   if (iu?.small) return iu.small;
+  if (iu?.png) return iu.png;
 
   const faces = Array.isArray(p.card_faces) ? p.card_faces : [];
   for (const f of faces) {
@@ -151,6 +140,7 @@ function extractScryfallImage(payload: any) {
     if (fiu?.large) return fiu.large;
     if (fiu?.normal) return fiu.normal;
     if (fiu?.small) return fiu.small;
+    if (fiu?.png) return fiu.png;
   }
 
   return null;
@@ -177,19 +167,15 @@ async function detectCardIdColumn(client: any) {
   return null;
 }
 
-async function hasColumn(client: any, table: string, column: string) {
-  const { rows } = await client.query(
-    `
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema='public'
-      AND table_name=$1
-      AND column_name=$2
-    LIMIT 1
-  `,
-    [table, column]
-  );
-  return rows.length > 0;
+function formatShippingWeightLb(weight: unknown) {
+  // Merchant Center expects a number + unit (lb/oz/g/kg). :contentReference[oaicite:2]{index=2}
+  if (weight === null || weight === undefined || weight === "") return "";
+  const n = Number(weight);
+  if (!Number.isFinite(n) || n <= 0) return "";
+
+  // clean decimals (0.0600 -> 0.06)
+  const cleaned = n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  return `${cleaned} lb`;
 }
 
 export async function GET(req: Request) {
@@ -208,12 +194,8 @@ export async function GET(req: Request) {
 
   try {
     const cardIdCol = await detectCardIdColumn(client);
-    const hasFeedImageUrl = await hasColumn(client, "products", "feed_image_url");
 
-    const selectFeedImage = hasFeedImageUrl
-      ? "p.feed_image_url AS feed_image_url,"
-      : "NULL::text AS feed_image_url,";
-
+    // If you DO have a card-id column later, these joins can enrich images.
     const joinPokemon = cardIdCol
       ? `LEFT JOIN tcg_cards tcg ON (p.game='pokemon' AND tcg.id = p.${cardIdCol})`
       : `LEFT JOIN tcg_cards tcg ON false`;
@@ -244,15 +226,48 @@ export async function GET(req: Request) {
         p.status,
         p.subtitle,
         p.description,
-        ${selectFeedImage}
-        tcg.small_image AS pokemon_small_image,
-        tcg.large_image AS pokemon_large_image,
+        p.shipping_weight_lbs,
+
+        -- Primary image from product_images
+        pi_primary.url AS primary_image_url,
+
+        -- Additional images (comma-separated), excluding the primary
+        pi_more.urls AS additional_image_urls,
+
+        -- Enrichment sources (only if joins are active)
+        tcg.image_small AS pokemon_image_small,
+        tcg.image_large AS pokemon_image_large,
         ygoi.image_url AS ygo_image_url,
         scr.payload AS scryfall_payload
+
       FROM products p
+
+      -- Primary product image (lowest sort)
+      LEFT JOIN LATERAL (
+        SELECT url
+        FROM product_images
+        WHERE product_id = p.id
+        ORDER BY sort ASC, created_at ASC
+        LIMIT 1
+      ) pi_primary ON true
+
+      -- Additional images (all others)
+      LEFT JOIN LATERAL (
+        SELECT STRING_AGG(url, ',') AS urls
+        FROM (
+          SELECT url
+          FROM product_images
+          WHERE product_id = p.id
+          ORDER BY sort ASC, created_at ASC
+          OFFSET 1
+          LIMIT 10
+        ) t
+      ) pi_more ON true
+
       ${joinPokemon}
       ${joinYgo}
       ${joinMtg}
+
       ORDER BY p.created_at ASC NULLS LAST, p.title ASC
     `;
 
@@ -279,10 +294,16 @@ export async function GET(req: Request) {
         salePriceOut = moneyUSDFromCents(pc);
       }
 
-      let imageLink =
-        (r.feed_image_url && String(r.feed_image_url).trim()) ||
-        (r.pokemon_large_image && String(r.pokemon_large_image).trim()) ||
-        (r.pokemon_small_image && String(r.pokemon_small_image).trim()) ||
+      // Image priority:
+      // 1) product_images.primary
+      // 2) pokemon (tcg_cards)
+      // 3) ygo image table
+      // 4) mtg from scryfall payload
+      // 5) placeholder
+      const imageLink =
+        (r.primary_image_url && String(r.primary_image_url).trim()) ||
+        (r.pokemon_image_large && String(r.pokemon_image_large).trim()) ||
+        (r.pokemon_image_small && String(r.pokemon_image_small).trim()) ||
         (r.ygo_image_url && String(r.ygo_image_url).trim()) ||
         extractScryfallImage(r.scryfall_payload) ||
         placeholderImageFor(siteUrl, r);
@@ -290,49 +311,35 @@ export async function GET(req: Request) {
       const link = buildProductLink(siteUrl, r.slug);
 
       const row: Record<string, string> = {
-        "id": r.id,
-        "title": r.title,
-        "description": r.description || "",
-        "availability": availability,
-        "availability date": "",
-        "expiration date": "",
-        "link": link,
-        "mobile link": link,
-        "image link": imageLink,
-        "price": priceOut,
-        "sale price": salePriceOut,
-        "sale price effective date": "",
-        "identifier exists": "false",
-        "gtin": "",
-        "mpn": "",
-        "brand": "Legendary Collectibles",
-        "product highlight": highlightFromRow(r),
-        "product detail": detailFromRow(r),
-        "additional image link": "",
-        "condition": mapGoogleCondition(r.condition),
-        "adult": "",
-        "color": "",
-        "size": "",
-        "size type": "",
-        "size system": "",
-        "gender": "",
-        "material": "",
-        "pattern": "",
-        "age group": "",
-        "multipack": "",
-        "is bundle": r.format === "bundle" || r.sealed ? "true" : "false",
-        "unit pricing measure": "",
-        "unit pricing base measure": "",
-        "energy efficiency class": "",
-        "min energy efficiency class": "",
-        "item group id": "",
-        "sell on google quantity": String(qtyForGoogle),
+        id: r.id,
+        title: r.title,
+        description: r.description || "",
+        availability,
+        availability_date: "",
+        expiration_date: "",
+        link,
+        mobile_link: link,
+        image_link: imageLink,
+        additional_image_link: r.additional_image_urls || "",
+        price: priceOut,
+        sale_price: salePriceOut,
+        sale_price_effective_date: "",
+        shipping_weight: formatShippingWeightLb(r.shipping_weight_lbs),
+        condition: mapGoogleCondition(r.condition),
+        brand: "Legendary Collectibles",
+        identifier_exists: "false",
+        gtin: "",
+        mpn: "",
+        product_highlight: highlightFromRow(r),
+        product_detail: detailFromRow(r),
+        item_group_id: "",
+        sell_on_google_quantity: String(qtyForGoogle),
       };
 
       lines.push(HEADERS.map((h) => sanitize(row[h] ?? "")).join(DELIM));
     }
 
-    const body = lines.join("\r\n"); // CRLF safest
+    const body = lines.join("\r\n");
     return new Response(body, {
       status: 200,
       headers: {
