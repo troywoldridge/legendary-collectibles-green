@@ -1,3 +1,4 @@
+// src/lib/shop/client.ts
 import { headers } from "next/headers";
 import { site } from "@/config/site";
 
@@ -6,13 +7,6 @@ export type ShopApiQuery = {
   format?: "single" | "pack" | "box" | "bundle" | "lot" | "accessory";
   sealed?: boolean;
   graded?: boolean;
-};
-
-export type ShopProductsResponse = {
-  items: ShopProduct[];
-  total: number;
-  page: number;
-  limit: number;
 };
 
 export type ShopProduct = {
@@ -32,6 +26,13 @@ export type ShopProduct = {
   inventoryType?: string | null;
   quantity?: number | null;
   image?: { url: string; alt: string | null } | null;
+};
+
+export type ShopProductsResponse = {
+  items: ShopProduct[];
+  total: number;
+  page: number;
+  limit: number;
 };
 
 const PASS_THROUGH_KEYS = [
@@ -56,6 +57,8 @@ export async function resolveShopBaseUrl() {
   const envUrl =
     process.env.NEXT_PUBLIC_APP_URL ??
     process.env.APP_URL ??
+    process.env.NEXT_PUBLIC_SITE_URL ??
+    process.env.SITE_URL ??
     process.env.VERCEL_URL ??
     process.env.VERCEL_PROJECT_PRODUCTION_URL ??
     site.url;
@@ -73,7 +76,7 @@ export async function resolveShopBaseUrl() {
 
 export function buildShopQuery(
   api: ShopApiQuery,
-  searchParams: Record<string, string | string[] | undefined>
+  searchParams: Record<string, string | string[] | undefined>,
 ): URLSearchParams {
   const qs = new URLSearchParams();
 
@@ -92,7 +95,7 @@ export function buildShopQuery(
 
 export async function fetchShopProducts(
   api: ShopApiQuery,
-  searchParams: Record<string, string | string[] | undefined>
+  searchParams: Record<string, string | string[] | undefined>,
 ): Promise<ShopProductsResponse & { _error?: string }> {
   const qs = buildShopQuery(api, searchParams);
   const base = await resolveShopBaseUrl();
@@ -107,4 +110,3 @@ export async function fetchShopProducts(
 
   return res.json();
 }
-

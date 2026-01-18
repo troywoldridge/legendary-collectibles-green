@@ -1,3 +1,4 @@
+// src/app/shop/[department]/page.tsx
 import "server-only";
 
 import Link from "next/link";
@@ -18,8 +19,8 @@ function norm(s: unknown) {
 export async function generateMetadata(props: {
   params: Params | Promise<Params>;
 }): Promise<Metadata> {
-  const p = await props.params;
-  const department = norm(p?.department);
+  const params = await props.params;
+  const department = norm(params?.department);
 
   const deptKey = normalizeDepartmentSlug(department);
   const dept = deptKey ? getDepartmentConfig(deptKey) : null;
@@ -46,14 +47,14 @@ export async function generateMetadata(props: {
 export default async function DepartmentPage(props: {
   params: Params | Promise<Params>;
 }) {
-  const p = await props.params;
-  const department = norm(p?.department);
+  const params = await props.params;
+  const department = norm(params?.department);
 
   const deptKey = normalizeDepartmentSlug(department);
   const dept = deptKey ? getDepartmentConfig(deptKey) : null;
   if (!deptKey || !dept) notFound();
 
-  // Canonicalize /shop/yugi -> /shop/yugioh (and any casing weirdness)
+  // Canonicalize /shop/yugi -> /shop/yugioh (and casing)
   const raw = department.toLowerCase();
   if (raw !== deptKey) {
     redirect(`/shop/${deptKey}`);
@@ -77,11 +78,7 @@ export default async function DepartmentPage(props: {
       <section className="shopSection">
         <div className="tileGrid">
           {dept.categories.map((c) => (
-            <Link
-              key={c.slug}
-              href={`/shop/${deptKey}/${c.slug}`}
-              className="tile tileLarge"
-            >
+            <Link key={c.slug} href={`/shop/${deptKey}/${c.slug}`} className="tile tileLarge">
               <div className="tileTitle">{c.name}</div>
               <div className="tileDesc">{c.description}</div>
               <div className="tileCta">Browse →</div>
