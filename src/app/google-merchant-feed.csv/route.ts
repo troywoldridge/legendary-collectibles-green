@@ -235,9 +235,8 @@ export async function GET(req: Request) {
         pi_more.urls AS additional_image_urls,
 
         -- Enrichment sources (only if joins are active)
-        tcg.small_image AS pokemon_image_small,
-        tcg.large_image AS pokemon_image_large,
-
+        tcg.image_small AS pokemon_image_small,
+        tcg.image_large AS pokemon_image_large,
         ygoi.image_url AS ygo_image_url,
         scr.payload AS scryfall_payload
 
