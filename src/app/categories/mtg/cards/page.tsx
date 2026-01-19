@@ -29,6 +29,7 @@ export const metadata: Metadata = {
   description:
     "Browse Magic: The Gathering cards, track prices, manage your collection, and shop singles and sealed products.",
   alternates: { canonical: absUrl("/categories/mtg/cards") },
+
   openGraph: {
     type: "website",
     url: absUrl("/categories/mtg/cards"),
@@ -46,6 +47,7 @@ export const metadata: Metadata = {
     images: [absMaybe(site.ogImage || "/og-image.png")],
   },
 };
+
 
 /* ---------------- Types ---------------- */
 type SearchParams = Record<string, string | string[] | undefined>;

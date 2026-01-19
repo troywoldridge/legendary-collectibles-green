@@ -8,24 +8,54 @@ export default function robots(): MetadataRoute.Robots {
 
   return {
     rules: [
+      // 🔎 Google main crawler — MUST be allowed
       {
-        userAgent: "*",
+        userAgent: "Googlebot",
         allow: "/",
         disallow: [
           "/api/",
           "/sign-in",
           "/sign-up",
+          "/sign-out",
+          "/logout",
           "/post-auth",
+          "/auth/",
           "/collection",
           "/account",
           "/dashboard",
           "/admin",
           "/checkout",
-          "/cart/checkout",
+          "/cart",
         ],
       },
 
-      // Optional AI crawler blocks (keep if you want)
+      // 🖼 Google image crawler — REQUIRED for Merchant Center
+      {
+        userAgent: "Googlebot-Image",
+        allow: "/",
+      },
+
+      // 🌐 Default rules for everyone else
+      {
+        userAgent: "*",
+        disallow: [
+          "/api/",
+          "/sign-in",
+          "/sign-up",
+          "/sign-out",
+          "/logout",
+          "/post-auth",
+          "/auth/",
+          "/collection",
+          "/account",
+          "/dashboard",
+          "/admin",
+          "/checkout",
+          "/cart",
+        ],
+      },
+
+      // 🤖 AI crawler policy (your choice)
       { userAgent: "GPTBot", allow: "/" },
       { userAgent: "ClaudeBot", disallow: "/" },
       { userAgent: "CCBot", disallow: "/" },

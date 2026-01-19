@@ -2,6 +2,11 @@
 
 import { SignIn } from "@clerk/nextjs";
 
+export const metadata = {
+  robots: { index: false, follow: false },
+};
+
+
 export default function SignInClient() {
   return (
     <SignIn
