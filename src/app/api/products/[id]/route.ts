@@ -12,7 +12,23 @@ function norm(v: unknown): string {
 }
 
 function isUuid(v: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v,
+  );
+}
+
+function toJsonArray(v: unknown): any[] {
+  try {
+    if (Array.isArray(v)) return v;
+    if (typeof v === "string") {
+      const parsed = JSON.parse(v);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+    if (v && typeof v === "object") return v as any[];
+  } catch {
+    // ignore
+  }
+  return [];
 }
 
 export async function GET(
@@ -36,31 +52,65 @@ export async function GET(
       p.id,
       p.title,
       p.slug,
-      p.game,
-      p.format,
-      p.sealed,
-      p.is_graded,
-      p.grader,
-      p.grade_x10,
-      p.condition,
-      p.price_cents,
-      p.compare_at_cents,
-      p.inventory_type,
-      p.quantity,
-      p.status,
       p.subtitle,
       p.description,
+
+      -- Make enums more JS-friendly for SEO code paths
+      p.game::text AS game,
+      p.format::text AS format,
+      p.status::text AS status,
+      p.inventory_type::text AS inventory_type,
+      p.grader::text AS grader,
+      p.condition::text AS condition,
+
+      p.sealed,
+      p.is_graded,
+      p.grade_x10,
+
+      p.price_cents,
+      p.compare_at_cents,
+      p.quantity,
+
+      p.sku,
+      p.card_kind,
+
+      -- ✅ SEO / keyword enrichment fields
+      p.source_card_id,
+      p.source_set_code,
+      p.source_number,
+      p.source_set_name,
+
+      -- optional commerce fields (handy later)
+      p.shipping_weight_lbs,
+      p.shipping_class,
+
       p.created_at,
       p.updated_at,
 
-      (
-        SELECT pi.url
-        FROM product_images pi
-        WHERE pi.product_id = p.id
-        ORDER BY pi.sort ASC, pi.created_at ASC
-        LIMIT 1
+      -- ✅ Prefer product_images; fall back to source card images
+      COALESCE(
+        (
+          SELECT pi.url
+          FROM product_images pi
+          WHERE pi.product_id = p.id
+          ORDER BY pi.sort ASC, pi.created_at ASC
+          LIMIT 1
+        ),
+        (
+          SELECT tcg.small_image
+          FROM tcg_cards tcg
+          WHERE tcg.id = p.source_card_id
+          LIMIT 1
+        ),
+        (
+          SELECT yi.image_url
+          FROM ygo_card_images yi
+          WHERE yi.card_id = p.source_card_id
+          LIMIT 1
+        )
       ) AS image_url,
 
+      -- ✅ Prefer product_images[]; if empty, build a 1-item array from fallback image
       COALESCE(
         (
           SELECT json_agg(
@@ -74,7 +124,46 @@ export async function GET(
           FROM product_images pi
           WHERE pi.product_id = p.id
         ),
-        '[]'::json
+        (
+          CASE
+            WHEN COALESCE(
+              (
+                SELECT tcg.small_image
+                FROM tcg_cards tcg
+                WHERE tcg.id = p.source_card_id
+                LIMIT 1
+              ),
+              (
+                SELECT yi.image_url
+                FROM ygo_card_images yi
+                WHERE yi.card_id = p.source_card_id
+                LIMIT 1
+              )
+            ) IS NOT NULL
+            THEN json_build_array(
+              json_build_object(
+                'url',
+                COALESCE(
+                  (
+                    SELECT tcg.small_image
+                    FROM tcg_cards tcg
+                    WHERE tcg.id = p.source_card_id
+                    LIMIT 1
+                  ),
+                  (
+                    SELECT yi.image_url
+                    FROM ygo_card_images yi
+                    WHERE yi.card_id = p.source_card_id
+                    LIMIT 1
+                  )
+                ),
+                'alt', p.title,
+                'sort', 0
+              )
+            )
+            ELSE '[]'::json
+          END
+        )
       ) AS images
 
     FROM products p
@@ -84,21 +173,16 @@ export async function GET(
 
   try {
     const res = await db.execute(q);
-    const rows = Array.isArray((res as any)?.rows) ? (res as any).rows : (res as any);
+    const rows = Array.isArray((res as any)?.rows)
+      ? (res as any).rows
+      : (res as any);
     const item = rows?.[0];
 
     if (!item) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
 
-    let images: any[] = [];
-    try {
-      if (Array.isArray(item.images)) images = item.images;
-      else if (typeof item.images === "string") images = JSON.parse(item.images);
-      else if (item.images) images = item.images;
-    } catch {
-      images = [];
-    }
+    const images = toJsonArray((item as any).images);
 
     return NextResponse.json({ item: { ...item, images } }, { status: 200 });
   } catch (e: any) {

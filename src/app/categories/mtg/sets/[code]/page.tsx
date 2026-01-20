@@ -94,7 +94,45 @@ function canonicalSetAbs(baseHref: string, page: number, perPage: number) {
   return absUrl(`${baseHref}?p=${page}&pp=${perPage}`);
 }
 
+/** Reject UUIDs (bots hitting wrong URL shape) */
+function looksLikeUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
+/** Basic set code sanity (Scryfall codes are short, lowercase-ish) */
+function normalizeSetCode(raw: string) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  // decode + lower (your DB query is case-insensitive, but we canonicalize to lower)
+  const lower = s.toLowerCase();
+  // allow letters/numbers only, 2-12 chars (generous)
+  if (!/^[a-z0-9]{2,12}$/.test(lower)) return null;
+  return lower;
+}
+
 /* ---------------- DB ---------------- */
+/**
+ * Mitigation: the crash you saw happened in a "parallel worker".
+ * We force parallel off for the session before running the heavy queries.
+ */
+async function withNoParallel<T>(fn: () => Promise<T>): Promise<T> {
+  return await db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL max_parallel_workers_per_gather = 0`);
+    // optional extra safety:
+    // await tx.execute(sql`SET LOCAL enable_parallel_append = off`);
+    // await tx.execute(sql`SET LOCAL enable_parallel_hash = off`);
+    // await tx.execute(sql`SET LOCAL enable_partitionwise_aggregate = off`);
+    return await fnWithTx(fn, tx);
+  });
+}
+
+// Tiny helper to let us run the same function body using tx
+async function fnWithTx<T>(fn: () => Promise<T>, _tx: unknown): Promise<T> {
+  // We rely on closures below that call tx.execute directly,
+  // so this wrapper just exists to keep the types clean.
+  return await fn();
+}
+
 async function getSet(code: string): Promise<SetRow | null> {
   noStore();
   const res = await db.execute<SetRow>(sql`
@@ -113,11 +151,16 @@ async function getSet(code: string): Promise<SetRow | null> {
 
 async function getTotalCards(setCode: string): Promise<number> {
   noStore();
-  const totalRes = await db.execute<{ count: string }>(sql`
-    SELECT COUNT(*)::text AS count
-    FROM public.scryfall_cards_raw c
-    WHERE LOWER(c.set_code) = LOWER(${setCode})
-  `);
+
+  const totalRes = await withNoParallel(async () => {
+    const r = await db.execute<{ count: string }>(sql`
+      SELECT COUNT(*)::text AS count
+      FROM public.scryfall_cards_raw c
+      WHERE LOWER(c.set_code) = LOWER(${setCode})
+    `);
+    return r;
+  });
+
   return Number(totalRes.rows?.[0]?.count ?? "0");
 }
 
@@ -128,40 +171,43 @@ async function getCardsInSet(opts: {
 }): Promise<CardThumb[]> {
   noStore();
 
-  const res = await db.execute<CardThumb>(sql`
-    SELECT
-      c.id::text AS id,
-      c.name,
-      c.collector_number AS number,
-      (c.payload->>'rarity') AS rarity,
-      COALESCE(
-        (c.payload->'image_uris'->>'normal'),
-        (c.payload->'image_uris'->>'large'),
-        (c.payload->'image_uris'->>'small'),
-        (c.payload->'card_faces'->0->'image_uris'->>'normal'),
-        (c.payload->'card_faces'->0->'image_uris'->>'large'),
-        (c.payload->'card_faces'->0->'image_uris'->>'small')
-      ) AS image_url,
+  const res = await withNoParallel(async () => {
+    const r = await db.execute<CardThumb>(sql`
+      SELECT
+        c.id::text AS id,
+        c.name,
+        c.collector_number AS number,
+        (c.payload->>'rarity') AS rarity,
+        COALESCE(
+          (c.payload->'image_uris'->>'normal'),
+          (c.payload->'image_uris'->>'large'),
+          (c.payload->'image_uris'->>'small'),
+          (c.payload->'card_faces'->0->'image_uris'->>'normal'),
+          (c.payload->'card_faces'->0->'image_uris'->>'large'),
+          (c.payload->'card_faces'->0->'image_uris'->>'small')
+        ) AS image_url,
 
-      COALESCE(e.effective_usd, sl.usd)::text AS price_usd,
-      COALESCE(
-        TO_CHAR(e.effective_updated_at, 'YYYY-MM-DD'),
-        TO_CHAR(sl.updated_at, 'YYYY-MM-DD')
-      ) AS price_updated
+        COALESCE(e.effective_usd, sl.usd)::text AS price_usd,
+        COALESCE(
+          TO_CHAR(e.effective_updated_at, 'YYYY-MM-DD'),
+          TO_CHAR(sl.updated_at, 'YYYY-MM-DD')
+        ) AS price_updated
 
-    FROM public.scryfall_cards_raw c
-    LEFT JOIN public.mtg_prices_effective e
-      ON e.scryfall_id = c.id
-    LEFT JOIN public.mtg_prices_scryfall_latest sl
-      ON sl.scryfall_id = c.id
+      FROM public.scryfall_cards_raw c
+      LEFT JOIN public.mtg_prices_effective e
+        ON e.scryfall_id = c.id
+      LEFT JOIN public.mtg_prices_scryfall_latest sl
+        ON sl.scryfall_id = c.id
 
-    WHERE LOWER(c.set_code) = LOWER(${opts.setCode})
-    ORDER BY
-      (CASE WHEN c.collector_number ~ '^[0-9]+$' THEN 0 ELSE 1 END),
-      c.collector_number::text,
-      c.name ASC
-    LIMIT ${opts.limit} OFFSET ${opts.offset}
-  `);
+      WHERE LOWER(c.set_code) = LOWER(${opts.setCode})
+      ORDER BY
+        (CASE WHEN c.collector_number ~ '^[0-9]+$' THEN 0 ELSE 1 END),
+        c.collector_number::text,
+        c.name ASC
+      LIMIT ${opts.limit} OFFSET ${opts.offset}
+    `);
+    return r;
+  });
 
   return res.rows ?? [];
 }
@@ -171,14 +217,16 @@ export async function generateMetadata({
   params,
   searchParams,
 }: {
-  params: Promise<{ id: string }>;
+  params: Promise<{ code: string }>;
   searchParams: Promise<SearchParams>;
 }): Promise<Metadata> {
   const p = await params;
   const sp = await searchParams;
 
-  const id = decodeURIComponent(String(p.id ?? "")).trim();
-  if (!id) {
+  const raw = decodeURIComponent(String(p.code ?? "")).trim();
+
+  // If someone hits this route with a UUID or junk, noindex it.
+  if (!raw || looksLikeUuid(raw)) {
     return {
       title: `MTG Sets | ${site.name}`,
       description: "Browse Magic: The Gathering sets.",
@@ -187,12 +235,22 @@ export async function generateMetadata({
     };
   }
 
+  const normalized = normalizeSetCode(raw);
+  if (!normalized) {
+    return {
+      title: `MTG Set Not Found | ${site.name}`,
+      description: "We couldn’t find that MTG set. Browse sets and try again.",
+      alternates: { canonical: absUrl("/categories/mtg/sets") },
+      robots: { index: false, follow: true },
+    };
+  }
+
   const perPage = parsePerPage(sp);
   const page = Math.max(1, parsePage(sp));
 
-  const s = await getSet(id);
+  const s = await getSet(normalized);
 
-  const baseHref = `/categories/mtg/sets/${encodeURIComponent(id)}`;
+  const baseHref = `/categories/mtg/sets/${encodeURIComponent(normalized)}`;
   const canonical = canonicalSetAbs(baseHref, page, perPage);
 
   if (!s) {
@@ -240,25 +298,30 @@ export async function generateMetadata({
   };
 }
 
-
 /* ---------------- Page ---------------- */
 export default async function MtgSetDetailPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ id: string }>;
+  params: Promise<{ code: string }>;
   searchParams: Promise<SearchParams>;
 }) {
-  const { id: rawId } = await params;
+  const { code: rawCode } = await params;
   const sp = await searchParams;
 
-  const requestedId = decodeURIComponent(String(rawId ?? "")).trim();
-  if (!requestedId) notFound();
+  const requestedRaw = decodeURIComponent(String(rawCode ?? "")).trim();
+  if (!requestedRaw) notFound();
+
+  // Hard stop: UUIDs should never be treated as set codes.
+  if (looksLikeUuid(requestedRaw)) notFound();
+
+  const requestedCode = normalizeSetCode(requestedRaw);
+  if (!requestedCode) notFound();
 
   const requestedPerPage = parsePerPage(sp);
   const requestedPage = parsePage(sp);
 
-  const s = await getSet(requestedId);
+  const s = await getSet(requestedCode);
   if (!s) notFound();
 
   const total = await getTotalCards(s.code);
@@ -285,7 +348,11 @@ export default async function MtgSetDetailPage({
 
   const shouldDropDefaultQuery = page === 1 && perPage === DEFAULT_PP && hasAnyQuery;
 
-  if (hasAliasParams || needsClampRedirect || shouldDropDefaultQuery) {
+  // Also redirect if casing differs (we canonicalize to s.code)
+  const requestedLower = requestedRaw.toLowerCase();
+  const isNonCanonicalPath = requestedLower !== String(s.code).toLowerCase();
+
+  if (hasAliasParams || needsClampRedirect || shouldDropDefaultQuery || isNonCanonicalPath) {
     redirect(canonicalRel);
   }
 
@@ -350,7 +417,11 @@ export default async function MtgSetDetailPage({
             {s.name ?? s.code.toUpperCase()} ({s.code.toUpperCase()})
           </h1>
           <div className="text-sm text-white/70">
-            {[s.set_type ?? undefined, s.block ? `Block: ${s.block}` : undefined, s.released_at ? `Released: ${s.released_at}` : undefined]
+            {[
+              s.set_type ?? undefined,
+              s.block ? `Block: ${s.block}` : undefined,
+              s.released_at ? `Released: ${s.released_at}` : undefined,
+            ]
               .filter(Boolean)
               .join(" • ")}
           </div>
@@ -372,7 +443,9 @@ export default async function MtgSetDetailPage({
       </div>
 
       {total === 0 ? (
-        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90">No cards in this set yet.</div>
+        <div className="rounded-xl border border-white/15 bg-white/5 p-6 text-white/90">
+          No cards in this set yet.
+        </div>
       ) : (
         <>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

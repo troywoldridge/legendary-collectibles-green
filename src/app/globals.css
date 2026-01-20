@@ -957,3 +957,11 @@ body::after {
   object-position: center;
 }
 
+.shopIntro {
+  margin-top: 0.75rem;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  max-width: 60ch;
+}
+

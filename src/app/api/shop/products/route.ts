@@ -28,12 +28,49 @@ function toBool(v: unknown): boolean | null {
   return null;
 }
 
+// normalize plural slugs -> enum values
+function normFormat(v: string) {
+  const s = (v || "").trim().toLowerCase();
+  if (!s) return "";
+  if (s === "singles") return "single";
+  if (s === "packs") return "pack";
+  if (s === "boxes") return "box";
+  if (s === "bundles") return "bundle";
+  if (s === "lots") return "lot";
+  if (s === "accessories") return "accessory";
+  return s;
+}
+
+function normGame(v: string) {
+  const s = (v || "").trim().toLowerCase();
+  if (!s) return "";
+  if (s === "ygo" || s === "yu-gi-oh") return "yugioh";
+  if (s === "magic") return "mtg";
+  return s;
+}
+
+// "13/98" -> 13, "175/172" -> 175, "" -> null
+const leadingInt = (expr: any) =>
+  sql`nullif(regexp_replace(coalesce(${expr}::text, ''), '[^0-9].*$', ''), '')::int`;
+
+// "LOB-001" -> 1, "12a" -> 12, "TG12" -> 12
+const anyInt = (expr: any) =>
+  sql`nullif(regexp_replace(coalesce(${expr}::text, ''), '[^0-9]+', '', 'g'), '')::int`;
+
+// Pokémon release_date is text; normalize "YYYY/MM/DD" -> "YYYY-MM-DD" then cast
+const pokemonReleaseDate = sql`nullif(replace(coalesce(tcg.release_date, ''), '/', '-'), '')::date`;
+
+// UUID check for MTG source_card_id stored as text in products
+const UUID_RE =
+  "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
 
-  const game = norm(searchParams.get("game")).toLowerCase(); // pokemon|yugioh|mtg|sports
-  const format = norm(searchParams.get("format")).toLowerCase(); // single|pack|box|bundle|lot|accessory
-  const sort = norm(searchParams.get("sort")).toLowerCase() || "featured";
+  const game = normGame(norm(searchParams.get("game")));
+  const format = normFormat(norm(searchParams.get("format")));
+  const sortRaw = norm(searchParams.get("sort")).toLowerCase();
+  const sort = sortRaw || "featured";
 
   const page = toInt(searchParams.get("page"), 1, 999999);
   const limit = toInt(searchParams.get("limit"), 24, 96);
@@ -48,7 +85,7 @@ export async function GET(req: NextRequest) {
   const priceMin = norm(searchParams.get("priceMin"));
   const priceMax = norm(searchParams.get("priceMax"));
 
-  // Basic WHERE building
+  // WHERE
   const where: any[] = [];
   where.push(sql`p.status = 'active'`);
 
@@ -65,7 +102,6 @@ export async function GET(req: NextRequest) {
   if (priceMax && !Number.isNaN(Number(priceMax))) where.push(sql`p.price_cents <= ${Number(priceMax)}`);
 
   if (q) {
-    // basic search on title/subtitle/sku
     const like = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
     where.push(sql`(
       p.title ILIKE ${like}
@@ -76,16 +112,34 @@ export async function GET(req: NextRequest) {
 
   const whereSql = where.length ? sql`where ${sql.join(where, sql` and `)}` : sql``;
 
-  // Sorting
-  // Sorting (make it deterministic with a tie-breaker)
-let orderBy = sql`p.updated_at desc, p.id desc`;
+  // Smart default: singles should browse by set+number
+  const isSingles = format === "single";
+  const effectiveSort = isSingles && (sort === "featured" || !sortRaw) ? "set_number" : sort;
 
-if (sort === "price_asc") orderBy = sql`p.price_cents asc, p.updated_at desc, p.id desc`;
-if (sort === "price_desc") orderBy = sql`p.price_cents desc, p.updated_at desc, p.id desc`;
-if (sort === "new") orderBy = sql`p.created_at desc, p.id desc`;
-// featured -> updated_at desc, id desc
+  // ORDER BY defaults
+  let orderBy = sql`p.updated_at desc, p.id desc`;
+  if (effectiveSort === "price_asc") orderBy = sql`p.price_cents asc, p.updated_at desc, p.id desc`;
+  if (effectiveSort === "price_desc") orderBy = sql`p.price_cents desc, p.updated_at desc, p.id desc`;
+  if (effectiveSort === "new") orderBy = sql`p.created_at desc, p.id desc`;
 
-  // featured -> keep updated_at desc for now
+  // Universal set + number sort for Pokemon + YGO + MTG
+  if (effectiveSort === "set_number") {
+    orderBy = sql`
+      coalesce(${pokemonReleaseDate}, ss.released_at) asc nulls last,
+      coalesce(tcg.set_name, ss.name, ycs.set_name, ycs.set_code) asc nulls last,
+
+      coalesce(
+        ${leadingInt(sql`tcg.number`)},
+        ${anyInt(sql`ycs.set_code`)},
+        ${leadingInt(sql`scry.collector_number`)},
+        ${anyInt(sql`scry.collector_number`)}
+      ) asc nulls last,
+
+      coalesce(tcg.name, ygo.name, scry.name) asc nulls last,
+      p.updated_at desc,
+      p.id desc
+    `;
+  }
 
   // COUNT
   const countRow = await db.execute<{ count: string }>(sql`
@@ -95,63 +149,93 @@ if (sort === "new") orderBy = sql`p.created_at desc, p.id desc`;
   `);
   const total = Number(countRow.rows?.[0]?.count ?? "0");
 
-  // ITEMS + FIRST IMAGE (this is the critical part)
- // ITEMS + IMAGE (Pokemon pulls from tcg_cards via source_card_id)
-const rows = await db.execute(sql`
-  select
-    p.id,
-    p.title,
-    p.slug,
-    p.subtitle,
-    p.game::text as game,
-    p.format::text as format,
-    p.sealed,
-    p.is_graded as "isGraded",
-    p.grader::text as grader,
-    p.grade_x10 as "gradeX10",
-    p.condition::text as condition,
-    p.price_cents as "priceCents",
-    p.compare_at_cents as "compareAtCents",
-    p.inventory_type::text as "inventoryType",
-    p.quantity,
+  // ITEMS
+  const rows = await db.execute(sql`
+    select
+      p.id,
+      p.title,
+      p.slug,
+      p.subtitle,
+      p.game::text as game,
+      p.format::text as format,
+      p.sealed,
+      p.is_graded as "isGraded",
+      p.grader::text as grader,
+      p.grade_x10 as "gradeX10",
+      p.condition::text as condition,
+      p.price_cents as "priceCents",
+      p.compare_at_cents as "compareAtCents",
+      p.inventory_type::text as "inventoryType",
+      p.quantity,
 
-    -- Pokemon-first image strategy (HIRES):
+      -- extra metadata for UI (optional)
+      coalesce(tcg.set_name, ss.name, ycs.set_name, ycs.set_code) as "setName",
+      coalesce(tcg.number::text, ycs.set_code::text, scry.collector_number::text) as "cardNumber",
+
+      -- Pokemon-first image strategy (HIRES)
+      case
+        when p.game = 'pokemon'::game
+         and tcg.small_image is not null
+         and tcg.small_image <> ''
+         and tcg.small_image like 'https://images.pokemontcg.io/%'
+        then regexp_replace(tcg.small_image, '\.png$', '_hires.png')
+        else pi.url
+      end as "imageUrl",
+
+      case
+        when p.game = 'pokemon'::game and tcg.small_image is not null and tcg.small_image <> '' then null
+        else pi.alt
+      end as "imageAlt"
+
+    from products p
+
+    -- ✅ Pokemon
+    left join tcg_cards tcg
+      on p.game = 'pokemon'::game
+     and tcg.id = p.source_card_id
+
+    -- ✅ Yu-Gi-Oh
+    left join ygo_cards ygo
+      on p.game = 'yugioh'::game
+     and ygo.card_id = p.source_card_id
+
+    -- Pick ONE primary set printing row (lowest set_code)
+    left join lateral (
+      select ycs.set_code, ycs.set_name
+      from ygo_card_sets ycs
+      where ycs.card_id = ygo.card_id
+      order by ycs.set_code asc nulls last
+      limit 1
+    ) ycs on true
+
+    -- ✅ MTG (Scryfall raw)
+   left join scryfall_cards_raw scry
+  on scry.id = (
     case
-      when p.game = 'pokemon'::game
-       and tcg.small_image is not null
-       and tcg.small_image <> ''
-       and tcg.small_image like 'https://images.pokemontcg.io/%'
-      then
-        regexp_replace(tcg.small_image, '\.png$', '_hires.png')
-      else
-        pi.url
-    end as "imageUrl",
+      when p.game = 'mtg'::game and p.source_card_id ~* ${UUID_RE}
+      then p.source_card_id::uuid
+      else null
+    end
+  )
 
-    case
-      when p.game = 'pokemon'::game and tcg.small_image is not null and tcg.small_image <> '' then null
-      else pi.alt
-    end as "imageAlt"
 
-  from products p
+    left join scryfall_sets ss
+      on ss.id = scry.set_id
 
-  left join tcg_cards tcg
-    on p.game = 'pokemon'::game
-   and tcg.id = p.source_card_id
+    -- Product image fallback
+    left join lateral (
+      select url, alt
+      from product_images
+      where product_id = p.id
+      order by sort asc
+      limit 1
+    ) pi on true
 
-  left join lateral (
-    select url, alt
-    from product_images
-    where product_id = p.id
-    order by sort asc
-    limit 1
-  ) pi on true
-
-  ${whereSql}
-  order by ${orderBy}
-  limit ${limit}
-  offset ${offset}
-`);
-
+    ${whereSql}
+    order by ${orderBy}
+    limit ${limit}
+    offset ${offset}
+  `);
 
   const items = (rows.rows ?? []).map((r: any) => ({
     id: r.id,
@@ -169,15 +253,15 @@ const rows = await db.execute(sql`
     compareAtCents: r.compareAtCents != null ? Number(r.compareAtCents) : null,
     inventoryType: r.inventoryType ?? null,
     quantity: r.quantity != null ? Number(r.quantity) : null,
+
+    setName: r.setName ?? null,
+    number: r.cardNumber ?? null,
+
     image: r.imageUrl ? { url: r.imageUrl, alt: r.imageAlt ?? null } : null,
   }));
 
   return NextResponse.json(
     { items, total, page, limit },
-    {
-      headers: {
-        "Cache-Control": "no-store, max-age=0",
-      },
-    },
+    { headers: { "Cache-Control": "no-store, max-age=0" } }
   );
 }

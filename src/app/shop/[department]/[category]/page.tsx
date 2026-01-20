@@ -90,8 +90,27 @@ export async function generateMetadata(props: {
   const dept = normalizeDepartmentSlug(departmentRaw);
   const category = normalizeCategorySlug(categoryRaw);
 
+  // If bad URL, don't index it
   if (!dept || !category) {
-    return { title: `Shop | ${site.name}`, robots: { index: true, follow: true } };
+    const canonical = `${site.url}/shop`;
+    return {
+      title: `Shop | ${site.name}`,
+      description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
+      alternates: { canonical },
+      robots: { index: false, follow: true },
+      openGraph: {
+        type: "website",
+        url: canonical,
+        title: `Shop | ${site.name}`,
+        description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
+        siteName: site.name,
+      },
+      twitter: {
+        card: "summary",
+        title: `Shop | ${site.name}`,
+        description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
+      },
+    };
   }
 
   const deptCfg = getDepartmentConfig(dept);
@@ -102,17 +121,57 @@ export async function generateMetadata(props: {
   if (!deptCfg || !cfg) {
     return {
       title: `Shop | ${site.name}`,
-      robots: { index: true, follow: true },
+      description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
       alternates: { canonical },
+      robots: { index: false, follow: true },
+      openGraph: {
+        type: "website",
+        url: canonical,
+        title: `Shop | ${site.name}`,
+        description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
+        siteName: site.name,
+      },
+      twitter: {
+        card: "summary",
+        title: `Shop | ${site.name}`,
+        description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
+      },
     };
   }
 
+  const deptName = deptCfg.name; // e.g. "Pokémon"
+  const catLabel = cfg.label;    // e.g. "Singles", "Sealed", etc.
+
+  // Keyword-forward, readable, not spammy
+  const title = `${deptName} ${catLabel} | ${site.name}`;
+  const description = `Shop ${deptName} ${catLabel}. Live inventory with fast shipping, secure packaging, and safe checkout.`;
+
   return {
-    title: `Shop • ${deptCfg.name} • ${cfg.label} | ${site.name}`,
-    description: `${cfg.label} from ${deptCfg.name}. Live inventory ready to ship.`,
+    title,
+    description,
     alternates: { canonical },
+    robots: { index: true, follow: true },
+
+    openGraph: {
+      type: "website",
+      url: canonical,
+      title,
+      description,
+      siteName: site.name,
+    },
+
+    twitter: {
+      card: "summary",
+      title,
+      description,
+    },
+
+    other: {
+      "application-name": site.name,
+    },
   };
 }
+
 
 export default async function ShopCategoryPage(props: {
   params: Params | Promise<Params>;
@@ -172,6 +231,12 @@ export default async function ShopCategoryPage(props: {
         <h1 className="shopTitle">
           {deptCfg.name} / {cfg.label}
         </h1>
+
+        <p className="shopIntro">
+          Shop {deptCfg.name} {cfg.label} at Legendary Collectibles — live inventory ready to ship with secure packaging and safe checkout.
+        </p>
+
+
 
         <p className="shopSubtitle">{deptCfg.description}</p>
         {deptCfg.hero.accent ? <p className="shopAccent">{deptCfg.hero.accent}</p> : null}
