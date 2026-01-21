@@ -17,7 +17,11 @@ function pickQuestion(body: unknown): string {
 // Strict same-origin guard (browser only)
 function isSameOrigin(req: Request): boolean {
   const origin = req.headers.get("origin") || "";
-  const host = req.headers.get("host") || "";
+  const host =
+    req.headers.get("x-forwarded-host") ||
+    req.headers.get("host") ||
+    "";
+
   if (!origin || !host) return false;
 
   try {

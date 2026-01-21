@@ -1,5 +1,3 @@
-"use client";
-
 import { useMemo, useState } from "react";
 
 const SUGGESTED = [
@@ -21,15 +19,20 @@ function parseAskResponse(v: unknown): AskResponse | null {
   if (!isObject(v)) return null;
 
   const answer = v["answer"];
+  const sources = v["sources"];
   const error = v["error"];
   const message = v["message"];
 
   const out: AskResponse = {};
+
   if (typeof answer === "string") (out as AskOk).answer = answer;
+  if (Array.isArray(sources) && sources.every((x) => typeof x === "string")) {
+    (out as AskOk).sources = sources as string[];
+  }
+
   if (typeof error === "string") (out as AskErr).error = error;
   if (typeof message === "string") (out as AskErr).message = message;
 
-  // If it's totally empty, treat as invalid
   if (!("answer" in out) && !("error" in out) && !("message" in out)) return null;
   return out;
 }
@@ -37,9 +40,13 @@ function parseAskResponse(v: unknown): AskResponse | null {
 export default function AskLegendaryWidget() {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<string>("");
+  const [sources, setSources] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
 
-  const canAsk = useMemo(() => question.trim().length > 0 && status !== "loading", [question, status]);
+  const canAsk = useMemo(
+    () => question.trim().length > 0 && status !== "loading",
+    [question, status],
+  );
 
   async function ask(q?: string) {
     const finalQ = (q ?? question).trim();
@@ -47,9 +54,10 @@ export default function AskLegendaryWidget() {
 
     setStatus("loading");
     setAnswer("");
+    setSources([]);
 
     try {
-      const res = await fetch("/api/ai/ask-ui", {
+      const res = await fetch("/api/ask-ui", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: finalQ }),
@@ -60,6 +68,21 @@ export default function AskLegendaryWidget() {
 
       if (!res.ok) {
         setStatus("error");
+
+        // Friendly, specific errors
+        if (res.status === 429) {
+          setAnswer("Too many requests — please try again in a few minutes.");
+          return;
+        }
+        if (res.status === 403) {
+          setAnswer("That request was blocked. Please try from the site directly.");
+          return;
+        }
+        if (res.status === 401) {
+          setAnswer("AI is not configured correctly on the server (token).");
+          return;
+        }
+
         const msg =
           (data && "message" in data && typeof data.message === "string" && data.message) ||
           (data && "error" in data && typeof data.error === "string" && data.error) ||
@@ -68,12 +91,18 @@ export default function AskLegendaryWidget() {
         return;
       }
 
-      const out =
+      const outAnswer =
         (data && "answer" in data && typeof data.answer === "string" && data.answer) ||
         "Sorry, I don’t have that information.";
 
+      const outSources =
+        data && "sources" in data && Array.isArray((data as AskOk).sources)
+          ? ((data as AskOk).sources ?? [])
+          : [];
+
       setStatus("idle");
-      setAnswer(out);
+      setAnswer(outAnswer);
+      setSources(outSources);
     } catch {
       setStatus("error");
       setAnswer("Network error. Please try again.");
@@ -121,6 +150,17 @@ export default function AskLegendaryWidget() {
 
       <div className="aiWidgetAnswer" aria-live="polite">
         {answer ? <p>{answer}</p> : <p className="aiWidgetHint">Try a question above.</p>}
+
+        {sources.length > 0 ? (
+          <details className="aiWidgetSources">
+            <summary>Sources</summary>
+            <ul>
+              {sources.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
       </div>
     </section>
   );
