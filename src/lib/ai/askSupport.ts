@@ -24,7 +24,6 @@ function loadKnowledge() {
 }
 
 function pickAnswerFromOpenAIResponse(data: unknown): string | null {
-  // { choices: [ { message: { content: "..." } } ] }
   if (!isObject(data)) return null;
   const choices = data["choices"];
   if (!Array.isArray(choices) || choices.length === 0) return null;
@@ -42,7 +41,23 @@ function pickAnswerFromOpenAIResponse(data: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+// Helper: detect “no answer in knowledge”
+function looksUnanswered(answer: string): boolean {
+  const a = answer.toLowerCase();
+  return (
+    a.includes("don’t have that information") ||
+    a.includes("don't have that information") ||
+    a.includes("i don't know") ||
+    a.includes("i do not know") ||
+    a.includes("not present") ||
+    a.includes("contacting support")
+  );
+}
+
 export async function askSupport(question: string) {
+  // (Optional) log every question:
+  // console.log("[AI_ASK]", question);
+
   if (!process.env.OPENAI_API_KEY) {
     return {
       ok: false as const,
@@ -53,7 +68,11 @@ export async function askSupport(question: string) {
 
   const knowledge = loadKnowledge();
   if (!knowledge.ok) {
-    return { ok: false as const, status: 500, body: { error: "knowledge_error", message: knowledge.error } };
+    return {
+      ok: false as const,
+      status: 500,
+      body: { error: "knowledge_error", message: knowledge.error },
+    };
   }
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -109,6 +128,11 @@ export async function askSupport(question: string) {
       status: 502,
       body: { error: "openai_empty", message: "OpenAI returned no message content." },
     };
+  }
+
+  // ✅ Only log unanswered questions
+  if (looksUnanswered(answer)) {
+    console.log("[AI_UNANSWERED]", question);
   }
 
   return { ok: true as const, status: 200, body: { answer, sources: knowledge.files } };
