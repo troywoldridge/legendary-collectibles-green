@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { askSupport } from "@/lib/ai/askSupport";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,7 +15,7 @@ function pickQuestion(body: unknown): string {
   return typeof q === "string" ? q.trim() : "";
 }
 
-// Strict same-origin guard (browser only)
+// ---- Same-origin guard ----
 function isSameOrigin(req: Request): boolean {
   const origin = req.headers.get("origin") || "";
   const host =
@@ -22,8 +23,7 @@ function isSameOrigin(req: Request): boolean {
     req.headers.get("host") ||
     "";
 
-  if (!origin || !host) return false;
-
+  if (!origin || !host) return true; // allow server-to-server/curl
   try {
     const o = new URL(origin);
     return o.host === host;
@@ -32,7 +32,7 @@ function isSameOrigin(req: Request): boolean {
   }
 }
 
-// Bot-ish UA block (cheap)
+// ---- Bot-ish UA block ----
 function looksLikeBot(ua: string): boolean {
   const u = ua.toLowerCase();
   return (
@@ -48,15 +48,17 @@ function looksLikeBot(ua: string): boolean {
   );
 }
 
-// In-memory rate limiter (per process)
+// ---- In-memory rate limiter ----
 type Bucket = { count: number; resetAt: number };
 const buckets = new Map<string, Bucket>();
 
 function getClientIp(req: Request): string {
   const cf = req.headers.get("cf-connecting-ip");
   if (cf) return cf.trim();
+
   const xff = req.headers.get("x-forwarded-for");
   if (xff) return xff.split(",")[0].trim();
+
   return "unknown";
 }
 
@@ -81,75 +83,47 @@ function rateLimit(key: string, limit: number, windowMs: number) {
 
 export async function POST(req: Request) {
   try {
-    // Same-origin only
     if (!isSameOrigin(req)) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    // UA heuristic
     const ua = req.headers.get("user-agent") || "";
     if (ua && looksLikeBot(ua)) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    // Rate limit: 20 per 10 minutes per IP
     const ip = getClientIp(req);
-    const rl = rateLimit(`ask-ui:${ip}`, 20, 10 * 60 * 1000);
+    const rl = rateLimit(`ask-ui:${ip}`, 10, 5 * 60 * 1000);
 
     const headers = new Headers();
-    headers.set("X-RateLimit-Limit", "20");
+    headers.set("X-RateLimit-Limit", "10");
     headers.set("X-RateLimit-Remaining", String(rl.remaining));
     headers.set("X-RateLimit-Reset", String(Math.floor(rl.resetAt / 1000)));
 
     if (!rl.ok) {
-      return new NextResponse(JSON.stringify({ error: "rate_limited" }), {
-        status: 429,
-        headers,
-      });
+      return new NextResponse(JSON.stringify({ error: "rate_limited" }), { status: 429, headers });
     }
 
     const body: unknown = await req.json().catch(() => ({}));
     const question = pickQuestion(body);
 
     if (!question) {
-      return new NextResponse(
-        JSON.stringify({ error: "bad_request", message: "Missing question" }),
-        { status: 400, headers },
-      );
+      return new NextResponse(JSON.stringify({ error: "bad_request", message: "Missing question" }), {
+        status: 400,
+        headers,
+      });
     }
 
     if (question.length > 300) {
-      return new NextResponse(
-        JSON.stringify({ error: "bad_request", message: "Question too long." }),
-        { status: 400, headers },
-      );
+      return new NextResponse(JSON.stringify({ error: "bad_request", message: "Question too long." }), {
+        status: 400,
+        headers,
+      });
     }
 
-    // Proxy to the token-protected OpenAI route
-    const token = process.env.AI_WIDGET_TOKEN || "";
-    if (!token) {
-      return new NextResponse(
-        JSON.stringify({ error: "server_config", message: "AI_WIDGET_TOKEN missing on server." }),
-        { status: 500, headers },
-      );
-    }
-
-    const url = new URL("/api/ask-legendary", req.url);
-    const upstream = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-ai-token": token,
-      },
-      body: JSON.stringify({ question }),
-    });
-
-    const text = await upstream.text();
-    const outHeaders = new Headers(headers);
-    const ct = upstream.headers.get("content-type");
-    if (ct) outHeaders.set("content-type", ct);
-
-    return new NextResponse(text, { status: upstream.status, headers: outHeaders });
+    // 🔥 Direct call — no internal fetch hop
+    const result = await askSupport(question);
+    return new NextResponse(JSON.stringify(result.body), { status: result.status, headers });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     return NextResponse.json({ error: "server_error", message: msg }, { status: 500 });
