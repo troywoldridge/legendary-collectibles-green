@@ -28,10 +28,10 @@ export default function robots(): MetadataRoute.Robots {
       { userAgent: "Googlebot-Image", allow: "/" },
 
       // 🤖 AI crawler policy (your choice)
-      { userAgent: "GPTBot", allow: "/" },
-      { userAgent: "ClaudeBot", disallow: "/" },
-      { userAgent: "CCBot", disallow: "/" },
-      { userAgent: "Bytespider", disallow: "/" },
+     // { userAgent: "GPTBot", allow: "/" },
+     // { userAgent: "ClaudeBot", disallow: "/" },
+     // { userAgent: "CCBot", disallow: "/" },
+     // { userAgent: "Bytespider", disallow: "/" },
 
       // 🔎 Google main crawler — allow public pages, block protected
       {
