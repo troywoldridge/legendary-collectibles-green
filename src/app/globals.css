@@ -965,3 +965,67 @@ body::after {
   max-width: 60ch;
 }
 
+/* AI Widget */
+.aiWidget {
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+  padding: 16px;
+  margin-top: 16px;
+}
+
+.aiWidgetHeader { margin-bottom: 12px; }
+.aiWidgetTitle { margin: 0; }
+.aiWidgetSubtitle { margin: 6px 0 0; opacity: 0.8; }
+
+.aiWidgetRow {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 12px 0;
+}
+
+.aiWidgetInput {
+  flex: 1;
+  min-width: 220px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: transparent;
+}
+
+.aiWidgetButton {
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: transparent;
+  cursor: pointer;
+}
+
+.aiWidgetButton:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.aiWidgetChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.aiWidgetChip {
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.9;
+}
+
+.aiWidgetChip:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.aiWidgetAnswer {
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.03);
+}
+
+.aiWidgetHint { opacity: 0.75; }
