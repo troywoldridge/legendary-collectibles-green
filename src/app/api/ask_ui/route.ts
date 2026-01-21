@@ -14,17 +14,11 @@ function pickQuestion(body: unknown): string {
   return typeof q === "string" ? q.trim() : "";
 }
 
-// ---- Same-origin guard (strict) ----
-// Only allow requests coming from your own site pages.
-// This blocks other websites from calling your endpoint from a browser.
-// (Server-to-server calls should use the tokenized route directly instead.)
+// Strict same-origin guard (browser only)
 function isSameOrigin(req: Request): boolean {
   const origin = req.headers.get("origin") || "";
   const host = req.headers.get("host") || "";
-
-  // If a browser is calling, Origin should exist. If it doesn't, treat as not allowed.
-  if (!origin) return false;
-  if (!host) return false;
+  if (!origin || !host) return false;
 
   try {
     const o = new URL(origin);
@@ -34,7 +28,7 @@ function isSameOrigin(req: Request): boolean {
   }
 }
 
-// ---- Bot-ish UA block (cheap heuristic) ----
+// Bot-ish UA block (cheap)
 function looksLikeBot(ua: string): boolean {
   const u = ua.toLowerCase();
   return (
@@ -50,18 +44,15 @@ function looksLikeBot(ua: string): boolean {
   );
 }
 
-// ---- In-memory rate limiter (per-process) ----
+// In-memory rate limiter (per process)
 type Bucket = { count: number; resetAt: number };
 const buckets = new Map<string, Bucket>();
 
 function getClientIp(req: Request): string {
-  // Cloudflare: CF-Connecting-IP is best
   const cf = req.headers.get("cf-connecting-ip");
   if (cf) return cf.trim();
-
   const xff = req.headers.get("x-forwarded-for");
   if (xff) return xff.split(",")[0].trim();
-
   return "unknown";
 }
 
@@ -86,18 +77,18 @@ function rateLimit(key: string, limit: number, windowMs: number) {
 
 export async function POST(req: Request) {
   try {
-    // 1) Only allow same-origin browser calls
+    // Same-origin only
     if (!isSameOrigin(req)) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    // 2) Cheap bot UA block
+    // UA heuristic
     const ua = req.headers.get("user-agent") || "";
     if (ua && looksLikeBot(ua)) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
     }
 
-    // 3) Rate limit: 20 requests per 10 minutes per IP (friendlier for real users)
+    // Rate limit: 20 per 10 minutes per IP
     const ip = getClientIp(req);
     const rl = rateLimit(`ask-ui:${ip}`, 20, 10 * 60 * 1000);
 
@@ -113,7 +104,6 @@ export async function POST(req: Request) {
       });
     }
 
-    // 4) Validate input
     const body: unknown = await req.json().catch(() => ({}));
     const question = pickQuestion(body);
 
@@ -131,8 +121,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 5) Forward to the protected OpenAI-backed route
-    // IMPORTANT: This route must NOT be under /api/ai/* if Cloudflare blocks that prefix.
+    // Proxy to the token-protected OpenAI route
     const token = process.env.AI_WIDGET_TOKEN || "";
     if (!token) {
       return new NextResponse(
@@ -142,7 +131,6 @@ export async function POST(req: Request) {
     }
 
     const url = new URL("/api/ask-legendary", req.url);
-
     const upstream = await fetch(url, {
       method: "POST",
       headers: {
@@ -153,8 +141,6 @@ export async function POST(req: Request) {
     });
 
     const text = await upstream.text();
-    // Pass through upstream response + keep our rate limit headers
-    // (also forward content-type if present)
     const outHeaders = new Headers(headers);
     const ct = upstream.headers.get("content-type");
     if (ct) outHeaders.set("content-type", ct);
