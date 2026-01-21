@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 const SUGGESTED = [
   "How long do orders take to ship?",
@@ -26,12 +26,10 @@ function parseAskResponse(v: unknown): AskResponse | null {
   const message = v["message"];
 
   const out: AskResponse = {};
-
   if (typeof answer === "string") (out as AskOk).answer = answer;
   if (Array.isArray(sources) && sources.every((x) => typeof x === "string")) {
     (out as AskOk).sources = sources as string[];
   }
-
   if (typeof error === "string") (out as AskErr).error = error;
   if (typeof message === "string") (out as AskErr).message = message;
 
@@ -45,6 +43,10 @@ export default function AskLegendaryWidget() {
   const [sources, setSources] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
 
+  // Prevent overlapping requests + allow aborting
+  const inFlight = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+
   const canAsk = useMemo(
     () => question.trim().length > 0 && status !== "loading",
     [question, status],
@@ -54,15 +56,27 @@ export default function AskLegendaryWidget() {
     const finalQ = (q ?? question).trim();
     if (!finalQ) return;
 
+    // Hard guard (fixes double-click / chip spam)
+    if (inFlight.current) return;
+    inFlight.current = true;
+
     setStatus("loading");
     setAnswer("");
     setSources([]);
+
+    // Abort any previous request (extra safety)
+    try {
+      abortRef.current?.abort();
+    } catch {}
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const res = await fetch("/api/ask-ui", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: finalQ }),
+        signal: controller.signal,
       });
 
       const raw: unknown = await res.json().catch(() => null);
@@ -71,7 +85,6 @@ export default function AskLegendaryWidget() {
       if (!res.ok) {
         setStatus("error");
 
-        // Friendly, specific errors
         if (res.status === 429) {
           setAnswer("Too many requests — please try again in a few minutes.");
           return;
@@ -80,15 +93,12 @@ export default function AskLegendaryWidget() {
           setAnswer("That request was blocked. Please try from the site directly.");
           return;
         }
-        if (res.status === 401) {
-          setAnswer("AI is not configured correctly on the server (token).");
-          return;
-        }
 
         const msg =
           (data && "message" in data && typeof data.message === "string" && data.message) ||
           (data && "error" in data && typeof data.error === "string" && data.error) ||
-          "Something went wrong. Please try again.";
+          `Request failed (HTTP ${res.status}). Please try again.`;
+
         setAnswer(msg);
         return;
       }
@@ -105,9 +115,16 @@ export default function AskLegendaryWidget() {
       setStatus("idle");
       setAnswer(outAnswer);
       setSources(outSources);
-    } catch {
+    } catch (e: unknown) {
+      // If we intentionally aborted, don't show an error flash
+      if (e instanceof DOMException && e.name === "AbortError") return;
+
       setStatus("error");
       setAnswer("Network error. Please try again.");
+      // Helpful debug
+      console.error("AskLegendaryWidget fetch failed:", e);
+    } finally {
+      inFlight.current = false;
     }
   }
 
