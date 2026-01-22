@@ -11,7 +11,7 @@ const SORTS = [
   { v: "price_desc", label: "Price: High → Low" },
 ];
 
-export default function ShopFilters({ game, format }: { game: string; format: string }) {
+export default function ShopFilters({  }: { game: string; format: string }) {
   const sp = useSearchParams();
   const pathname = usePathname();
   const router = useRouter();

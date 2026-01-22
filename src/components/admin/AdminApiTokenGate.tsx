@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 type Props = {
-  children: React.ReactNode;
+  children?: React.ReactNode; // ✅ optional now
   title?: string;
 };
 
@@ -32,6 +32,9 @@ function clearAdminToken() {
     // ignore
   }
 }
+
+const GEN_TOKEN_CMD = `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`;
+const ENV_LINE = `ADMIN_API_TOKEN=PASTE_TOKEN_HERE`;
 
 export default function AdminTokenGate({ children, title = "Admin Access" }: Props) {
   const [mounted, setMounted] = useState(false);
@@ -77,7 +80,8 @@ export default function AdminTokenGate({ children, title = "Admin Access" }: Pro
     );
   }
 
-  if (hasToken) return <>{children}</>;
+  // ✅ if token exists, render children (or nothing if none were provided)
+  if (hasToken) return <>{children ?? null}</>;
 
   return (
     <div className="adminGate">
@@ -95,17 +99,19 @@ export default function AdminTokenGate({ children, title = "Admin Access" }: Pro
             onChange={(e) => setInput(e.target.value)}
             type={show ? "text" : "password"}
             placeholder="Paste token here…"
+            autoComplete="off"
+            spellCheck={false}
           />
         </label>
 
         <div className="adminGate__actions">
-          <button className="adminGate__btn adminGate__btn--primary" onClick={save}>
+          <button className="adminGate__btn adminGate__btn--primary" onClick={save} type="button">
             Save Token
           </button>
-          <button className="adminGate__btn" onClick={() => setShow((s) => !s)}>
+          <button className="adminGate__btn" onClick={() => setShow((s) => !s)} type="button">
             {show ? "Hide" : "Show"}
           </button>
-          <button className="adminGate__btn adminGate__btn--danger" onClick={clear}>
+          <button className="adminGate__btn adminGate__btn--danger" onClick={clear} type="button">
             Clear Token
           </button>
         </div>
@@ -116,11 +122,9 @@ export default function AdminTokenGate({ children, title = "Admin Access" }: Pro
           <summary className="adminGate__summary">Where do I get the token?</summary>
           <div className="adminGate__help">
             <div>1) Generate one:</div>
-            <pre className="adminGate__code">
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-            </pre>
+            <pre className="adminGate__code">{GEN_TOKEN_CMD}</pre>
             <div>2) Put it in <code>.env</code>:</div>
-            <pre className="adminGate__code">ADMIN_API_TOKEN=PASTE_TOKEN_HERE</pre>
+            <pre className="adminGate__code">{ENV_LINE}</pre>
             <div>3) Restart the app / redeploy, then paste it here.</div>
           </div>
         </details>

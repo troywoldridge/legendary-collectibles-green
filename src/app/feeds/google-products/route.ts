@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 // src/app/feeds/google-products/route.ts
 import "server-only";
 
@@ -18,7 +19,6 @@ function getBaseUrl(): string {
 }
 
 // Adjust this if your product detail URL is different
-const PRODUCT_PATH_PREFIX = "/products/";
 
 // If you want Merchant Center to only receive ACTIVE listings, keep true.
 const ONLY_ACTIVE = true;
@@ -209,11 +209,6 @@ export async function GET() {
 
   // TEMP DEBUG: expose count so you can see what the app DB returns
   // Remove once confirmed.
-  const res = new NextResponse("", {
-    headers: {
-      "x-feed-rows": String(debugCount),
-    },
-  });
 
   for (const p of data) {
     const slug = String(p.slug || "").trim();
@@ -254,7 +249,6 @@ export async function GET() {
           ? `${Number(p.shipping_weight_lbs).toFixed(2)} lb`
           : "1 lb";
 
-    const customLabel0 = String(p.shipping_class || "unknown");
 
     const row = [
   slug,
