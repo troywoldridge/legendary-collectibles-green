@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 type ProductRow = {
@@ -41,7 +41,14 @@ export default function ListingsClient() {
   const [error, setError] = useState<string | null>(null);
 
   const [applyLoading, setApplyLoading] = useState(false);
-  const selected = useMemo(() => rows.find((r) => r.id === selectedId) ?? null, [rows, selectedId]);
+
+  const selected = useMemo(
+    () => rows.find((r) => r.id === selectedId) ?? null,
+    [rows, selectedId],
+  );
+
+  // prevent autogen from firing multiple times
+  const didAutoGenRef = useRef(false);
 
   async function load() {
     setLoading(true);
@@ -111,6 +118,7 @@ export default function ListingsClient() {
     }
   }
 
+  // initial load
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -124,17 +132,15 @@ export default function ListingsClient() {
     const found = rows.find((r) => r.id === initialProductId);
     if (!found) return;
 
-    // only do this once per mount
+    // only set if nothing selected yet
     setSelectedId((prev) => (prev ? prev : initialProductId));
 
-    if (autoGen) {
-      // only fire once if we haven't generated yet
-      if (!generationId && !genLoading && !output) {
-        generate(initialProductId);
-      }
+    if (autoGen && !didAutoGenRef.current) {
+      didAutoGenRef.current = true;
+      generate(initialProductId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows.length]);
+  }, [rows, initialProductId, autoGen]);
 
   return (
     <div className="grid gap-6 grid-cols-1 lg:grid-cols-2">
@@ -189,6 +195,7 @@ export default function ListingsClient() {
                       setGenerationId(null);
                       setOutput(null);
                       setError(null);
+                      didAutoGenRef.current = false; // allow autogen again if you navigate with autogen=1 to another product
                     }}
                     style={{ cursor: "pointer" }}
                   >
@@ -263,7 +270,9 @@ export default function ListingsClient() {
 
         <div className="mt-3 rounded-md border border-white/10 bg-black/30 p-3 max-h-[70vh] overflow-auto">
           {output ? (
-            <pre className="text-xs whitespace-pre-wrap wrap-break-word">{JSON.stringify(output, null, 2)}</pre>
+            <pre className="text-xs whitespace-pre-wrap wrap-break-word">
+              {JSON.stringify(output, null, 2)}
+            </pre>
           ) : (
             <p className="text-sm opacity-70">
               Generate JSON to see strict output here. (Validation happens server-side.)

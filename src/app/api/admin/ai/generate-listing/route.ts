@@ -5,10 +5,18 @@ import fs from "node:fs";
 import path from "node:path";
 
 import OpenAI from "openai";
+import { zodTextFormat } from "openai/helpers/zod";
 import { NextResponse, type NextRequest } from "next/server";
+
 import { db } from "@/lib/db";
 import { sql } from "drizzle-orm";
-import { ListingJsonSchema, type ListingJson, PHOTO_NOTE_LITERAL } from "@/lib/ai/listingSchema";
+import { requireAdmin } from "@/lib/adminAuth";
+
+import {
+  ListingJsonSchema,
+  type ListingJson,
+  PHOTO_NOTE_LITERAL,
+} from "@/lib/ai/listingSchema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,17 +27,39 @@ function norm(v: unknown) {
   return String(v ?? "").trim();
 }
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function toInt(v: unknown, fallback: number) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+function toBool(v: unknown, fallback = false) {
+  if (typeof v === "boolean") return v;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  return fallback;
+}
+
 /**
  * Load the generator prompt.
  * Priority:
- *  1) LISTING_GENERATOR_PROMPT env var (optional override)
- *  2) src/content/ai/listing-generator-prompt.md (repo source of truth)
+ *  1) LISTING_GENERATOR_PROMPT env var
+ *  2) src/content/ai/listing-generator-prompt.md
  */
 function loadGeneratorPrompt(): string {
   const envPrompt = process.env.LISTING_GENERATOR_PROMPT;
   if (envPrompt && envPrompt.trim()) return envPrompt.trim();
 
-  const p = path.join(process.cwd(), "src", "content", "ai", "listing-generator-prompt.md");
+  const p = path.join(
+    process.cwd(),
+    "src",
+    "content",
+    "ai",
+    "listing-generator-prompt.md",
+  );
   if (!fs.existsSync(p)) throw new Error(`Missing generator prompt file: ${p}`);
 
   const text = fs.readFileSync(p, "utf8").trim();
@@ -37,171 +67,10 @@ function loadGeneratorPrompt(): string {
   return text;
 }
 
-/**
- * JSON Schema used for Structured Outputs (strict).
- * This mirrors your Zod schema shape.
- */
-const LISTING_JSON_SCHEMA: any = {
-  name: "legendary_listing_json_v1",
-  strict: true,
-  schema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["schemaVersion", "product", "tcg", "copy", "seo", "integrity"],
-    properties: {
-      schemaVersion: { type: "string", const: "1.0.0" },
-
-      product: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "id",
-          "sku",
-          "slug",
-          "title",
-          "subtitle",
-          "game",
-          "format",
-          "sealed",
-          "isGraded",
-          "grader",
-          "gradeX10",
-          "gradeLabel",
-          "psaDescriptor",
-          "conditionCode",
-          "conditionLabel",
-          "inventoryType",
-          "quantity",
-          "status",
-          "priceCents",
-          "compareAtCents",
-        ],
-        properties: {
-          id: { type: ["string", "null"] },
-          sku: { type: ["string", "null"] },
-          slug: { type: ["string", "null"] },
-          title: { type: ["string", "null"] },
-          subtitle: { type: ["string", "null"] },
-          game: { type: ["string", "null"] },
-          format: { type: ["string", "null"] },
-          sealed: { type: ["boolean", "null"] },
-
-          isGraded: { type: ["boolean", "null"] },
-          grader: { type: ["string", "null"] },
-          gradeX10: { type: ["integer", "null"] },
-          gradeLabel: { type: ["string", "null"] },
-          psaDescriptor: { type: ["string", "null"] },
-
-          conditionCode: { type: ["string", "null"] },
-          conditionLabel: { type: ["string", "null"] },
-
-          inventoryType: { type: ["string", "null"] },
-          quantity: { type: ["integer", "null"] },
-          status: { type: ["string", "null"] },
-
-          priceCents: { type: ["integer", "null"] },
-          compareAtCents: { type: ["integer", "null"] },
-        },
-      },
-
-      tcg: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "cardId",
-          "setId",
-          "setName",
-          "setSeries",
-          "setReleaseDate",
-          "number",
-          "rarity",
-          "artist",
-          "imageSmall",
-          "imageLarge",
-        ],
-        properties: {
-          cardId: { type: ["string", "null"] },
-          setId: { type: ["string", "null"] },
-          setName: { type: ["string", "null"] },
-          setSeries: { type: ["string", "null"] },
-          setReleaseDate: { type: ["string", "null"] },
-          number: { type: ["string", "null"] },
-          rarity: { type: ["string", "null"] },
-          artist: { type: ["string", "null"] },
-          imageSmall: { type: ["string", "null"] },
-          imageLarge: { type: ["string", "null"] },
-        },
-      },
-
-      copy: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "shortTitle",
-          "listingTitle",
-          "highlights",
-          "descriptionMd",
-          "conditionNote",
-          "gradingNote",
-          "shippingSafetyNote",
-          "photoAssumptionNote",
-        ],
-        properties: {
-          shortTitle: { type: ["string", "null"] },
-          listingTitle: { type: ["string", "null"] },
-          highlights: { type: "array", items: { type: "string" } },
-          descriptionMd: { type: ["string", "null"] },
-          conditionNote: { type: ["string", "null"] },
-          gradingNote: { type: ["string", "null"] },
-          shippingSafetyNote: { type: ["string", "null"] },
-
-          // IMPORTANT: OpenAI json_schema needs a "type" alongside "const"
-          photoAssumptionNote: { type: "string", const: PHOTO_NOTE_LITERAL },
-        },
-      },
-
-      seo: {
-        type: "object",
-        additionalProperties: false,
-        required: ["metaTitle", "metaDescription", "keywords"],
-        properties: {
-          metaTitle: { type: ["string", "null"] },
-          metaDescription: { type: ["string", "null"] },
-          keywords: { type: "array", items: { type: "string" } },
-        },
-      },
-
-      integrity: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "noHypeLanguage",
-          "noUnverifiedClaims",
-          "noInventedConditionOrGrade",
-          "collectorSafe",
-          "photoAware",
-          "notes",
-        ],
-        properties: {
-          // IMPORTANT: add "type" alongside "const" for all of these
-          noHypeLanguage: { type: "boolean", const: true },
-          noUnverifiedClaims: { type: "boolean", const: true },
-          noInventedConditionOrGrade: { type: "boolean", const: true },
-          collectorSafe: { type: "boolean", const: true },
-          photoAware: { type: "boolean", const: true },
-          notes: { type: "array", items: { type: "string" } },
-        },
-      },
-    },
-  },
-};
-
-
 function sanitizeListingJson(x: ListingJson): ListingJson {
-  // Force the stock-safe literal exactly
+  // Force the literal exactly
   x.copy.photoAssumptionNote = PHOTO_NOTE_LITERAL;
 
-  // Remove/neutralize “exact item” claims if the model tries anyway
   const banned: RegExp[] = [
     /photos represent the exact item you will receive/gi,
     /photos show the exact item you will receive/gi,
@@ -225,7 +94,7 @@ function sanitizeListingJson(x: ListingJson): ListingJson {
   x.copy.shippingSafetyNote = scrub(x.copy.shippingSafetyNote);
   x.copy.highlights = (x.copy.highlights || []).map((h) => scrub(h) ?? "").filter(Boolean);
 
-  // If the literal is repeated in description, remove it (we store it separately)
+  // Remove literal if model repeats it inside description
   if (x.copy.descriptionMd) {
     const lines = x.copy.descriptionMd.split("\n");
     const filtered = lines.filter((ln) => ln.trim() !== PHOTO_NOTE_LITERAL);
@@ -235,50 +104,100 @@ function sanitizeListingJson(x: ListingJson): ListingJson {
   return x;
 }
 
-function buildGeneratorPrompt(input: any) {
+function buildGeneratorPrompt(input: unknown) {
   const base = loadGeneratorPrompt();
   return `${base}\n\nINPUT_JSON:\n${JSON.stringify(input, null, 2)}`;
 }
 
-async function callModel(prompt: string): Promise<{ json: unknown; model?: string }> {
+async function callModel(prompt: string): Promise<{ json: ListingJson; model?: string }> {
   if (!process.env.OPENAI_API_KEY) throw new Error("Missing env OPENAI_API_KEY");
-
-  // Put gpt-5-mini here (or set OPENAI_MODEL in env)
   const model = (process.env.OPENAI_MODEL || "gpt-5-mini").trim();
 
-  const resp = await openai.chat.completions.create({
+  const resp = await openai.responses.parse({
     model,
-    messages: [
+    input: [
       {
         role: "system",
         content:
-          "You are a strict JSON generator. Output must be VALID JSON ONLY and must match the provided json_schema exactly.",
+          "You generate collector-safe listing JSON. Output MUST match the schema exactly. Never invent condition/grade. Treat stock images as non-authoritative. If any image is marked isStock=true, do NOT claim the photos show the exact item.",
       },
       { role: "user", content: prompt },
     ],
-    // Structured Outputs (strict)
-    response_format: {
-      type: "json_schema",
-      json_schema: LISTING_JSON_SCHEMA,
-    } as any,
+    text: {
+      format: zodTextFormat(ListingJsonSchema, "listing"),
+    },
   });
 
-  const text = resp.choices?.[0]?.message?.content;
-  if (!text || typeof text !== "string") throw new Error("OpenAI returned empty content");
+  const parsed = resp.output_parsed;
+  if (!parsed) throw new Error("Model did not return parsed structured output");
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("Model output was not valid JSON");
-  }
-
-  return { json: parsed, model };
+  return { json: parsed as ListingJson, model: (resp as any)?.model ?? model };
 }
 
+/* ---------------- DB row mapping (NO unsafe casts) ---------------- */
+
+type ProductRow = Record<string, unknown>;
+
+type ImageRow = {
+  id: string;
+  url: string;
+  alt: string | null;
+  sort: number;
+  isStock: boolean;
+};
+
+function mapSingleRow(res: unknown): ProductRow | null {
+  const rows = (res as { rows?: unknown })?.rows;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const first = rows[0];
+  return isObject(first) ? (first as ProductRow) : null;
+}
+
+function mapImages(res: unknown): ImageRow[] {
+  const rows = (res as { rows?: unknown })?.rows;
+  if (!Array.isArray(rows)) return [];
+
+  const out: ImageRow[] = [];
+  for (const r of rows) {
+    if (!isObject(r)) continue;
+
+    const id = typeof r.id === "string" ? r.id : null;
+    const url = typeof r.url === "string" ? r.url : null;
+    const alt = r.alt === null ? null : (typeof r.alt === "string" ? r.alt : null);
+    const sort = toInt(r.sort, 0);
+    const isStock = toBool(r.isStock, false);
+
+    if (!id || !url) continue;
+    out.push({ id, url, alt, sort, isStock });
+  }
+
+  return out;
+}
+
+function pickReturningId(res: unknown): string | null {
+  const rows = (res as { rows?: unknown })?.rows;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+
+  const first = rows[0];
+  if (!isObject(first)) return null;
+
+  const id = first.id;
+  return typeof id === "string" ? id : null;
+}
+
+/* ---------------- Route ---------------- */
+
 export async function POST(req: NextRequest) {
+  const auth = requireAdmin(req);
+  if (!auth.ok) {
+    return NextResponse.json(
+      { ok: false, error: "unauthorized", message: auth.error },
+      { status: 401 },
+    );
+  }
+
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     const productId = norm(body?.productId);
 
     if (!productId) {
@@ -288,7 +207,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // product row
+    // 1) product row
     const pRes = await db.execute(sql`
       select
         p.id,
@@ -321,7 +240,7 @@ export async function POST(req: NextRequest) {
       limit 1
     `);
 
-    const product = (pRes as any)?.rows?.[0];
+    const product = mapSingleRow(pRes);
     if (!product) {
       return NextResponse.json(
         { ok: false, error: "not_found", message: "Product not found" },
@@ -329,18 +248,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // images for THIS product
+    // ✅ Step C (goes RIGHT HERE): images for THIS product, include isStock
     const imgRes = await db.execute(sql`
-      select i.id, i.url, i.alt, i.sort
+      select
+        i.id,
+        i.url,
+        i.alt,
+        i.sort,
+        i.is_stock as "isStock"
       from product_images i
       where i.product_id = ${productId}::uuid
-      order by i.sort asc
+      order by i.sort asc, i.created_at asc
     `);
-    const images = (imgRes as any)?.rows ?? [];
+
+    const images = mapImages(imgRes);
 
     // Optional: tcg enrichment
-    let tcgCard: any = null;
-    if (product.sourceCardId) {
+    let tcgCard: Record<string, unknown> | null = null;
+    const sourceCardId = product["sourceCardId"];
+
+    if (typeof sourceCardId === "string" && sourceCardId.trim()) {
       try {
         const tcgRes = await db.execute(sql`
           select
@@ -355,15 +282,17 @@ export async function POST(req: NextRequest) {
             c.image_small as "imageSmall",
             c.image_large as "imageLarge"
           from tcg_cards c
-          where c.id = ${product.sourceCardId}
+          where c.id = ${sourceCardId}
           limit 1
         `);
-        tcgCard = (tcgRes as any)?.rows?.[0] ?? null;
+
+        tcgCard = mapSingleRow(tcgRes);
       } catch {
         tcgCard = null;
       }
     }
 
+    // 🔥 AI input includes images[].isStock explicitly
     const input = { product, images, tcgCard };
 
     const prompt = buildGeneratorPrompt(input);
@@ -385,7 +314,7 @@ export async function POST(req: NextRequest) {
       returning id
     `);
 
-    const generationId = (ins as any)?.rows?.[0]?.id ?? null;
+    const generationId = pickReturningId(ins);
 
     return NextResponse.json({ ok: true, generationId, output: validated });
   } catch (err: any) {
