@@ -18,29 +18,46 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
 
     const q = (searchParams.get("q") || "").trim();
-    const status = (searchParams.get("status") || "").trim(); // optional filter
+    const status = (searchParams.get("status") || "").trim();
     const limit = Math.min(100, Math.max(1, toInt(searchParams.get("limit"), 25)));
     const offset = Math.max(0, toInt(searchParams.get("offset"), 0));
 
     const res = await db.execute(sql`
+      with agg as (
+        select
+          oi.order_id,
+          sum(oi.qty)::int as "itemsCount",
+          sum(oi.line_total_cents)::int as "itemsLineTotalCents"
+        from order_items oi
+        group by oi.order_id
+      )
       select
         o.id::text as id,
         o.status::text as status,
         o.currency,
+
         o.subtotal_cents as "subtotalCents",
         o.tax_cents as "taxCents",
         o.shipping_cents as "shippingCents",
         o.total_cents as "totalCents",
+
         o.email,
         o.customer_name as "customerName",
         o.customer_phone as "customerPhone",
+
         o.shipping_name as "shippingName",
         o.shipping_phone as "shippingPhone",
+
         o.stripe_session_id as "stripeSessionId",
         o.stripe_payment_intent_id as "stripePaymentIntentId",
+
+        coalesce(a."itemsCount", 0) as "itemsCount",
+        coalesce(a."itemsLineTotalCents", 0) as "itemsLineTotalCents",
+
         o.created_at as "createdAt",
         o.updated_at as "updatedAt"
       from orders o
+      left join agg a on a.order_id = o.id
       where
         (${status} = '' OR o.status::text = ${status})
         and (

@@ -13,6 +13,9 @@ type OrderRow = {
   shippingCents: number;
   totalCents: number;
 
+  itemsCount: number;
+  itemsLineTotalCents: number;
+
   email: string | null;
   customerName: string | null;
   customerPhone: string | null;
@@ -46,14 +49,7 @@ function short(v: string | null, n = 28) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-const STATUS_OPTIONS = [
-  "", // all
-  "pending",
-  "paid",
-  "fulfilled",
-  "canceled",
-  "refunded",
-];
+const STATUS_OPTIONS = ["", "pending", "paid", "fulfilled", "canceled", "refunded"];
 
 export default function OrdersClient() {
   const [q, setQ] = useState("");
@@ -154,6 +150,7 @@ export default function OrdersClient() {
               <th className="p-2">Created</th>
               <th className="p-2">Order</th>
               <th className="p-2">Status</th>
+              <th className="p-2">Items</th>
               <th className="p-2">Total</th>
               <th className="p-2">Customer</th>
               <th className="p-2">Stripe</th>
@@ -171,6 +168,9 @@ export default function OrdersClient() {
 
               const customer = o.customerName || o.shippingName || o.email || "—";
 
+              const mismatch =
+                (o.itemsLineTotalCents ?? 0) !== (o.subtotalCents ?? 0);
+
               return (
                 <tr key={o.id} className={rowClass}>
                   <td className="p-2 whitespace-nowrap">{fmtTs(o.createdAt)}</td>
@@ -182,6 +182,14 @@ export default function OrdersClient() {
                   </td>
 
                   <td className="p-2 whitespace-nowrap">{o.status}</td>
+
+                  <td className="p-2 whitespace-nowrap">
+                    <div className="font-medium">{o.itemsCount ?? 0}</div>
+                    <div className="text-xs opacity-70">
+                      items {money(o.itemsLineTotalCents, o.currency)}
+                      {mismatch ? <span className="ml-2 text-yellow-300">• subtotal mismatch</span> : null}
+                    </div>
+                  </td>
 
                   <td className="p-2 whitespace-nowrap">
                     <div className="font-medium">{money(o.totalCents, o.currency)}</div>
@@ -209,7 +217,7 @@ export default function OrdersClient() {
 
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="p-3 opacity-70">
+                <td colSpan={7} className="p-3 opacity-70">
                   No orders found.
                 </td>
               </tr>

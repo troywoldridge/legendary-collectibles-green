@@ -20,7 +20,6 @@ export async function GET(req: NextRequest) {
   const limit = Math.min(100, Math.max(1, toInt(searchParams.get("limit"), 25)));
   const offset = Math.max(0, toInt(searchParams.get("offset"), 0));
 
-  // Note: product.status is enum product_status, but we cast to text for filtering.
   const rowsRes = await db.execute(sql`
     with base as (
       select
@@ -51,8 +50,32 @@ export async function GET(req: NextRequest) {
       order by p.updated_at desc
       limit ${limit}
       offset ${offset}
+    ),
+    latest_gen as (
+      select distinct on (g.product_id)
+        g.product_id,
+        g.id::text as "aiGenerationId",
+        g.status as "aiStatus",
+        g.schema_version as "aiSchemaVersion",
+        g.model as "aiModel",
+        g.error_text as "aiErrorText",
+        g.created_at as "aiCreatedAt",
+        g.updated_at as "aiUpdatedAt"
+      from ai_listing_generations g
+      order by g.product_id, g.created_at desc, g.id desc
     )
-    select * from base;
+    select
+      b.*,
+      lg."aiGenerationId",
+      lg."aiStatus",
+      lg."aiSchemaVersion",
+      lg."aiModel",
+      lg."aiErrorText",
+      lg."aiCreatedAt",
+      lg."aiUpdatedAt"
+    from base b
+    left join latest_gen lg on lg.product_id = b.id
+    order by b."updatedAt" desc;
   `);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
