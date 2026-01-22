@@ -49,7 +49,7 @@ const LISTING_JSON_SCHEMA: any = {
     additionalProperties: false,
     required: ["schemaVersion", "product", "tcg", "copy", "seo", "integrity"],
     properties: {
-      schemaVersion: { const: "1.0.0" },
+      schemaVersion: { type: "string", const: "1.0.0" },
 
       product: {
         type: "object",
@@ -154,7 +154,9 @@ const LISTING_JSON_SCHEMA: any = {
           conditionNote: { type: ["string", "null"] },
           gradingNote: { type: ["string", "null"] },
           shippingSafetyNote: { type: ["string", "null"] },
-          photoAssumptionNote: { const: PHOTO_NOTE_LITERAL },
+
+          // IMPORTANT: OpenAI json_schema needs a "type" alongside "const"
+          photoAssumptionNote: { type: "string", const: PHOTO_NOTE_LITERAL },
         },
       },
 
@@ -181,17 +183,19 @@ const LISTING_JSON_SCHEMA: any = {
           "notes",
         ],
         properties: {
-          noHypeLanguage: { const: true },
-          noUnverifiedClaims: { const: true },
-          noInventedConditionOrGrade: { const: true },
-          collectorSafe: { const: true },
-          photoAware: { const: true },
+          // IMPORTANT: add "type" alongside "const" for all of these
+          noHypeLanguage: { type: "boolean", const: true },
+          noUnverifiedClaims: { type: "boolean", const: true },
+          noInventedConditionOrGrade: { type: "boolean", const: true },
+          collectorSafe: { type: "boolean", const: true },
+          photoAware: { type: "boolean", const: true },
           notes: { type: "array", items: { type: "string" } },
         },
       },
     },
   },
 };
+
 
 function sanitizeListingJson(x: ListingJson): ListingJson {
   // Force the stock-safe literal exactly
