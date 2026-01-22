@@ -1,117 +1,73 @@
-// src/app/api/admin/email-events/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { and, desc, eq, gte, ilike, lte, or, sql } from "drizzle-orm";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import "server-only";
+
+import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { emailEvents } from "@/lib/db/schema";
+import { sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Optional: simple bearer token gate. Set ADMIN_API_TOKEN in prod to protect this API.
-// If you use Clerk middleware site-wide, you can delete this.
-function checkAuth(req: NextRequest) {
-  const tok = process.env.ADMIN_API_TOKEN;
-  if (!tok) return true; // unprotected if not set
-  const h = req.headers.get("authorization") || "";
-  return h === `Bearer ${tok}`;
+function toInt(v: string | null, fallback: number) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 export async function GET(req: NextRequest) {
-  if (!checkAuth(req)) {
-    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-  }
+  try {
+    const { searchParams } = new URL(req.url);
 
-  const url = new URL(req.url);
-  const page = Math.max(1, Number(url.searchParams.get("page") || "1"));
-  const per = Math.min(200, Math.max(1, Number(url.searchParams.get("per") || "50")));
-  const q = (url.searchParams.get("q") || "").trim();
-  const type = (url.searchParams.get("type") || "").trim(); // e.g. "email.delivered"
-  const from = (url.searchParams.get("from") || "").trim(); // ISO date
-  const to = (url.searchParams.get("to") || "").trim();     // ISO date
-  const format = (url.searchParams.get("format") || "").trim(); // "csv" to export
+    const q = (searchParams.get("q") || "").trim();
+    const provider = (searchParams.get("provider") || "").trim(); // optional filter
+    const type = (searchParams.get("type") || "").trim(); // optional filter (event_type)
+    const limit = Math.min(100, Math.max(1, toInt(searchParams.get("limit"), 25)));
+    const offset = Math.max(0, toInt(searchParams.get("offset"), 0));
 
-  const where: any[] = [];
+    const res = await db.execute(sql`
+      select
+        e.id::text as id,
+        e.provider,
+        e.event_type as "eventType",
+        e.event_id as "eventId",
+        e.email_id as "emailId",
+        e.message_id as "messageId",
+        e.subject,
+        e.from_address as "fromAddress",
+        e.to_csv as "toCsv",
+        e.occurred_at as "occurredAt",
+        e.email_created_at as "emailCreatedAt",
+        e.click_ip as "clickIp",
+        e.click_link as "clickLink",
+        e.click_timestamp as "clickTimestamp",
+        e.error_code as "errorCode",
+        e.error_message as "errorMessage",
+        e.created_at as "createdAt"
+      from email_events e
+      where
+        (${provider} = '' OR e.provider = ${provider})
+        and (${type} = '' OR e.event_type = ${type})
+        and (
+          ${q} = '' OR
+          e.id::text ilike ('%' || ${q} || '%') OR
+          coalesce(e.event_id, '') ilike ('%' || ${q} || '%') OR
+          coalesce(e.email_id, '') ilike ('%' || ${q} || '%') OR
+          coalesce(e.message_id, '') ilike ('%' || ${q} || '%') OR
+          coalesce(e.subject, '') ilike ('%' || ${q} || '%') OR
+          coalesce(e.from_address, '') ilike ('%' || ${q} || '%') OR
+          coalesce(e.to_csv, '') ilike ('%' || ${q} || '%') OR
+          coalesce(e.error_message, '') ilike ('%' || ${q} || '%')
+        )
+      order by coalesce(e.occurred_at, e.created_at) desc nulls last
+      limit ${limit}
+      offset ${offset}
+    `);
 
-  if (type && type !== "all") {
-    where.push(eq(emailEvents.eventType, type));
-  }
-
-  if (q) {
-    const pat = `%${q}%`;
-    where.push(
-      or(
-        ilike(emailEvents.subject, pat),
-        ilike(emailEvents.fromAddress, pat),
-        ilike(emailEvents.toCsv, pat),
-        ilike(emailEvents.messageId, pat),
-        ilike(emailEvents.emailId, pat),
-        ilike(emailEvents.errorMessage, pat),
-      )
+    const rows = (res as any)?.rows ?? [];
+    return NextResponse.json({ ok: true, rows, limit, offset });
+  } catch (err: any) {
+    return NextResponse.json(
+      { ok: false, error: "email_events_list_failed", message: String(err?.message ?? err) },
+      { status: 500 },
     );
   }
-
-  // Date range on occurred_at
-  if (from) where.push(gte(emailEvents.occurredAt, new Date(from)));
-  if (to)   where.push(lte(emailEvents.occurredAt, new Date(to)));
-
-  const cond = where.length ? and(...where) : undefined;
-
-  // total count
-  const [{ count }] = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(emailEvents)
-    .where(cond);
-
-  // page rows
-  const rows = await db
-    .select()
-    .from(emailEvents)
-    .where(cond)
-    .orderBy(desc(emailEvents.occurredAt))
-    .limit(per)
-    .offset((page - 1) * per);
-
-  // CSV export
-  if (format === "csv") {
-    const headers = [
-      "id","event_id","event_type","occurred_at",
-      "email_id","subject","from_address","to_csv","message_id","email_created_at",
-      "click_ip","click_link","click_timestamp","click_user_agent",
-      "error_code","error_message","provider","idempotency_key","created_at"
-    ];
-
-    const esc = (v: any) => {
-      if (v == null) return "";
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-
-    const lines = [
-      headers.join(","),
-      ...rows.map(r =>
-        [
-          r.id, r.eventId, r.eventType, r.occurredAt?.toISOString() ?? "",
-          r.emailId, r.subject, r.fromAddress, r.toCsv, r.messageId, r.emailCreatedAt?.toISOString() ?? "",
-          r.clickIp, r.clickLink, r.clickTimestamp?.toISOString() ?? "", r.clickUserAgent,
-          r.errorCode, r.errorMessage, r.provider, r.idempotencyKey, r.createdAt?.toISOString() ?? ""
-        ].map(esc).join(",")
-      )
-    ].join("\n");
-
-    return new NextResponse(lines, {
-      status: 200,
-      headers: {
-        "content-type": "text/csv; charset=utf-8",
-        "content-disposition": `attachment; filename="email-events-p${page}.csv"`,
-      },
-    });
-  }
-
-  return NextResponse.json({
-    ok: true,
-    page,
-    per,
-    total: count,
-    rows,
-  });
 }
