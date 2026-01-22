@@ -157,12 +157,14 @@ export default function ShopFilters({ game, format }: { game: string; format: st
           value={state.condition}
           onChange={(e) => setState((s) => ({ ...s, condition: e.target.value }))}
         >
+          <option value="new_factory_sealed">New (Factory Sealed)</option>
           <option value="">Any</option>
           <option value="nm">Near Mint</option>
           <option value="lp">Light Play</option>
           <option value="mp">Moderate Play</option>
           <option value="hp">Heavy Play</option>
           <option value="dmg">Damaged</option>
+          
         </select>
       </div>
 

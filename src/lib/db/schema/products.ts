@@ -24,6 +24,7 @@ export const cardConditionEnum = pgEnum("card_condition", [
   "mp",
   "hp",
   "dmg",
+  "new_factory_sealed",
 ]);
 
 export const inventoryTypeEnum = pgEnum("inventory_type", [

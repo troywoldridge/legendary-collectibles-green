@@ -232,6 +232,7 @@ export default function NewProductClient() {
               onChange={(e) => setCondition(e.target.value)}
               className="mt-1 w-full rounded-md bg-black/30 border border-white/10 px-3 py-2"
             >
+              <option value="new_factory_sealed">New Factory Sealed</option>  
               <option value="">—</option>
               <option value="nm">nm</option>
               <option value="lp">lp</option>

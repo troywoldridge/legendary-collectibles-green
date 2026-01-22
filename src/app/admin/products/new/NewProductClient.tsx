@@ -482,6 +482,7 @@ export default function NewProductClient() {
                 className="rounded-md bg-black/30 border border-white/10 px-3 py-2"
                 disabled={!!createdId}
               >
+                <option value="new_factory_sealed">New Factory Sealed</option>
                 <option value="nm">nm</option>
                 <option value="lp">lp</option>
                 <option value="mp">mp</option>

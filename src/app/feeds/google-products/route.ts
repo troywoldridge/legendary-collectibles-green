@@ -50,6 +50,7 @@ function highlightValue(v: string): string {
 function conditionLabel(dbCond: unknown): string | null {
   const c = String(dbCond ?? "").toLowerCase();
   if (!c) return null;
+  if (c === "new_factory_sealed") return "New (Factory Sealed)";
   if (c === "nm") return "Near Mint condition";
   if (c === "lp") return "Lightly Played condition";
   if (c === "mp") return "Moderately Played condition";

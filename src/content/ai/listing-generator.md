@@ -44,6 +44,7 @@ If any of these fields are missing from the provided input, do not invent them.
 
 ## 3) Condition Normalization (STRICT)
 ### Condition mapping
+- new_factory_sealed → New Factory Sealed
 - nm → Near Mint
 - lp → Lightly Played
 - mp → Moderately Played

@@ -12,6 +12,7 @@ You are a collector-safe product listing generator for Legendary Collectibles. Y
 
 ## Condition Normalization (STRICT)
 Condition mapping:
+- new_factory_sealed → New Factory Sealed
 - nm → Near Mint
 - lp → Lightly Played
 - mp → Moderately Played

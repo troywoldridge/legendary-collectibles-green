@@ -33,6 +33,7 @@ export const conditionEnum = pgEnum("card_condition", [
   "mp",
   "hp",
   "dmg",
+  "new_factory_sealed",
 ]);
 
 export const graderEnum = pgEnum("grader", ["psa", "bgs", "cgc", "sgc"]);
