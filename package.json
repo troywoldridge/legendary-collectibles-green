@@ -76,7 +76,8 @@
     "sharp": "^0.34.5",
     "stream-json": "^1.9.1",
     "stripe": "^19.3.0",
-    "undici": "^7.16.0"
+    "undici": "^7.16.0",
+    "zod": "^4.3.5"
   },
   "devDependencies": {
     "@clerk/backend": "^2.21.0",
