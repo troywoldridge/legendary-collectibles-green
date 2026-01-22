@@ -4,6 +4,7 @@ import "server-only";
 import fs from "node:fs";
 import path from "node:path";
 
+import OpenAI from "openai";
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { sql } from "drizzle-orm";
@@ -12,12 +13,10 @@ import { ListingJsonSchema, type ListingJson, PHOTO_NOTE_LITERAL } from "@/lib/a
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 function norm(v: unknown) {
   return String(v ?? "").trim();
-}
-
-function safeJsonParse(s: string): unknown {
-  return JSON.parse(String(s ?? "").trim());
 }
 
 /**
@@ -31,36 +30,174 @@ function loadGeneratorPrompt(): string {
   if (envPrompt && envPrompt.trim()) return envPrompt.trim();
 
   const p = path.join(process.cwd(), "src", "content", "ai", "listing-generator-prompt.md");
-  if (!fs.existsSync(p)) {
-    throw new Error(
-      `Missing generator prompt. Set env LISTING_GENERATOR_PROMPT or create file: ${p}`,
-    );
-  }
+  if (!fs.existsSync(p)) throw new Error(`Missing generator prompt file: ${p}`);
+
   const text = fs.readFileSync(p, "utf8").trim();
   if (!text) throw new Error(`Generator prompt file is empty: ${p}`);
   return text;
 }
 
 /**
- * Plug your provider here (OpenAI, local model, etc.)
- * Return { text } where text is the model’s raw JSON output string.
+ * JSON Schema used for Structured Outputs (strict).
+ * This mirrors your Zod schema shape.
  */
-async function callModel(prompt: string): Promise<{ text: string; model?: string }> {
-  // TODO: wire to your provider
-  void prompt;
-  throw new Error("callModel() is not wired yet. Connect your LLM provider here.");
-}
+const LISTING_JSON_SCHEMA: any = {
+  name: "legendary_listing_json_v1",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["schemaVersion", "product", "tcg", "copy", "seo", "integrity"],
+    properties: {
+      schemaVersion: { const: "1.0.0" },
 
-function buildGeneratorPrompt(input: any) {
-  const base = loadGeneratorPrompt();
-  return `${base}\n\nINPUT_JSON:\n${JSON.stringify(input, null, 2)}`;
-}
+      product: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "id",
+          "sku",
+          "slug",
+          "title",
+          "subtitle",
+          "game",
+          "format",
+          "sealed",
+          "isGraded",
+          "grader",
+          "gradeX10",
+          "gradeLabel",
+          "psaDescriptor",
+          "conditionCode",
+          "conditionLabel",
+          "inventoryType",
+          "quantity",
+          "status",
+          "priceCents",
+          "compareAtCents",
+        ],
+        properties: {
+          id: { type: ["string", "null"] },
+          sku: { type: ["string", "null"] },
+          slug: { type: ["string", "null"] },
+          title: { type: ["string", "null"] },
+          subtitle: { type: ["string", "null"] },
+          game: { type: ["string", "null"] },
+          format: { type: ["string", "null"] },
+          sealed: { type: ["boolean", "null"] },
+
+          isGraded: { type: ["boolean", "null"] },
+          grader: { type: ["string", "null"] },
+          gradeX10: { type: ["integer", "null"] },
+          gradeLabel: { type: ["string", "null"] },
+          psaDescriptor: { type: ["string", "null"] },
+
+          conditionCode: { type: ["string", "null"] },
+          conditionLabel: { type: ["string", "null"] },
+
+          inventoryType: { type: ["string", "null"] },
+          quantity: { type: ["integer", "null"] },
+          status: { type: ["string", "null"] },
+
+          priceCents: { type: ["integer", "null"] },
+          compareAtCents: { type: ["integer", "null"] },
+        },
+      },
+
+      tcg: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "cardId",
+          "setId",
+          "setName",
+          "setSeries",
+          "setReleaseDate",
+          "number",
+          "rarity",
+          "artist",
+          "imageSmall",
+          "imageLarge",
+        ],
+        properties: {
+          cardId: { type: ["string", "null"] },
+          setId: { type: ["string", "null"] },
+          setName: { type: ["string", "null"] },
+          setSeries: { type: ["string", "null"] },
+          setReleaseDate: { type: ["string", "null"] },
+          number: { type: ["string", "null"] },
+          rarity: { type: ["string", "null"] },
+          artist: { type: ["string", "null"] },
+          imageSmall: { type: ["string", "null"] },
+          imageLarge: { type: ["string", "null"] },
+        },
+      },
+
+      copy: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "shortTitle",
+          "listingTitle",
+          "highlights",
+          "descriptionMd",
+          "conditionNote",
+          "gradingNote",
+          "shippingSafetyNote",
+          "photoAssumptionNote",
+        ],
+        properties: {
+          shortTitle: { type: ["string", "null"] },
+          listingTitle: { type: ["string", "null"] },
+          highlights: { type: "array", items: { type: "string" } },
+          descriptionMd: { type: ["string", "null"] },
+          conditionNote: { type: ["string", "null"] },
+          gradingNote: { type: ["string", "null"] },
+          shippingSafetyNote: { type: ["string", "null"] },
+          photoAssumptionNote: { const: PHOTO_NOTE_LITERAL },
+        },
+      },
+
+      seo: {
+        type: "object",
+        additionalProperties: false,
+        required: ["metaTitle", "metaDescription", "keywords"],
+        properties: {
+          metaTitle: { type: ["string", "null"] },
+          metaDescription: { type: ["string", "null"] },
+          keywords: { type: "array", items: { type: "string" } },
+        },
+      },
+
+      integrity: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "noHypeLanguage",
+          "noUnverifiedClaims",
+          "noInventedConditionOrGrade",
+          "collectorSafe",
+          "photoAware",
+          "notes",
+        ],
+        properties: {
+          noHypeLanguage: { const: true },
+          noUnverifiedClaims: { const: true },
+          noInventedConditionOrGrade: { const: true },
+          collectorSafe: { const: true },
+          photoAware: { const: true },
+          notes: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+  },
+};
 
 function sanitizeListingJson(x: ListingJson): ListingJson {
   // Force the stock-safe literal exactly
   x.copy.photoAssumptionNote = PHOTO_NOTE_LITERAL;
 
-  // Remove/neutralize dangerous “exact item” claims if the model tries anyway
+  // Remove/neutralize “exact item” claims if the model tries anyway
   const banned: RegExp[] = [
     /photos represent the exact item you will receive/gi,
     /photos show the exact item you will receive/gi,
@@ -84,7 +221,7 @@ function sanitizeListingJson(x: ListingJson): ListingJson {
   x.copy.shippingSafetyNote = scrub(x.copy.shippingSafetyNote);
   x.copy.highlights = (x.copy.highlights || []).map((h) => scrub(h) ?? "").filter(Boolean);
 
-  // Remove duplicate literal line if it appears in description
+  // If the literal is repeated in description, remove it (we store it separately)
   if (x.copy.descriptionMd) {
     const lines = x.copy.descriptionMd.split("\n");
     const filtered = lines.filter((ln) => ln.trim() !== PHOTO_NOTE_LITERAL);
@@ -94,12 +231,57 @@ function sanitizeListingJson(x: ListingJson): ListingJson {
   return x;
 }
 
+function buildGeneratorPrompt(input: any) {
+  const base = loadGeneratorPrompt();
+  return `${base}\n\nINPUT_JSON:\n${JSON.stringify(input, null, 2)}`;
+}
+
+async function callModel(prompt: string): Promise<{ json: unknown; model?: string }> {
+  if (!process.env.OPENAI_API_KEY) throw new Error("Missing env OPENAI_API_KEY");
+
+  // Put gpt-5-mini here (or set OPENAI_MODEL in env)
+  const model = (process.env.OPENAI_MODEL || "gpt-5-mini").trim();
+
+  const resp = await openai.chat.completions.create({
+    model,
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a strict JSON generator. Output must be VALID JSON ONLY and must match the provided json_schema exactly.",
+      },
+      { role: "user", content: prompt },
+    ],
+    // Structured Outputs (strict)
+    response_format: {
+      type: "json_schema",
+      json_schema: LISTING_JSON_SCHEMA,
+    } as any,
+  });
+
+  const text = resp.choices?.[0]?.message?.content;
+  if (!text || typeof text !== "string") throw new Error("OpenAI returned empty content");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("Model output was not valid JSON");
+  }
+
+  return { json: parsed, model };
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const productId = norm(body?.productId);
+
     if (!productId) {
-      return NextResponse.json({ error: "bad_request", message: "Missing productId" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "bad_request", message: "Missing productId" },
+        { status: 400 },
+      );
     }
 
     // product row
@@ -137,16 +319,15 @@ export async function POST(req: NextRequest) {
 
     const product = (pRes as any)?.rows?.[0];
     if (!product) {
-      return NextResponse.json({ error: "not_found", message: "Product not found" }, { status: 404 });
+      return NextResponse.json(
+        { ok: false, error: "not_found", message: "Product not found" },
+        { status: 404 },
+      );
     }
 
     // images for THIS product
     const imgRes = await db.execute(sql`
-      select
-        i.id,
-        i.url,
-        i.alt,
-        i.sort
+      select i.id, i.url, i.alt, i.sort
       from product_images i
       where i.product_id = ${productId}::uuid
       order by i.sort asc
@@ -182,11 +363,10 @@ export async function POST(req: NextRequest) {
     const input = { product, images, tcgCard };
 
     const prompt = buildGeneratorPrompt(input);
-    const { text, model } = await callModel(prompt);
+    const { json, model } = await callModel(prompt);
 
-    const parsed = safeJsonParse(text);
-    let validated: ListingJson = ListingJsonSchema.parse(parsed);
-
+    // Validate + enforce stock-safe note
+    let validated: ListingJson = ListingJsonSchema.parse(json);
     validated = sanitizeListingJson(validated);
 
     const ins = await db.execute(sql`

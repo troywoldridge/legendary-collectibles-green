@@ -67,6 +67,7 @@
     "next": "16.0.7",
     "node-html-parser": "^7.0.1",
     "nodemailer": "^7.0.10",
+    "openai": "^6.16.0",
     "p-limit": "^7.2.0",
     "p-retry": "^7.1.0",
     "postgres": "^3.4.7",

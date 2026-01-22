@@ -346,7 +346,7 @@ export default function ListingsClient() {
 
         <div className="mt-3 rounded-md border border-white/10 bg-black/30 p-3 max-h-[35vh] overflow-auto">
           {output ? (
-            <pre className="text-xs whitespace-pre-wrap break-words">
+            <pre className="text-xs whitespace-pre-wrap wrap-break-word">
               {JSON.stringify(output, null, 2)}
             </pre>
           ) : (
@@ -373,7 +373,7 @@ export default function ListingsClient() {
             {output.copy.descriptionMd ? (
               <div className="mt-3">
                 <div className="text-xs uppercase tracking-wide opacity-70">Description (Markdown)</div>
-                <pre className="mt-1 text-xs whitespace-pre-wrap break-words rounded-md border border-white/10 bg-black/20 p-3">
+                <pre className="mt-1 text-xs whitespace-pre-wrap wrap-break-word rounded-md border border-white/10 bg-black/20 p-3">
                   {output.copy.descriptionMd}
                 </pre>
               </div>
