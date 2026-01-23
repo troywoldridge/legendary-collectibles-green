@@ -218,11 +218,14 @@ export async function POST(req: NextRequest) {
         ${sealed},
         ${isGraded},
 
-        /* ✅ OPTIONAL enum: grader (safe when blank/null) */
-        CASE
-          WHEN ${finalGrader} IS NULL OR ${finalGrader} = '' THEN NULL
-          ELSE ${finalGrader}::grader
-        END,
+       /* OPTIONAL enum: grader (safe for null/blank) */
+            NULLIF(${finalGrader}, '')::grader,
+
+            ${finalGradeX10},
+
+            /* OPTIONAL enum: condition (safe for null/blank) */
+            NULLIF(${finalCondition}, '')::card_condition,
+
 
         ${finalGradeX10},
 
