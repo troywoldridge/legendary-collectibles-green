@@ -46,7 +46,7 @@ function shouldSendOpenAITemperature(model: string) {
   if (m.startsWith("gpt-4")) return true;
   if (m.startsWith("gpt-3.5")) return true;
 
-  // gpt-5 / o-series: default false
+  // gpt-5 / o-series / reasoning families: default false
   return false;
 }
 
@@ -96,9 +96,10 @@ async function openaiResponses(args: LlmTextArgs): Promise<LlmTextResult> {
 
   const model = env("OPENAI_MODEL", env("AI_MODEL", "gpt-5.2"));
 
+  // ✅ Responses API input format uses content parts like "input_text"
   const input = args.messages.map((m) => ({
     role: m.role,
-    content: [{ type: "text", text: m.content }],
+    content: [{ type: "input_text", text: m.content }],
   }));
 
   const payload: any = { model, input };
@@ -107,10 +108,9 @@ async function openaiResponses(args: LlmTextArgs): Promise<LlmTextResult> {
     payload.max_output_tokens = args.maxTokens;
   }
 
-  // ✅ New Responses API format control
-  // If we want JSON, request JSON formatted text.
+  // ✅ JSON mode in Responses uses text.format (object), not response_format
   if (args.json) {
-    payload.text = { format: "json" };
+    payload.text = { format: { type: "json_object" } };
   }
 
   // Only send temperature when safe
@@ -133,8 +133,10 @@ async function openaiResponses(args: LlmTextArgs): Promise<LlmTextResult> {
     throw new Error(msg);
   }
 
+  // Responses API often provides output_text helper
   const text =
     (typeof j?.output_text === "string" && j.output_text.trim()) ||
+    // fallback: try to find any output_text in the structured output array
     String(j?.output?.[0]?.content?.[0]?.text ?? "").trim();
 
   if (!text) throw new Error("OpenAI returned empty content");
