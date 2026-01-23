@@ -6,7 +6,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
 type Props = {
-  game: "pokemon" | "yugioh" | "mtg";
+  game: "pokemon" | "yugioh" | "mtg" | "funko";
   canonicalId: string; // pokemon card id, ygo card_id, mtg scryfall id
   canonicalSource?: string | null; // mtg: "scryfall", others can be null
   title?: string;
@@ -189,7 +189,7 @@ const yesterday = daily[1] ?? null;
         </div>
 
         {/* RIGHT */}
-        <div className="min-w-[240px]">
+        <div className="min-w-60">
           <div className="text-xs uppercase tracking-wide text-white/60">Range</div>
 
           {showRanges ? (

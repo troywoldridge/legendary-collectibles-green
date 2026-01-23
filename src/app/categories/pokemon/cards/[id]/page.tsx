@@ -1,5 +1,5 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
+ 
 import "server-only";
 
 import type { Metadata } from "next";
@@ -473,7 +473,7 @@ function Field({ label, value }: { label: string; value: string | null }) {
   return (
     <div className="rounded-xl border border-white/10 bg-white/5 p-3">
       <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
-      <div className="mt-1 break-words text-sm font-medium text-white">{value}</div>
+      <div className="mt-1 wrap-break-word text-sm font-medium text-white">{value}</div>
     </div>
   );
 }
@@ -709,7 +709,7 @@ export default async function PokemonCardDetailPage({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="relative mx-auto aspect-[3/4] w-full max-w-md">
+            <div className="relative mx-auto aspect-3/4 w-full max-w-md">
               {cover ? (
                 <Image
                   src={cover}
@@ -902,7 +902,7 @@ export default async function PokemonCardDetailPage({
       {card.extra ? (
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
           <div className="mb-2 text-sm font-semibold">Extra</div>
-          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/80">
+          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/80">
             {card.extra}
           </pre>
         </div>

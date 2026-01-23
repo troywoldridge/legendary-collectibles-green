@@ -2,14 +2,17 @@
 
 import { useMemo, useState } from "react";
 
+type GameKey = "pokemon" | "yugioh" | "mtg" | "funko";
+
 type Props = {
-  game: "pokemon" | "mtg" | "yugioh";
-  marketItemId: string; // UUID
-  // optional niceties for UI:
-  label?: string | null; // display_name
-  currentUsd?: number | null; // shown as hint + quick set buttons
+  game: GameKey;
+  marketItemId: string;
+  label: string;
+  currentUsd?: number | null;
   className?: string;
 };
+
+
 
 function fmtUsd(n: number) {
   return n.toLocaleString(undefined, { style: "currency", currency: "USD" });

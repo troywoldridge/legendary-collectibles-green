@@ -78,7 +78,7 @@ const cartCount = useCartCount();
               </div>
             ) : (
               <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 sm:h-12 sm:w-12 lg:h-14 lg:w-14" />
+                <div className="h-10 w-10 rounded-lg bg-linear-to-br from-indigo-500 to-purple-600 sm:h-12 sm:w-12 lg:h-14 lg:w-14" />
                 <span className="text-lg font-bold text-white sm:text-xl lg:text-2xl">
                   {site.shortName}
                 </span>
@@ -199,6 +199,10 @@ const cartCount = useCartCount();
               <DropdownLink href="/categories/mtg/cards">MTG Cards</DropdownLink>
             </NavDropdown>
 
+            <NavDropdown label="Funko">
+              <DropdownLink href="src/app/categories/funko/items/[id]/page">Funko</DropdownLink>
+            </NavDropdown>
+
             <NavLink href="/psa" active={isActive("/psa")}>
               PSA
             </NavLink>
@@ -272,7 +276,7 @@ function NavLink({
       {children}
       <span
         className={[
-          "pointer-events-none absolute left-3 right-3 bottom-1 h-[2px] rounded-full",
+          "pointer-events-none absolute left-3 right-3 bottom-1 h-0.5 rounded-full",
           "transition-all duration-200",
           active
             ? "bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.65)] opacity-100"
@@ -296,7 +300,7 @@ function NavDropdown({ label, children }: { label: string; children: React.React
         {label}
         <svg
           className={`h-4 w-4 transition-transform duration-200 ${
-            open ? "rotate-180" : "group-hover:translate-y-[1px]"
+            open ? "rotate-180" : "group-hover:translate-y-px"
           }`}
           fill="none"
           viewBox="0 0 24 24"
