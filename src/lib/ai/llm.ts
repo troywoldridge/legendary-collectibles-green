@@ -128,7 +128,8 @@ async function openaiResponses(args: LlmTextArgs): Promise<LlmTextResult> {
 
   // JSON mode (optional). If your account/model doesn’t support this, your parser will still enforce JSON.
   if (args.json) {
-    payload.response_format = { type: "json_object" };
+    payload.text = { format: { type: "json_object" } };
+
   }
 
   // CRITICAL FIX:
