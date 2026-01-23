@@ -1,3 +1,4 @@
+// src/app/api/_debug/env/route.ts
 import "server-only";
 import { NextResponse } from "next/server";
 
