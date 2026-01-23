@@ -1,3 +1,6 @@
+// src/app/api/ask-ui/route.ts
+import "server-only";
+
 import { NextResponse } from "next/server";
 import { askSupport } from "@/lib/ai/askSupport";
 
@@ -18,10 +21,7 @@ function pickQuestion(body: unknown): string {
 // ---- Same-origin guard ----
 function isSameOrigin(req: Request): boolean {
   const origin = req.headers.get("origin") || "";
-  const host =
-    req.headers.get("x-forwarded-host") ||
-    req.headers.get("host") ||
-    "";
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
 
   if (!origin || !host) return true; // allow server-to-server/curl
   try {
@@ -121,7 +121,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 🔥 Direct call — no internal fetch hop
+    // Direct call — provider swap happens inside askSupport()
     const result = await askSupport(question);
     return new NextResponse(JSON.stringify(result.body), { status: result.status, headers });
   } catch (e: unknown) {

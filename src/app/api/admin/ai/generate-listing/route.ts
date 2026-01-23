@@ -1,11 +1,10 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+// src/app/api/admin/ai/generate-listing/route.ts
+ 
 import "server-only";
 
 import fs from "node:fs";
 import path from "node:path";
 
-import OpenAI from "openai";
-import { zodTextFormat } from "openai/helpers/zod";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { db } from "@/lib/db";
@@ -18,10 +17,10 @@ import {
   PHOTO_NOTE_LITERAL,
 } from "@/lib/ai/listingSchema";
 
+import { llmText } from "@/lib/ai/llm";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 function norm(v: unknown) {
   return String(v ?? "").trim();
@@ -53,13 +52,7 @@ function loadGeneratorPrompt(): string {
   const envPrompt = process.env.LISTING_GENERATOR_PROMPT;
   if (envPrompt && envPrompt.trim()) return envPrompt.trim();
 
-  const p = path.join(
-    process.cwd(),
-    "src",
-    "content",
-    "ai",
-    "listing-generator-prompt.md",
-  );
+  const p = path.join(process.cwd(), "src", "content", "ai", "listing-generator-prompt.md");
   if (!fs.existsSync(p)) throw new Error(`Missing generator prompt file: ${p}`);
 
   const text = fs.readFileSync(p, "utf8").trim();
@@ -109,29 +102,79 @@ function buildGeneratorPrompt(input: unknown) {
   return `${base}\n\nINPUT_JSON:\n${JSON.stringify(input, null, 2)}`;
 }
 
-async function callModel(prompt: string): Promise<{ json: ListingJson; model?: string }> {
-  if (!process.env.OPENAI_API_KEY) throw new Error("Missing env OPENAI_API_KEY");
-  const model = (process.env.OPENAI_MODEL || "gpt-5-mini").trim();
+/* ---------------- JSON parsing helpers ---------------- */
 
-  const resp = await openai.responses.parse({
-    model,
-    input: [
-      {
-        role: "system",
-        content:
-          "You generate collector-safe listing JSON. Output MUST match the schema exactly. Never invent condition/grade. Treat stock images as non-authoritative. If any image is marked isStock=true, do NOT claim the photos show the exact item.",
-      },
+function extractFirstJsonObject(text: string): string {
+  const s = String(text ?? "").trim();
+  if (!s) return s;
+
+  // If it's already pure JSON
+  if (s.startsWith("{") && s.endsWith("}")) return s;
+
+  // Try to find the first {...} block
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start >= 0 && end > start) return s.slice(start, end + 1).trim();
+
+  return s;
+}
+
+function parseListingJsonOrThrow(text: string): ListingJson {
+  const jsonText = extractFirstJsonObject(text);
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    throw new Error(`Model did not return valid JSON. Got: ${jsonText.slice(0, 220)}...`);
+  }
+
+  // Zod validate
+  return ListingJsonSchema.parse(parsed);
+}
+
+async function callModel(prompt: string): Promise<{ json: ListingJson; model?: string }> {
+  const system =
+    "You generate collector-safe listing JSON. Output MUST be valid JSON and MUST match the schema exactly. " +
+    "Never invent condition/grade. Treat stock images as non-authoritative. " +
+    "If any image is marked isStock=true, do NOT claim the photos show the exact item. " +
+    "Return ONLY JSON. No markdown. No commentary. No code fences.";
+
+  // 1st attempt (auto provider: try Ollama, fall back to OpenAI)
+  const first = await llmText({
+    json: true, // used by Ollama; OpenAI will still be instructed via the prompt
+    temperature: 0.2,
+    maxTokens: 1800,
+    messages: [
+      { role: "system", content: system },
       { role: "user", content: prompt },
     ],
-    text: {
-      format: zodTextFormat(ListingJsonSchema, "listing"),
-    },
   });
 
-  const parsed = resp.output_parsed;
-  if (!parsed) throw new Error("Model did not return parsed structured output");
+  try {
+    const json = parseListingJsonOrThrow(first.content);
+    return { json, model: `${first.provider}:${first.model}` };
+  } catch (err1: any) {
+    // 2nd attempt with explicit repair instruction
+    const repairPrompt =
+      `${prompt}\n\n` +
+      `The previous output was invalid or didn't match schema.\n` +
+      `Fix it and return ONLY valid JSON matching the schema exactly.\n` +
+      `Error: ${String(err1?.message ?? err1)}`;
 
-  return { json: parsed as ListingJson, model: (resp as any)?.model ?? model };
+    const second = await llmText({
+      json: true,
+      temperature: 0.1,
+      maxTokens: 2000,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: repairPrompt },
+      ],
+    });
+
+    const json2 = parseListingJsonOrThrow(second.content);
+    return { json: json2, model: `${second.provider}:${second.model}` };
+  }
 }
 
 /* ---------------- DB row mapping (NO unsafe casts) ---------------- */
@@ -163,7 +206,7 @@ function mapImages(res: unknown): ImageRow[] {
 
     const id = typeof r.id === "string" ? r.id : null;
     const url = typeof r.url === "string" ? r.url : null;
-    const alt = r.alt === null ? null : (typeof r.alt === "string" ? r.alt : null);
+    const alt = r.alt === null ? null : typeof r.alt === "string" ? r.alt : null;
     const sort = toInt(r.sort, 0);
     const isStock = toBool(r.isStock, false);
 
@@ -248,7 +291,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ Step C (goes RIGHT HERE): images for THIS product, include isStock
+    // images for THIS product, include isStock
     const imgRes = await db.execute(sql`
       select
         i.id,
@@ -292,7 +335,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 🔥 AI input includes images[].isStock explicitly
     const input = { product, images, tcgCard };
 
     const prompt = buildGeneratorPrompt(input);

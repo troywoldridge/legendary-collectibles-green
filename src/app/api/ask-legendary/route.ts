@@ -1,6 +1,11 @@
+// src/app/api/ask-legendary/route.ts
+import "server-only";
+
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
+
+import { llmText } from "@/lib/ai/llm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,24 +54,6 @@ function pickQuestion(body: unknown): string {
   return typeof q === "string" ? q.trim() : "";
 }
 
-function pickAnswerFromOpenAIResponse(data: unknown): string | null {
-  if (!isObject(data)) return null;
-  const choices = data["choices"];
-  if (!Array.isArray(choices) || choices.length === 0) return null;
-
-  const first = choices[0];
-  if (!isObject(first)) return null;
-
-  const message = first["message"];
-  if (!isObject(message)) return null;
-
-  const content = message["content"];
-  if (typeof content !== "string") return null;
-
-  const trimmed = content.trim();
-  return trimmed ? trimmed : null;
-}
-
 export async function POST(req: Request) {
   try {
     // Token guard (required)
@@ -93,13 +80,6 @@ export async function POST(req: Request) {
       );
     }
 
-    if (!process.env.OPENAI_API_KEY) {
-      return NextResponse.json(
-        { error: "server_config", message: "OPENAI_API_KEY missing on server." },
-        { status: 500 },
-      );
-    }
-
     const knowledge = loadKnowledge();
     if (!knowledge.ok) {
       return NextResponse.json(
@@ -108,68 +88,37 @@ export async function POST(req: Request) {
       );
     }
 
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        temperature: 0.2,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a customer support assistant for Legendary Collectibles.\n" +
-              "Rules:\n" +
-              "- Answer ONLY using the provided knowledge.\n" +
-              "- If the answer is not present, say you don’t know and suggest contacting support@legendary-collectibles.com.\n" +
-              "- Do NOT invent policies or guarantees.\n" +
-              "- Keep answers concise, friendly, and factual.\n" +
-              "- If you cite details, prefer quoting exact policy language briefly.",
-          },
-          {
-            role: "user",
-            content: `Knowledge:\n${knowledge.text}\n\nQuestion:\n${question}`,
-          },
-        ],
-      }),
+    const system =
+      "You are a customer support assistant for Legendary Collectibles.\n" +
+      "Rules:\n" +
+      "- Answer ONLY using the provided knowledge.\n" +
+      "- If the answer is not present, say you don’t know and suggest contacting support@legendary-collectibles.com.\n" +
+      "- Do NOT invent policies or guarantees.\n" +
+      "- Keep answers concise, friendly, and factual.\n" +
+      "- If you cite details, prefer quoting exact policy language briefly.";
+
+    const user =
+      `Knowledge:\n${knowledge.text}\n\n` +
+      `Question:\n${question}\n\n` +
+      `Important:\n` +
+      `- If the knowledge does not contain the answer, say you don’t know.\n` +
+      `- Do not guess.`;
+
+    const out = await llmText({
+      temperature: 0.2,
+      maxTokens: 700,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
     });
 
-    const raw = await r.text();
-    let parsed: unknown = null;
-    try {
-      parsed = JSON.parse(raw) as unknown;
-    } catch {
-      parsed = null;
-    }
-
-    if (!r.ok) {
-      return NextResponse.json(
-        {
-          error: "openai_error",
-          status: r.status,
-          statusText: r.statusText,
-          details: isObject(parsed) ? parsed : raw.slice(0, 800),
-        },
-        { status: 502 },
-      );
-    }
-
-    const answer = pickAnswerFromOpenAIResponse(parsed);
-    if (!answer) {
-      return NextResponse.json(
-        {
-          error: "openai_empty",
-          message: "OpenAI returned no message content.",
-          details: isObject(parsed) ? parsed : raw.slice(0, 800),
-        },
-        { status: 502 },
-      );
-    }
-
-    return NextResponse.json({ answer, sources: knowledge.files });
+    return NextResponse.json({
+      answer: out.content,
+      sources: knowledge.files,
+      provider: out.provider,
+      model: out.model,
+    });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     return NextResponse.json({ error: "server_error", message: msg }, { status: 500 });

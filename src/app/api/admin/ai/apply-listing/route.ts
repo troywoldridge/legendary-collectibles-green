@@ -1,10 +1,12 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+// src/app/api/admin/ai/apply-listing/route.ts
+ 
 import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { sql } from "drizzle-orm";
 import { ListingJsonSchema, type ListingJson } from "@/lib/ai/listingSchema";
+import { requireAdmin } from "@/lib/adminAuth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,10 +18,19 @@ function norm(v: unknown) {
 export async function POST(req: NextRequest) {
   const startedAt = Date.now();
 
-  try {
-    const body = await req.json().catch(() => ({}));
-    const generationId = norm(body?.generationId);
+  // Read body ONCE (avoid re-reading in catch)
+  const body = (await req.json().catch(() => ({}))) as any;
+  const generationId = norm(body?.generationId);
 
+  const auth = requireAdmin(req);
+  if (!auth.ok) {
+    return NextResponse.json(
+      { ok: false, error: "unauthorized", message: auth.error },
+      { status: 401 },
+    );
+  }
+
+  try {
     if (!generationId) {
       return NextResponse.json(
         { ok: false, error: "bad_request", message: "Missing generationId" },
@@ -112,11 +123,8 @@ export async function POST(req: NextRequest) {
       ms: Date.now() - startedAt,
     });
   } catch (err: any) {
-    // If generationId is present, record error on that row too.
-    // (Best-effort; don't fail response if logging fails.)
+    // Best-effort: record error on that row too.
     try {
-      const body = await req.json().catch(() => ({}));
-      const generationId = norm(body?.generationId);
       if (generationId) {
         await db.execute(sql`
           update ai_listing_generations
