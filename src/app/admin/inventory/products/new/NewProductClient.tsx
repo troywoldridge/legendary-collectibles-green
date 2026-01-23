@@ -64,31 +64,35 @@ export default function NewProductClient() {
 
     try {
       const body: any = {
-        title: title.trim(),
-        slug: slug.trim(),
-        sku: sku.trim() || null,
+  title: title.trim(),
+  slug: slug.trim(),
+  sku: sku.trim() || null,
 
-        game,
-        format,
-        status,
+  game,
+  format,
+  status,
 
-        sealed,
-        isGraded,
+  sealed,
+  isGraded,
 
-        condition: condition || null,
-        grader: grader || null,
-        gradeX10: gradeX10.trim() ? Number(gradeX10.trim()) : null,
+  condition: condition || null,
+  grader: grader || null,
+  gradeX10: gradeX10.trim() ? Number(gradeX10.trim()) : null,
 
-        price,
-        quantity,
+  priceCents: Math.round(Number(price) * 100) || 0,
 
-        subtitle: subtitle.trim() || null,
-        description: description.trim() || null,
+  quantity,
 
-        images: imagesPreview,
-      };
+  subtitle: subtitle.trim() || null,
+  description: description.trim() || null,
 
-      const r = await fetch("/api/admin/products", {
+  images: imagesPreview,
+};
+
+console.log("[NewProductClient] submit body:", body);
+
+
+      const r = await fetch("/api/admin/products/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
