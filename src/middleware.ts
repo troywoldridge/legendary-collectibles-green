@@ -3,14 +3,16 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
-// ✅ Protect ONLY what must be protected (pages + APIs)
+/**
+ * ✅ Protect ONLY what must be protected.
+ * Cart should be guest-safe (count/add/remove/view).
+ * Collection is user-specific and should require auth.
+ */
 const isProtectedRoute = createRouteMatcher([
   // Pages
-  "/cart(.*)",
   "/collection(.*)",
 
   // APIs
-  "/api/cart(.*)",
   "/api/collection(.*)",
 ]);
 
@@ -50,15 +52,8 @@ function sanitizeRedirectUrl(raw: string, req: NextRequest): string {
     try {
       const u = new URL(v);
 
-      // Block local dev URLs in production (these caused your Search Console noise)
-      const host = (u.hostname || "").toLowerCase();
-      const isLocal =
-        host === "localhost" ||
-        host === "127.0.0.1" ||
-        host.endsWith(".local") ||
-        host === req.nextUrl.hostname.toLowerCase() ? false : false;
-
       // If it's explicitly localhost-ish, just go home.
+      const host = (u.hostname || "").toLowerCase();
       if (host === "localhost" || host === "127.0.0.1" || host.endsWith(".local")) {
         return "/";
       }
