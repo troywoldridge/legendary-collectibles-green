@@ -244,9 +244,25 @@ export async function POST(req: NextRequest) {
     const row = (ins as any)?.rows?.[0];
     return NextResponse.json({ ok: true, product: row });
   } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, error: "create_failed", message: String(err?.message ?? err) },
-      { status: 500 },
-    );
-  }
+  // Try to expose the *real* Postgres error (code/detail/constraint)
+  const e = err?.cause ?? err;
+
+  return NextResponse.json(
+    {
+      ok: false,
+      error: "create_failed",
+      message: String(e?.message ?? err?.message ?? err),
+      code: e?.code ?? err?.code ?? null,
+      detail: e?.detail ?? null,
+      hint: e?.hint ?? null,
+      where: e?.where ?? null,
+      schema: e?.schema ?? null,
+      table: e?.table ?? null,
+      column: e?.column ?? null,
+      constraint: e?.constraint ?? null,
+    },
+    { status: 500 },
+  );
+}
+
 }
