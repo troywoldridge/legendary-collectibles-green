@@ -4,6 +4,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
+import { adminFetch } from "@/components/admin/adminFetch";
 
 function slugify(input: string) {
   return input
@@ -32,7 +33,6 @@ function safeHostname(url: string): string | null {
 }
 
 function isKnownStockHost(host: string): boolean {
-  // Known “stock/catalog” sources (from your next.config remotePatterns + common)
   const STOCK_HOSTS = new Set([
     "images.pokemontcg.io",
     "images.ygoprodeck.com",
@@ -43,22 +43,12 @@ function isKnownStockHost(host: string): boolean {
 
   if (STOCK_HOSTS.has(host)) return true;
 
-  // allow future-proofing: treat subdomains of these as stock
-  const STOCK_SUFFIXES = [
-    ".pokemontcg.io",
-    ".ygoprodeck.com",
-    ".scryfall.com",
-    ".tcgdex.net",
-  ];
-
+  const STOCK_SUFFIXES = [".pokemontcg.io", ".ygoprodeck.com", ".scryfall.com", ".tcgdex.net"];
   return STOCK_SUFFIXES.some((suf) => host.endsWith(suf));
 }
 
 function isLikelyYourPhotoHost(host: string): boolean {
-  // Your Cloudflare Images delivery host
   if (host === "imagedelivery.net") return true;
-
-  // Add more if you use them later (e.g. your own CDN domain)
   return false;
 }
 
@@ -69,10 +59,26 @@ function guessIsStockFromUrl(url: string): boolean | null {
   if (isLikelyYourPhotoHost(host)) return false;
   if (isKnownStockHost(host)) return true;
 
-  // unknown host → no opinion
   return null;
 }
 
+async function readJsonSafe(res: Response) {
+  const j = await res.json().catch(() => null);
+  return j;
+}
+
+function moveItem(list: ProductImageRow[], fromId: string, toId: string) {
+  if (fromId === toId) return list;
+  const fromIdx = list.findIndex((x) => x.id === fromId);
+  const toIdx = list.findIndex((x) => x.id === toId);
+  if (fromIdx < 0 || toIdx < 0) return list;
+
+  const next = [...list];
+  const [picked] = next.splice(fromIdx, 1);
+  next.splice(toIdx, 0, picked);
+
+  return next.map((x, i) => ({ ...x, sort: i }));
+}
 
 export default function NewProductClient() {
   const router = useRouter();
@@ -111,11 +117,34 @@ export default function NewProductClient() {
   const [uploading, setUploading] = useState(false);
   const [imgErr, setImgErr] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
-    const [stockUrl, setStockUrl] = useState("");
+
+  const [stockUrl, setStockUrl] = useState("");
   const [stockAlt, setStockAlt] = useState("");
   const [stockIsStock, setStockIsStock] = useState(true);
   const [stockLoading, setStockLoading] = useState(false);
 
+  const stockDetect = useMemo(() => {
+    const url = (stockUrl || "").trim();
+    const host = safeHostname(url);
+
+    if (!url) return { host: null as string | null, label: null as string | null };
+    if (!host) return { host: null, label: "Invalid URL" };
+
+    if (isLikelyYourPhotoHost(host)) return { host, label: `Detected: Your photos (${host})` };
+    if (isKnownStockHost(host)) return { host, label: `Detected: Stock/catalog source (${host})` };
+    return { host, label: `Detected: Unknown source (${host})` };
+  }, [stockUrl]);
+
+  async function refreshImages(productId: string) {
+    const r = await adminFetch(`/api/admin/products/${productId}/images`, { cache: "no-store" });
+    const j = await readJsonSafe(r);
+
+    if (!r.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || `Failed to load images (${r.status})`);
+    }
+
+    setImages(j.rows || []);
+  }
 
   async function create({ goToAi }: { goToAi: boolean }) {
     setLoading(true);
@@ -138,14 +167,17 @@ export default function NewProductClient() {
         description: description.trim() || null,
       };
 
-      const r = await fetch("/api/admin/products/create", {
+      const r = await adminFetch("/api/admin/products/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
 
-      const j = await r.json();
-      if (!j?.ok) throw new Error(j?.message || "Create failed");
+      const j = await readJsonSafe(r);
+
+      if (!r.ok || !j?.ok) {
+        throw new Error(j?.message || j?.error || `Create failed (${r.status})`);
+      }
 
       const productId = j?.product?.id as string | undefined;
       const productSlug = (j?.product?.slug as string | undefined) || payload.slug;
@@ -155,9 +187,7 @@ export default function NewProductClient() {
       setCreatedId(productId);
       setCreatedSlug(productSlug);
 
-      const ir = await fetch(`/api/admin/products/${productId}/images`, { cache: "no-store" });
-      const ij = await ir.json();
-      if (ij?.ok) setImages(ij.rows || []);
+      await refreshImages(productId);
 
       if (goToAi) {
         router.push(`/admin/ai/listings?productId=${encodeURIComponent(productId)}&autogen=1`);
@@ -170,29 +200,25 @@ export default function NewProductClient() {
     }
   }
 
-  async function refreshImages() {
-    if (!createdId) return;
-    const r = await fetch(`/api/admin/products/${createdId}/images`, { cache: "no-store" });
-    const j = await r.json();
-    if (j?.ok) setImages(j.rows || []);
-  }
-
   async function attachImage(url: string, alt: string | null, isStock: boolean) {
     if (!createdId) return;
 
-    const r = await fetch(`/api/admin/products/${createdId}/images`, {
+    const r = await adminFetch(`/api/admin/products/${createdId}/images`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ url, alt, isStock }),
     });
 
-    const j = await r.json();
-    if (!j?.ok) throw new Error(j?.message || "Failed to attach image");
+    const j = await readJsonSafe(r);
+
+    if (!r.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || `Failed to attach image (${r.status})`);
+    }
 
     setImages((prev) => [...prev, j.row]);
   }
 
-    async function attachStockUrl() {
+  async function attachStockUrl() {
     if (!createdId) return;
 
     const url = stockUrl.trim();
@@ -208,8 +234,6 @@ export default function NewProductClient() {
 
     try {
       await attachImage(url, alt, stockIsStock);
-
-      // reset inputs after success
       setStockUrl("");
       setStockAlt("");
       setStockIsStock(true);
@@ -220,30 +244,6 @@ export default function NewProductClient() {
     }
   }
 
-  const stockDetect = useMemo(() => {
-  const url = (stockUrl || "").trim();
-  const host = safeHostname(url);
-
-  if (!url) {
-    return { host: null as string | null, label: null as string | null };
-  }
-
-  if (!host) {
-    return { host: null, label: "Invalid URL" };
-  }
-
-  if (isLikelyYourPhotoHost(host)) {
-    return { host, label: `Detected: Your photos (${host})` };
-  }
-
-  if (isKnownStockHost(host)) {
-    return { host, label: `Detected: Stock/catalog source (${host})` };
-  }
-
-  return { host, label: `Detected: Unknown source (${host})` };
-}, [stockUrl]);
-
-
   async function uploadFiles(files: FileList | null) {
     if (!createdId) return;
     if (!files || files.length === 0) return;
@@ -253,33 +253,34 @@ export default function NewProductClient() {
 
     try {
       for (const file of Array.from(files)) {
-        // 1) request CF direct upload URL
-        const r1 = await fetch("/api/admin/images/direct-upload", {
+        // 1) request CF direct upload URL (admin-protected)
+        const r1 = await adminFetch("/api/admin/images/direct-upload", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            metadata: {
-              productId: createdId,
-              filename: file.name,
-              contentType: file.type || "application/octet-stream",
-            },
+            filename: file.name,
+            contentType: file.type || "application/octet-stream",
+            size: file.size,
           }),
         });
 
-        const j1 = await r1.json();
-        if (!j1?.ok) throw new Error(j1?.error || j1?.message || "Failed to get upload URL");
+        const j1 = await readJsonSafe(r1);
+
+        if (!r1.ok || !j1?.ok) {
+          throw new Error(j1?.message || j1?.error || `direct-upload failed (${r1.status})`);
+        }
 
         const uploadURL = j1.uploadURL as string | undefined;
         if (!uploadURL) throw new Error("direct-upload did not return uploadURL");
 
-        // 2) upload to CF
+        // 2) upload to Cloudflare (this is NOT your API, so no admin token)
         const form = new FormData();
         form.append("file", file);
 
         const r2 = await fetch(uploadURL, { method: "POST", body: form });
-        const j2 = await r2.json().catch(() => ({}));
+        const j2 = await readJsonSafe(r2);
 
-        // 3) pick a delivery URL
+        // 3) pick a delivery URL (variant)
         const deliveryUrl =
           j2?.result?.variants?.[0] ||
           j2?.result?.variant_urls?.[0] ||
@@ -289,7 +290,7 @@ export default function NewProductClient() {
           throw new Error("Upload succeeded but no delivery URL found (variants missing)");
         }
 
-        // 4) attach to product
+        // 4) attach to product (admin-protected)
         await attachImage(deliveryUrl, title.trim() || null, false);
       }
     } catch (e: any) {
@@ -303,15 +304,16 @@ export default function NewProductClient() {
     if (!createdId) return;
     setImgErr(null);
 
-    const r = await fetch(`/api/admin/products/${createdId}/images`, {
+    const r = await adminFetch(`/api/admin/products/${createdId}/images`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ imageId, isStock }),
     });
 
-    const j = await r.json();
-    if (!j?.ok) {
-      setImgErr(j?.message || "Failed to update image");
+    const j = await readJsonSafe(r);
+
+    if (!r.ok || !j?.ok) {
+      setImgErr(j?.message || j?.error || `Failed to update image (${r.status})`);
       return;
     }
 
@@ -322,15 +324,16 @@ export default function NewProductClient() {
     if (!createdId) return;
     setImgErr(null);
 
-    const r = await fetch(`/api/admin/products/${createdId}/images`, {
+    const r = await adminFetch(`/api/admin/products/${createdId}/images`, {
       method: "DELETE",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ imageId }),
     });
 
-    const j = await r.json();
-    if (!j?.ok) {
-      setImgErr(j?.message || "Failed to delete image");
+    const j = await readJsonSafe(r);
+
+    if (!r.ok || !j?.ok) {
+      setImgErr(j?.message || j?.error || `Failed to delete image (${r.status})`);
       return;
     }
 
@@ -341,27 +344,17 @@ export default function NewProductClient() {
     if (!createdId) return;
 
     const order = next.map((x, idx) => ({ id: x.id, sort: idx }));
-    const r = await fetch(`/api/admin/products/${createdId}/images`, {
+    const r = await adminFetch(`/api/admin/products/${createdId}/images`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ order }),
     });
 
-    const j = await r.json();
-    if (!j?.ok) throw new Error(j?.message || "Failed to persist order");
-  }
+    const j = await readJsonSafe(r);
 
-  function moveItem(list: ProductImageRow[], fromId: string, toId: string) {
-    if (fromId === toId) return list;
-    const fromIdx = list.findIndex((x) => x.id === fromId);
-    const toIdx = list.findIndex((x) => x.id === toId);
-    if (fromIdx < 0 || toIdx < 0) return list;
-
-    const next = [...list];
-    const [picked] = next.splice(fromIdx, 1);
-    next.splice(toIdx, 0, picked);
-
-    return next.map((x, i) => ({ ...x, sort: i }));
+    if (!r.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || `Failed to persist order (${r.status})`);
+    }
   }
 
   return (
@@ -463,12 +456,22 @@ export default function NewProductClient() {
 
           <div className="grid gap-3 md:grid-cols-2">
             <label className="flex items-center gap-2 rounded-md border border-white/10 bg-black/20 px-3 py-2">
-              <input type="checkbox" checked={sealed} onChange={(e) => setSealed(e.target.checked)} disabled={!!createdId} />
+              <input
+                type="checkbox"
+                checked={sealed}
+                onChange={(e) => setSealed(e.target.checked)}
+                disabled={!!createdId}
+              />
               <span className="text-sm">Sealed</span>
             </label>
 
             <label className="flex items-center gap-2 rounded-md border border-white/10 bg-black/20 px-3 py-2">
-              <input type="checkbox" checked={isGraded} onChange={(e) => setIsGraded(e.target.checked)} disabled={!!createdId} />
+              <input
+                type="checkbox"
+                checked={isGraded}
+                onChange={(e) => setIsGraded(e.target.checked)}
+                disabled={!!createdId}
+              />
               <span className="text-sm">Graded</span>
             </label>
           </div>
@@ -548,23 +551,51 @@ export default function NewProductClient() {
         <div className="mt-4 flex flex-wrap gap-2">
           {!createdId ? (
             <>
-              <button onClick={() => create({ goToAi: false })} disabled={loading} className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5">
+              <button
+                onClick={() => create({ goToAi: false })}
+                disabled={loading}
+                className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5"
+              >
                 {loading ? "Saving…" : "Create"}
               </button>
-              <button onClick={() => create({ goToAi: true })} disabled={loading} className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5">
+              <button
+                onClick={() => create({ goToAi: true })}
+                disabled={loading}
+                className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5"
+              >
                 {loading ? "Saving…" : "Create + Generate"}
               </button>
             </>
           ) : (
             <>
-              <button onClick={refreshImages} className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5">
+              <button
+                onClick={async () => {
+                  if (!createdId) return;
+                  try {
+                    await refreshImages(createdId);
+                  } catch (e: any) {
+                    setImgErr(String(e?.message ?? e));
+                  }
+                }}
+                className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5"
+              >
                 Refresh Images
               </button>
-              <a href={`/admin/ai/listings?productId=${encodeURIComponent(createdId)}&autogen=1`} className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5">
+
+              <a
+                href={`/admin/ai/listings?productId=${encodeURIComponent(createdId)}&autogen=1`}
+                className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5"
+              >
                 Generate (AI)
               </a>
+
               {createdSlug ? (
-                <a href={`/products/${createdSlug}`} target="_blank" rel="noreferrer" className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5">
+                <a
+                  href={`/products/${createdSlug}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5"
+                >
                   View Product
                 </a>
               ) : null}
@@ -582,7 +613,9 @@ export default function NewProductClient() {
       {/* Step 2 */}
       <div className="rounded-lg border border-white/10 p-4">
         <div className="text-sm font-semibold">Step 2 — Add Images</div>
-        <p className="mt-2 text-sm opacity-80">Upload photos, or attach stock images. Mark stock so the AI stays conservative.</p>
+        <p className="mt-2 text-sm opacity-80">
+          Upload photos, or attach stock images. Mark stock so the AI stays conservative.
+        </p>
 
         {!createdId ? (
           <p className="mt-3 text-sm opacity-70">Create a product first to enable uploads.</p>
@@ -591,32 +624,36 @@ export default function NewProductClient() {
             {imgErr ? <p className="mt-3 text-sm text-red-300">{imgErr}</p> : null}
 
             <div className="mt-4 flex items-center gap-3 flex-wrap">
-              <input type="file" multiple accept="image/*" disabled={uploading} onChange={(e) => uploadFiles(e.target.files)} className="text-sm" />
+              <input
+                type="file"
+                multiple
+                accept="image/*"
+                disabled={uploading}
+                onChange={(e) => uploadFiles(e.target.files)}
+                className="text-sm"
+              />
               {uploading ? <span className="text-sm opacity-70">Uploading…</span> : null}
             </div>
 
-                        <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3">
+            <div className="mt-4 rounded-md border border-white/10 bg-black/20 p-3">
               <div className="text-sm font-medium">Attach Stock URL</div>
               <p className="mt-1 text-xs opacity-70">
                 Paste any image URL. Mark as stock so the AI stays conservative and doesn’t claim “exact item shown”.
               </p>
 
               <div className="mt-3 grid gap-2">
-               <input
-                    value={stockUrl}
-                    onChange={(e) => {
-                        const next = e.target.value;
-                        setStockUrl(next);
+                <input
+                  value={stockUrl}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setStockUrl(next);
 
-                        const guess = guessIsStockFromUrl(next.trim());
-                        if (guess !== null) {
-                        setStockIsStock(guess);
-                        }
-                    }}
-                    placeholder="https://…"
-                    className="w-full rounded-md bg-black/30 border border-white/10 px-3 py-2 text-sm"
-                    />
-
+                    const guess = guessIsStockFromUrl(next.trim());
+                    if (guess !== null) setStockIsStock(guess);
+                  }}
+                  placeholder="https://…"
+                  className="w-full rounded-md bg-black/30 border border-white/10 px-3 py-2 text-sm"
+                />
 
                 <div className="grid gap-2 md:grid-cols-2">
                   <input
@@ -658,28 +695,26 @@ export default function NewProductClient() {
                   </button>
                 </div>
               </div>
+
+              {stockDetect.label ? (
+                <div className="mt-2 text-xs">
+                  <span
+                    className={[
+                      "inline-flex items-center rounded-md border px-2 py-1",
+                      stockDetect.label.startsWith("Detected: Stock")
+                        ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                        : stockDetect.label.startsWith("Detected: Your photos")
+                          ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+                          : stockDetect.label.startsWith("Invalid URL")
+                            ? "border-red-400/30 bg-red-400/10 text-red-200"
+                            : "border-white/10 bg-white/5 text-white/70",
+                    ].join(" ")}
+                  >
+                    {stockDetect.label}
+                  </span>
+                </div>
+              ) : null}
             </div>
-
-            {stockDetect.label ? (
-  <div className="mt-2 text-xs">
-    <span
-      className={[
-        "inline-flex items-center rounded-md border px-2 py-1",
-        stockDetect.label.startsWith("Detected: Stock")
-          ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
-          : stockDetect.label.startsWith("Detected: Your photos")
-            ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
-            : stockDetect.label.startsWith("Invalid URL")
-              ? "border-red-400/30 bg-red-400/10 text-red-200"
-              : "border-white/10 bg-white/5 text-white/70",
-      ].join(" ")}
-    >
-      {stockDetect.label}
-    </span>
-  </div>
-) : null}
-
-
 
             <div className="mt-4">
               {images.length ? (
@@ -710,7 +745,13 @@ export default function NewProductClient() {
                           <div className="flex items-start gap-3">
                             <a href={img.url} target="_blank" rel="noreferrer" className="block">
                               <div className="relative h-20 w-20 overflow-hidden rounded border border-white/10">
-                                <Image src={img.url} alt={img.alt ?? ""} fill sizes="80px" className="object-cover" />
+                                <Image
+                                  src={img.url}
+                                  alt={img.alt ?? ""}
+                                  fill
+                                  sizes="80px"
+                                  className="object-cover"
+                                />
                               </div>
                             </a>
 
@@ -726,11 +767,18 @@ export default function NewProductClient() {
 
                           <div className="flex items-center gap-2 flex-wrap justify-end">
                             <label className="flex items-center gap-2 text-sm">
-                              <input type="checkbox" checked={img.isStock} onChange={(e) => toggleStock(img.id, e.target.checked)} />
+                              <input
+                                type="checkbox"
+                                checked={img.isStock}
+                                onChange={(e) => toggleStock(img.id, e.target.checked)}
+                              />
                               Stock
                             </label>
 
-                            <button onClick={() => deleteImage(img.id)} className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5 text-sm">
+                            <button
+                              onClick={() => deleteImage(img.id)}
+                              className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5 text-sm"
+                            >
                               Delete
                             </button>
                           </div>
