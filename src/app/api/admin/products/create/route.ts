@@ -186,67 +186,60 @@ export async function POST(req: NextRequest) {
     const idOrNull = id && isUuid(id) ? id : null;
 
     const ins = await db.execute(sql`
-      insert into products (
-        id,
-        title,
-        slug,
-        sku,
-        game,
-        format,
-        sealed,
-        is_graded,
-        grader,
-        grade_x10,
-        condition,
-        price_cents,
-        quantity,
-        status,
-        subtitle,
-        description,
-        source_card_id,
-        source_set_code,
-        source_set_name,
-        source_number
-      )
-      values (
-        coalesce(${idOrNull}::uuid, gen_random_uuid()),
-        ${title},
-        ${slug},
-        ${sku},
-        ${game}::game,
-        ${format}::product_format,
-        ${sealed},
-        ${isGraded},
+  insert into products (
+    id,
+    title,
+    slug,
+    sku,
+    game,
+    format,
+    sealed,
+    is_graded,
+    grader,
+    grade_x10,
+    condition,
+    price_cents,
+    quantity,
+    status,
+    subtitle,
+    description,
+    source_card_id,
+    source_set_code,
+    source_set_name,
+    source_number
+  )
+  values (
+    coalesce(${idOrNull}::uuid, gen_random_uuid()),
+    ${title},
+    ${slug},
+    ${sku},
+    ${game}::game,
+    ${format}::product_format,
+    ${sealed},
+    ${isGraded},
 
-       /* OPTIONAL enum: grader (safe for null/blank) */
-            NULLIF(${finalGrader}, '')::grader,
+    /* OPTIONAL enum: grader (safe for null/blank) */
+    NULLIF(${finalGrader}, '')::grader,
 
-            ${finalGradeX10},
+    /* grade_x10 (nullable) */
+    ${finalGradeX10},
 
-            /* OPTIONAL enum: condition (safe for null/blank) */
-            NULLIF(${finalCondition}, '')::card_condition,
+    /* OPTIONAL enum: condition (safe for null/blank) */
+    NULLIF(${finalCondition}, '')::card_condition,
 
+    ${priceCents},
+    ${quantity},
+    ${status}::product_status,
+    ${subtitle},
+    ${description},
+    ${sourceCardId},
+    ${sourceSetCode},
+    ${sourceSetName},
+    ${sourceNumber}
+  )
+  returning id, slug
+`);
 
-        ${finalGradeX10},
-
-        /* ✅ OPTIONAL enum: condition (safe when blank/null) */
-        CASE
-          WHEN ${finalCondition} IS NULL OR ${finalCondition} = '' THEN NULL
-          ELSE ${finalCondition}::card_condition
-        END,
-
-        ${priceCents},
-        ${quantity},
-        ${status}::product_status,
-        ${subtitle},
-        ${description},
-        ${sourceCardId},
-        ${sourceSetCode},
-        ${sourceSetName},
-        ${sourceNumber}
-      )
-      returning id, slug
-    `);
 
     const row = (ins as any)?.rows?.[0];
     return NextResponse.json({ ok: true, product: row });
