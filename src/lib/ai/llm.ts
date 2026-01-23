@@ -70,7 +70,6 @@ async function ollamaChat(args: LlmTextArgs): Promise<LlmTextResult> {
     body.options = { ...(body.options || {}), num_predict: args.maxTokens };
   }
 
-  // Optional JSON mode for newer Ollama builds
   if (args.json) body.format = "json";
 
   const r = await fetch(`${baseUrl}/api/chat`, {
@@ -88,35 +87,57 @@ async function ollamaChat(args: LlmTextArgs): Promise<LlmTextResult> {
   return { content, provider: "ollama", model };
 }
 
-/* ---------------- OpenAI ---------------- */
+/* ---------------- OpenAI (Responses API) ---------------- */
 
-async function openaiResponses(args: LlmTextArgs): Promise<LlmTextResult> {
+function extractTextFromResponsesPayload(j: any): string {
+  // 1) Helper field (often present)
+  const direct = typeof j?.output_text === "string" ? j.output_text.trim() : "";
+  if (direct) return direct;
+
+  // 2) Walk output[] and collect output_text + summary_text parts
+  const outputs = Array.isArray(j?.output) ? j.output : [];
+  const chunks: string[] = [];
+
+  for (const item of outputs) {
+    const parts = Array.isArray(item?.content) ? item.content : [];
+    for (const part of parts) {
+      // output_text is the usual
+      if (part?.type === "output_text" && typeof part?.text === "string" && part.text.trim()) {
+        chunks.push(part.text.trim());
+        continue;
+      }
+
+      // some responses include summary_text instead
+      if (part?.type === "summary_text" && typeof part?.text === "string" && part.text.trim()) {
+        chunks.push(part.text.trim());
+        continue;
+      }
+
+      // refusals can arrive as structured parts
+      if (part?.type === "refusal") {
+        const reason =
+          (typeof part?.refusal === "string" && part.refusal.trim()) || "Refused without a reason.";
+        throw new Error(`OpenAI refusal: ${reason}`);
+      }
+
+      // ultra-defensive fallback: if it has a text field, use it
+      if (typeof part?.text === "string" && part.text.trim()) {
+        chunks.push(part.text.trim());
+      }
+    }
+  }
+
+  return chunks.join("\n").trim();
+}
+
+function pickMaxOutputTokens(original?: number): number | undefined {
+  if (typeof original !== "number" || !Number.isFinite(original) || original <= 0) return undefined;
+  return Math.max(256, Math.trunc(original));
+}
+
+async function openaiFetchResponses(payload: any): Promise<any> {
   const apiKey = env("OPENAI_API_KEY");
   if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
-
-  const model = env("OPENAI_MODEL", env("AI_MODEL", "gpt-5.2"));
-
-  // ✅ Responses API input format uses content parts like "input_text"
-  const input = args.messages.map((m) => ({
-    role: m.role,
-    content: [{ type: "input_text", text: m.content }],
-  }));
-
-  const payload: any = { model, input };
-
-  if (typeof args.maxTokens === "number") {
-    payload.max_output_tokens = args.maxTokens;
-  }
-
-  // ✅ JSON mode in Responses uses text.format (object), not response_format
-  if (args.json) {
-    payload.text = { format: { type: "json_object" } };
-  }
-
-  // Only send temperature when safe
-  if (typeof args.temperature === "number" && shouldSendOpenAITemperature(model)) {
-    payload.temperature = args.temperature;
-  }
 
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -128,20 +149,70 @@ async function openaiResponses(args: LlmTextArgs): Promise<LlmTextResult> {
   });
 
   const j = await r.json().catch(() => null);
+
   if (!r.ok) {
     const msg = j?.error?.message || j?.message || `OpenAI error (${r.status})`;
     throw new Error(msg);
   }
 
-  // Responses API often provides output_text helper
-  const text =
-    (typeof j?.output_text === "string" && j.output_text.trim()) ||
-    // fallback: try to find any output_text in the structured output array
-    String(j?.output?.[0]?.content?.[0]?.text ?? "").trim();
+  return j;
+}
 
-  if (!text) throw new Error("OpenAI returned empty content");
+async function openaiResponses(args: LlmTextArgs): Promise<LlmTextResult> {
+  const model = env("OPENAI_MODEL", env("AI_MODEL", "gpt-5.2"));
 
-  return { content: text, provider: "openai", model };
+  const input = args.messages.map((m) => ({
+    role: m.role,
+    content: [{ type: "input_text", text: m.content }],
+  }));
+
+  const payloadBase: any = { model, input };
+
+  const maxOut = pickMaxOutputTokens(args.maxTokens);
+  if (typeof maxOut === "number") payloadBase.max_output_tokens = maxOut;
+
+  if (args.json) {
+    payloadBase.text = { format: { type: "json_object" } };
+  }
+
+  if (typeof args.temperature === "number" && shouldSendOpenAITemperature(model)) {
+    payloadBase.temperature = args.temperature;
+  }
+
+  // Attempt #1
+  const j1 = await openaiFetchResponses(payloadBase);
+
+  let text1 = "";
+  try {
+    text1 = extractTextFromResponsesPayload(j1);
+  } catch (e) {
+    // refusal or extraction error: rethrow
+    throw e;
+  }
+
+  if (text1) return { content: text1, provider: "openai", model };
+
+  // If the model says incomplete and we got nothing, do ONE retry with more output tokens
+  const status1 = typeof j1?.status === "string" ? j1.status : "";
+  if (status1 === "incomplete") {
+    const base = typeof maxOut === "number" ? maxOut : 1500;
+    const bumped = Math.min(4096, Math.max(base * 2, 2000));
+
+    const payload2 = { ...payloadBase, max_output_tokens: bumped };
+
+    const j2 = await openaiFetchResponses(payload2);
+
+    const text2 = extractTextFromResponsesPayload(j2);
+    if (text2) return { content: text2, provider: "openai", model };
+
+    const id = j2?.id ? String(j2.id) : String(j1?.id ?? "unknown");
+    const status2 = j2?.status ? String(j2.status) : status1 || "unknown";
+    throw new Error(`OpenAI returned empty content (id=${id}, status=${status2})`);
+  }
+
+  const id = j1?.id ? String(j1.id) : "unknown";
+  const status = j1?.status ? String(j1.status) : "unknown";
+  throw new Error(`OpenAI returned empty content (id=${id}, status=${status})`);
 }
 
 /* ---------------- Public API ---------------- */
