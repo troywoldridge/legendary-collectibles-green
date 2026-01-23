@@ -200,7 +200,7 @@ const cartCount = useCartCount();
             </NavDropdown>
 
             <NavDropdown label="Funko">
-              <DropdownLink href="src/app/categories/funko/items/[id]/page">Funko</DropdownLink>
+              <DropdownLink href="/categories/funko/items">Funko</DropdownLink>
             </NavDropdown>
 
             <NavLink href="/psa" active={isActive("/psa")}>
