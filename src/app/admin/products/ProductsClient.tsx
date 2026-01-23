@@ -20,6 +20,16 @@ type Row = {
   status: string;
   updatedAt: string;
   imageCount: number;
+
+  // --- AI listing generation (latest per product) ---
+  aiGenerationId?: string | null;
+  aiStatus?: string | null;
+  aiSchemaVersion?: string | null;
+  aiModel?: string | null;
+  aiErrorText?: string | null;
+  aiCreatedAt?: string | null;
+  aiUpdatedAt?: string | null;
+  aiIntegrityNotes?: unknown; // if selected by API, typically array
 };
 
 type Counts = { total: number; draft: number; active: number; archived: number };
@@ -180,15 +190,18 @@ export default function ProductsClient() {
                 <th className="p-2">Price</th>
                 <th className="p-2">Imgs</th>
                 <th className="p-2">Links</th>
+                <th className="p-2">AI</th>
               </tr>
             </thead>
+
             <tbody>
               {rows.map((r) => (
-                <tr key={r.id} className="hover:bg-white/5">
+                <tr key={r.id} className="hover:bg-white/5 align-top">
                   <td className="p-2">
                     <div className="font-medium">{r.title}</div>
                     <div className="opacity-70">{r.slug}</div>
                   </td>
+
                   <td className="p-2">{r.sku ?? "—"}</td>
                   <td className="p-2">{r.game}</td>
                   <td className="p-2">{r.format}</td>
@@ -196,6 +209,7 @@ export default function ProductsClient() {
                   <td className="p-2">{r.quantity}</td>
                   <td className="p-2">{money(r.priceCents)}</td>
                   <td className="p-2">{r.imageCount}</td>
+
                   <td className="p-2">
                     <div className="flex flex-wrap gap-2">
                       <a
@@ -207,6 +221,7 @@ export default function ProductsClient() {
                       >
                         View
                       </a>
+
                       <a
                         className="rounded-md border border-white/10 px-2 py-1 hover:bg-white/5"
                         href={`/admin/ai/listings?productId=${encodeURIComponent(r.id)}`}
@@ -214,6 +229,7 @@ export default function ProductsClient() {
                       >
                         AI
                       </a>
+
                       <a
                         className="rounded-md border border-white/10 px-2 py-1 hover:bg-white/5"
                         href={`/admin/ai/listings?productId=${encodeURIComponent(r.id)}&autogen=1`}
@@ -223,12 +239,44 @@ export default function ProductsClient() {
                       </a>
                     </div>
                   </td>
+
+                  {/* ✅ This is the missing cell you were asking “where??” about */}
+                  <td className="p-2">
+                    {r.aiStatus ? (
+                      <div className="grid gap-1">
+                        <div className="text-xs">
+                          <span className="opacity-70">Status:</span> {r.aiStatus}
+                        </div>
+
+                        {r.aiGenerationId ? (
+                          <div className="text-xs opacity-70 truncate" title={r.aiGenerationId}>
+                            Gen: {r.aiGenerationId}
+                          </div>
+                        ) : null}
+
+                        {r.aiModel ? (
+                          <div className="text-xs opacity-70 truncate" title={r.aiModel}>
+                            {r.aiModel}
+                          </div>
+                        ) : null}
+
+                        {r.aiErrorText ? (
+                          <div className="text-xs text-red-300 truncate" title={r.aiErrorText}>
+                            {r.aiErrorText}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <span className="text-xs opacity-60">—</span>
+                    )}
+                  </td>
                 </tr>
               ))}
 
               {rows.length === 0 ? (
                 <tr>
-                  <td className="p-3 opacity-70" colSpan={9}>
+                  {/* ✅ 10 columns now (we added AI), so colSpan must be 10 */}
+                  <td className="p-3 opacity-70" colSpan={10}>
                     No products found.
                   </td>
                 </tr>
@@ -241,6 +289,7 @@ export default function ProductsClient() {
           <div className="text-xs opacity-70">
             Showing {rows.length} • Offset {offset}
           </div>
+
           <div className="flex gap-2">
             <button
               onClick={() => load(Math.max(0, offset - limit))}

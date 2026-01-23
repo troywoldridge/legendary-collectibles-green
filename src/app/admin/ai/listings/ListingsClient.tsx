@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { getAdminToken } from "@/components/admin/AdminApiTokenGate";
 
 type ProductRow = {
   id: string;
@@ -22,6 +23,14 @@ type ProductRow = {
   updatedAt: string;
   imageCount: number;
 };
+
+function adminHeaders(extra?: Record<string, string>) {
+  const token = getAdminToken();
+  return {
+    ...(extra || {}),
+    ...(token ? { "x-admin-token": token } : {}),
+  };
+}
 
 export default function ListingsClient() {
   const sp = useSearchParams();
@@ -53,6 +62,7 @@ export default function ListingsClient() {
   async function load() {
     setLoading(true);
     setError(null);
+
     try {
       const url = new URL("/api/admin/ai/listings", window.location.origin);
       if (q.trim()) url.searchParams.set("q", q.trim());
@@ -60,9 +70,19 @@ export default function ListingsClient() {
       url.searchParams.set("limit", "25");
       url.searchParams.set("offset", "0");
 
-      const r = await fetch(url.toString(), { cache: "no-store" });
-      const j = await r.json();
+      const r = await fetch(url.toString(), {
+        cache: "no-store",
+        headers: adminHeaders(),
+      });
+
+      const j = await r.json().catch(() => null);
+
+      if (!r.ok) {
+        const msg = j?.message || j?.error || `Request failed (${r.status})`;
+        throw new Error(msg);
+      }
       if (!j?.ok) throw new Error(j?.message || "Failed to load");
+
       setRows(j.rows || []);
     } catch (e: any) {
       setError(String(e?.message ?? e));
@@ -83,11 +103,18 @@ export default function ListingsClient() {
     try {
       const r = await fetch("/api/admin/ai/generate-listing", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: adminHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ productId: pid }),
       });
-      const j = await r.json();
+
+      const j = await r.json().catch(() => null);
+
+      if (!r.ok) {
+        const msg = j?.message || j?.error || `Request failed (${r.status})`;
+        throw new Error(msg);
+      }
       if (!j?.ok) throw new Error(j?.message || "Generation failed");
+
       setGenerationId(j.generationId ?? null);
       setOutput(j.output ?? null);
     } catch (e: any) {
@@ -99,17 +126,25 @@ export default function ListingsClient() {
 
   async function apply() {
     if (!generationId) return;
+
     setApplyLoading(true);
     setError(null);
 
     try {
       const r = await fetch("/api/admin/ai/apply-listing", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: adminHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ generationId }),
       });
-      const j = await r.json();
+
+      const j = await r.json().catch(() => null);
+
+      if (!r.ok) {
+        const msg = j?.message || j?.error || `Request failed (${r.status})`;
+        throw new Error(msg);
+      }
       if (!j?.ok) throw new Error(j?.message || "Apply failed");
+
       await load();
     } catch (e: any) {
       setError(String(e?.message ?? e));

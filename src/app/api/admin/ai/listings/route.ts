@@ -1,3 +1,4 @@
+// src/app/api/admin/products/route.ts (or wherever this lives)
 import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -16,7 +17,7 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
 
   const q = (searchParams.get("q") || "").trim();
-  const status = (searchParams.get("status") || "").trim(); // optional product_status text
+  const status = (searchParams.get("status") || "").trim();
   const limit = Math.min(100, Math.max(1, toInt(searchParams.get("limit"), 25)));
   const offset = Math.max(0, toInt(searchParams.get("offset"), 0));
 
@@ -60,7 +61,8 @@ export async function GET(req: NextRequest) {
         g.model as "aiModel",
         g.error_text as "aiErrorText",
         g.created_at as "aiCreatedAt",
-        g.updated_at as "aiUpdatedAt"
+        g.updated_at as "aiUpdatedAt",
+        g.output_json #> '{integrity,notes}' as "aiIntegrityNotes"
       from ai_listing_generations g
       order by g.product_id, g.created_at desc, g.id desc
     )
@@ -72,7 +74,8 @@ export async function GET(req: NextRequest) {
       lg."aiModel",
       lg."aiErrorText",
       lg."aiCreatedAt",
-      lg."aiUpdatedAt"
+      lg."aiUpdatedAt",
+      lg."aiIntegrityNotes"
     from base b
     left join latest_gen lg on lg.product_id = b.id
     order by b."updatedAt" desc;

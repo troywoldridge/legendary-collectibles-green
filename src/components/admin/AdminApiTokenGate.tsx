@@ -1,133 +1,156 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+const STORAGE_KEY = "ADMIN_UI_Token";
+
+let memoryToken: string | null = null;
+
+function safeGetLocalStorage(key: string): string | null {
+  try {
+    if (typeof window === "undefined") return null;
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSetLocalStorage(key: string, value: string) {
+  try {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(key, value);
+  } catch {
+    // ignore
+  }
+}
+
+function safeRemoveLocalStorage(key: string) {
+  try {
+    if (typeof window === "undefined") return;
+    window.localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Read the admin token from memory (fast) or localStorage.
+ * NOTE: This is client-only.
+ */
+export function getAdminToken(): string | null {
+  if (memoryToken && memoryToken.trim()) return memoryToken.trim();
+  const fromLs = safeGetLocalStorage(STORAGE_KEY);
+  if (fromLs && fromLs.trim()) {
+    memoryToken = fromLs.trim();
+    return memoryToken;
+  }
+  return null;
+}
+
+export function setAdminToken(token: string) {
+  const t = String(token ?? "").trim();
+  memoryToken = t || null;
+  if (t) safeSetLocalStorage(STORAGE_KEY, t);
+  else safeRemoveLocalStorage(STORAGE_KEY);
+}
+
+export function clearAdminToken() {
+  memoryToken = null;
+  safeRemoveLocalStorage(STORAGE_KEY);
+}
 
 type Props = {
-  children?: React.ReactNode; // ✅ optional now
+  children: React.ReactNode;
   title?: string;
+  description?: string;
 };
 
-export const ADMIN_TOKEN_STORAGE_KEY = "ADMIN_API_TOKEN";
+export default function AdminApiTokenGate({
+  children,
+  title = "Admin Access",
+  description = "Enter your admin token to use these tools.",
+}: Props) {
+  const [ready, setReady] = useState(false);
+  const [token, setToken] = useState<string>("");
+  const [savedToken, setSavedTokenState] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
-export function getAdminToken(): string {
-  try {
-    return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || "";
-  } catch {
-    return "";
-  }
-}
-
-function setAdminToken(v: string) {
-  try {
-    localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, v);
-  } catch {
-    // ignore
-  }
-}
-
-function clearAdminToken() {
-  try {
-    localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
-  } catch {
-    // ignore
-  }
-}
-
-const GEN_TOKEN_CMD = `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`;
-const ENV_LINE = `ADMIN_API_TOKEN=PASTE_TOKEN_HERE`;
-
-export default function AdminTokenGate({ children, title = "Admin Access" }: Props) {
-  const [mounted, setMounted] = useState(false);
-  const [token, setToken] = useState("");
-  const [input, setInput] = useState("");
-  const [show, setShow] = useState(false);
-  const [msg, setMsg] = useState<string>("");
-
+  // hydrate from storage once on mount
   useEffect(() => {
-    setMounted(true);
-    const t = getAdminToken();
-    setToken(t);
-    setInput(t);
+    const existing = getAdminToken();
+    setSavedTokenState(existing);
+    setToken(existing ?? "");
+    setReady(true);
   }, []);
 
-  const hasToken = useMemo(() => token.trim().length > 0, [token]);
+  const hasToken = useMemo(() => !!(savedToken && savedToken.trim()), [savedToken]);
 
-  function save() {
-    const t = input.trim();
+  function onSave() {
+    setErr(null);
+    const t = token.trim();
     if (!t) {
-      setMsg("Token cannot be empty.");
+      setErr("Token is required.");
       return;
     }
     setAdminToken(t);
-    setToken(t);
-    setMsg("Saved. Reloading…");
-    window.location.reload();
+    setSavedTokenState(t);
   }
 
-  function clear() {
+  function onClear() {
+    setErr(null);
     clearAdminToken();
+    setSavedTokenState(null);
     setToken("");
-    setInput("");
-    setMsg("Cleared.");
   }
 
-  if (!mounted) {
-    return (
-      <div className="adminGate">
-        <h1 className="adminGate__title">{title}</h1>
-        <p className="adminGate__muted">Loading admin gate…</p>
-      </div>
-    );
-  }
+  if (!ready) return null;
 
-  // ✅ if token exists, render children (or nothing if none were provided)
-  if (hasToken) return <>{children ?? null}</>;
+  if (hasToken) {
+    return <>{children}</>;
+  }
 
   return (
-    <div className="adminGate">
-      <h1 className="adminGate__title">{title}</h1>
-      <p className="adminGate__muted">
-        This admin area is protected. Paste the <b>ADMIN_API_TOKEN</b> to continue.
-      </p>
+    <div className="rounded-lg border border-white/10 bg-black/30 p-5">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-lg font-semibold">{title}</div>
+          <div className="mt-1 text-sm opacity-70">{description}</div>
+        </div>
+      </div>
 
-      <div className="adminGate__panel">
-        <label className="adminGate__label">
-          <span className="adminGate__labelText">Admin API Token</span>
-          <input
-            className="adminGate__input"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            type={show ? "text" : "password"}
-            placeholder="Paste token here…"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </label>
+      <div className="mt-4 grid gap-3">
+        <label className="text-sm opacity-80">Admin Token</label>
+        <input
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder="Paste token…"
+          className="w-full rounded-md bg-black/30 border border-white/10 px-3 py-2"
+          autoComplete="off"
+          spellCheck={false}
+        />
 
-        <div className="adminGate__actions">
-          <button className="adminGate__btn adminGate__btn--primary" onClick={save} type="button">
+        {err ? <p className="text-sm text-red-300">{err}</p> : null}
+
+        <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={onSave}
+            className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5"
+          >
             Save Token
           </button>
-          <button className="adminGate__btn" onClick={() => setShow((s) => !s)} type="button">
-            {show ? "Hide" : "Show"}
-          </button>
-          <button className="adminGate__btn adminGate__btn--danger" onClick={clear} type="button">
-            Clear Token
+
+          <button
+            onClick={onClear}
+            className="rounded-md border border-white/10 px-3 py-2 hover:bg-white/5"
+          >
+            Clear
           </button>
         </div>
 
-        {msg ? <div className="adminGate__msg">{msg}</div> : null}
-
-        <details className="adminGate__details">
-          <summary className="adminGate__summary">Where do I get the token?</summary>
-          <div className="adminGate__help">
-            <div>1) Generate one:</div>
-            <pre className="adminGate__code">{GEN_TOKEN_CMD}</pre>
-            <div>2) Put it in <code>.env</code>:</div>
-            <pre className="adminGate__code">{ENV_LINE}</pre>
-            <div>3) Restart the app / redeploy, then paste it here.</div>
-          </div>
-        </details>
+        <p className="text-xs opacity-60">
+          This token is stored in your browser (localStorage key: <span className="opacity-80">{STORAGE_KEY}</span>).
+        </p>
       </div>
     </div>
   );

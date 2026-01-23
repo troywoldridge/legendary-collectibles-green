@@ -1,5 +1,5 @@
 // src/app/api/admin/ai/generate-listing/route.ts
- 
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
 
 import fs from "node:fs";
@@ -17,6 +17,7 @@ import {
   PHOTO_NOTE_LITERAL,
 } from "@/lib/ai/listingSchema";
 
+import { LISTING_RULES_V1 } from "@/lib/ai/listingRules";
 import { llmText } from "@/lib/ai/llm";
 
 export const runtime = "nodejs";
@@ -61,21 +62,90 @@ function loadGeneratorPrompt(): string {
 }
 
 function sanitizeListingJson(x: ListingJson): ListingJson {
-  // Force the literal exactly
+  // Ensure integrity object exists (schema should provide it, but be defensive)
+  x.integrity = x.integrity ?? {
+    noHypeLanguage: true,
+    noUnverifiedClaims: true,
+    noInventedConditionOrGrade: true,
+    collectorSafe: true,
+    photoAware: true,
+    notes: [],
+  };
+  x.integrity.notes = Array.isArray(x.integrity.notes) ? x.integrity.notes : [];
+
+  // Force the literal exactly (single source of truth)
   x.copy.photoAssumptionNote = PHOTO_NOTE_LITERAL;
 
-  const banned: RegExp[] = [
-    /photos represent the exact item you will receive/gi,
-    /photos show the exact item you will receive/gi,
-    /exact item you will receive/gi,
-    /exact item shown/gi,
+  // Hype / prohibited claims: REMOVE entirely (robust patterns)
+  const hypeBanned: Array<{ re: RegExp; label: string }> = [
+    { re: /\bpack[\s\-_/]*fresh\b/gi, label: "pack fresh" },
+    { re: /\bminty\b/gi, label: "minty" },
+    { re: /\bperfect[\s\-_/]*centering\b/gi, label: "perfect centering" },
+    { re: /\binvestment(?:[\s\-_/]*grade)?\b/gi, label: "investment" },
+    { re: /\bguarantee(?:d|s)?\b/gi, label: "guarantee/guaranteed" },
+    { re: /\bflawless\b/gi, label: "flawless" },
+    { re: /\bpristine\b/gi, label: "pristine" },
+
+    // Candidate / contender / should-grade family (EXTRA STRICT)
+    { re: /\bpsa[\s\-_/]*10[\s\-_/]*(candidate|contender)\b/gi, label: "PSA 10 candidate/contender" },
+    { re: /\b(psa|bgs|cgc)\b[\s\-_/]*(candidate|contender)\b/gi, label: "grader candidate/contender" },
+    { re: /\b10\b[\s\-_/]*(candidate|contender)\b/gi, label: "10 candidate/contender" },
+    { re: /\bgrad(?:e|ing)\b[\s\-_/]*(candidate|contender)\b/gi, label: "grade/grading candidate/contender" },
+    { re: /\bgem\b[\s\-_/]*(candidate|contender)\b/gi, label: "gem candidate/contender" },
+    {
+      re: /\b(should|would|could|might|may|likely|probably)\b[\s\-_/]*(grade|grades|grading)\b[\s\-_/]*(a[\s\-_/]*)?10\b/gi,
+      label: "should/would grade a 10",
+    },
+    { re: /\b(possible|potential)\b[\s\-_/]*10\b/gi, label: "possible/potential 10" },
+  ];
+
+  // “Exact item” claims: REWRITE to stock-safe language
+  const exactItemClaims: Array<{ re: RegExp; label: string }> = [
+    { re: /photos represent the exact item you will receive/gi, label: "photos represent the exact item you will receive" },
+    { re: /photos show the exact item you will receive/gi, label: "photos show the exact item you will receive" },
+    { re: /exact item you will receive/gi, label: "exact item you will receive" },
+    { re: /exact item shown/gi, label: "exact item shown" },
   ];
 
   const scrub = (s: string | null) => {
     if (!s) return s;
     let out = s;
-    for (const re of banned) out = out.replace(re, "photos may include stock images");
-    out = out.replace(/\s{2,}/g, " ").replace(/\s+\n/g, "\n").trim();
+
+    // Helper: remove and log
+    const removeAndLog = (re: RegExp, label: string) => {
+      if (re.test(out)) {
+        out = out.replace(re, "");
+        x.integrity.notes.push(`Removed banned phrase: ${label}`);
+      }
+    };
+
+    // Helper: rewrite and log
+    const rewriteAndLog = (re: RegExp, label: string) => {
+      if (re.test(out)) {
+        out = out.replace(re, "photos may include stock images");
+        x.integrity.notes.push(`Rewrote exact-item claim to stock-safe language: ${label}`);
+      }
+    };
+
+    // 1) remove hype/candidate family phrases
+    for (const item of hypeBanned) removeAndLog(item.re, item.label);
+
+    // 2) rewrite exact-item claims
+    for (const item of exactItemClaims) rewriteAndLog(item.re, item.label);
+
+    // 3) clean up punctuation/spacing stranded by deletions
+    out = out
+      .replace(/\s*([,.;:!?])\s*(?=[,.;:!?])/g, "$1") // collapse repeated punctuation
+      .replace(/\(\s*\)/g, "") // empty parentheses
+      .replace(/\[\s*\]/g, "") // empty brackets
+      .replace(/\s{2,}/g, " ") // double spaces
+      .replace(/\s+\n/g, "\n") // trim line-leading spaces
+      .replace(/\n{3,}/g, "\n\n") // collapse huge blank blocks
+      .trim();
+
+    // 4) clean up dangling separators at end of lines
+    out = out.replace(/[•\-–—|,;:]+\s*$/gm, "").trim();
+
     return out;
   };
 
@@ -87,19 +157,27 @@ function sanitizeListingJson(x: ListingJson): ListingJson {
   x.copy.shippingSafetyNote = scrub(x.copy.shippingSafetyNote);
   x.copy.highlights = (x.copy.highlights || []).map((h) => scrub(h) ?? "").filter(Boolean);
 
-  // Remove literal if model repeats it inside description
+  // Remove the literal if the model repeats it inside description
   if (x.copy.descriptionMd) {
     const lines = x.copy.descriptionMd.split("\n");
     const filtered = lines.filter((ln) => ln.trim() !== PHOTO_NOTE_LITERAL);
+    if (filtered.length !== lines.length) {
+      x.integrity.notes.push("Removed duplicated photoAssumptionNote literal from descriptionMd.");
+    }
     x.copy.descriptionMd = filtered.join("\n").trim();
   }
+
+  // De-dupe notes (models can repeat phrases across fields)
+  x.integrity.notes = Array.from(new Set(x.integrity.notes));
 
   return x;
 }
 
+
+
 function buildGeneratorPrompt(input: unknown) {
   const base = loadGeneratorPrompt();
-  return `${base}\n\nINPUT_JSON:\n${JSON.stringify(input, null, 2)}`;
+  return `${LISTING_RULES_V1}\n\n${base}\n\nINPUT_JSON:\n${JSON.stringify(input, null, 2)}`;
 }
 
 /* ---------------- JSON parsing helpers ---------------- */
@@ -129,7 +207,6 @@ function parseListingJsonOrThrow(text: string): ListingJson {
     throw new Error(`Model did not return valid JSON. Got: ${jsonText.slice(0, 220)}...`);
   }
 
-  // Zod validate
   return ListingJsonSchema.parse(parsed);
 }
 
@@ -142,7 +219,7 @@ async function callModel(prompt: string): Promise<{ json: ListingJson; model?: s
 
   // 1st attempt (auto provider: try Ollama, fall back to OpenAI)
   const first = await llmText({
-    json: true, // used by Ollama; OpenAI will still be instructed via the prompt
+    json: true,
     temperature: 0.2,
     maxTokens: 1800,
     messages: [
@@ -155,7 +232,6 @@ async function callModel(prompt: string): Promise<{ json: ListingJson; model?: s
     const json = parseListingJsonOrThrow(first.content);
     return { json, model: `${first.provider}:${first.model}` };
   } catch (err1: any) {
-    // 2nd attempt with explicit repair instruction
     const repairPrompt =
       `${prompt}\n\n` +
       `The previous output was invalid or didn't match schema.\n` +
@@ -224,7 +300,7 @@ function pickReturningId(res: unknown): string | null {
   const first = rows[0];
   if (!isObject(first)) return null;
 
-  const id = first.id;
+  const id = (first as any).id;
   return typeof id === "string" ? id : null;
 }
 
@@ -250,7 +326,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1) product row
     const pRes = await db.execute(sql`
       select
         p.id,
@@ -291,7 +366,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // images for THIS product, include isStock
     const imgRes = await db.execute(sql`
       select
         i.id,
@@ -306,7 +380,6 @@ export async function POST(req: NextRequest) {
 
     const images = mapImages(imgRes);
 
-    // Optional: tcg enrichment
     let tcgCard: Record<string, unknown> | null = null;
     const sourceCardId = product["sourceCardId"];
 
@@ -340,7 +413,6 @@ export async function POST(req: NextRequest) {
     const prompt = buildGeneratorPrompt(input);
     const { json, model } = await callModel(prompt);
 
-    // Validate + enforce stock-safe note
     let validated: ListingJson = ListingJsonSchema.parse(json);
     validated = sanitizeListingJson(validated);
 

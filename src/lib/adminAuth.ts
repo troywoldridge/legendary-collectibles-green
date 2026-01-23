@@ -1,10 +1,6 @@
 // src/lib/adminAuth.ts
 import "server-only";
 
-import type { NextRequest } from "next/server";
-
-type AdminAuthResult = { ok: true } | { ok: false; error: string };
-
 function readHeader(req: Request, name: string) {
   try {
     return req.headers.get(name);
@@ -14,18 +10,18 @@ function readHeader(req: Request, name: string) {
 }
 
 function getTokenFromRequest(req: Request): string | null {
-  // 1) Authorization: Bearer xxx
+  // Authorization: Bearer xxx (optional)
   const auth = readHeader(req, "authorization") || readHeader(req, "Authorization");
   if (auth) {
     const m = auth.match(/^\s*Bearer\s+(.+)\s*$/i);
     if (m?.[1]) return m[1].trim();
   }
 
-  // 2) x-admin-token
+  // x-admin-token (recommended)
   const x = readHeader(req, "x-admin-token") || readHeader(req, "X-Admin-Token");
   if (x) return x.trim();
 
-  // 3) ?token= (nice for quick manual tests)
+  // ?token= (optional for manual tests)
   try {
     const url = new URL((req as any).url || "");
     const t = url.searchParams.get("token");
@@ -35,20 +31,15 @@ function getTokenFromRequest(req: Request): string | null {
   return null;
 }
 
-export function requireAdmin(req: NextRequest | Request): AdminAuthResult {
-  // ✅ new name
-  const expected =
-    (process.env.ADMIN_UI_TOKEN || "").trim() ||
-    (process.env.ADMIN_API_TOKEN || "").trim(); // fallback so old env still works
+export function requireAdmin(req: Request): { ok: true } | { ok: false; error: string } {
+  const provided = getTokenFromRequest(req);
 
-  if (!expected) {
-    return { ok: false, error: "ADMIN_UI_TOKEN is not configured" };
-  }
+  // ✅ THIS must match what you put in .env
+  const expected = (process.env.ADMIN_UI_Token || "").trim();
 
-  const token = getTokenFromRequest(req as Request);
-  if (!token) return { ok: false, error: "Missing admin token" };
-
-  if (token !== expected) return { ok: false, error: "Invalid admin token" };
+  if (!expected) return { ok: false, error: "Server missing ADMIN_UI_Token env var" };
+  if (!provided) return { ok: false, error: "Missing admin token" };
+  if (provided !== expected) return { ok: false, error: "Invalid admin token" };
 
   return { ok: true };
 }
