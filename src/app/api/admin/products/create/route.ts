@@ -56,6 +56,40 @@ const ALLOWED_GRADER = new Set(["psa", "bgs", "cgc"]);
 // Make sure these match your `card_condition` enum EXACTLY
 const ALLOWED_CONDITION = new Set(["nm", "lp", "mp", "hp", "dmg", "new_factory_sealed"]);
 
+/**
+ * Ensure slug is unique by appending "-2", "-3", ...
+ * Returns the slug that should be inserted.
+ */
+async function nextUniqueSlug(base: string): Promise<string> {
+  const baseSlug = base.trim();
+  if (!baseSlug) return baseSlug;
+
+  // If exact slug is free, use it
+  const exists = await db.execute(sql`
+    select 1 from products where slug = ${baseSlug} limit 1
+  `);
+  const rows = (exists as any)?.rows ?? [];
+  if (rows.length === 0) return baseSlug;
+
+  // Otherwise find next suffix
+  const like = `${baseSlug}-%`;
+  const res = await db.execute(sql`
+    select slug
+    from products
+    where slug = ${baseSlug} or slug like ${like}
+  `);
+
+  const taken = new Set<string>(((res as any)?.rows ?? []).map((r: any) => String(r.slug)));
+
+  for (let i = 2; i < 10000; i++) {
+    const candidate = `${baseSlug}-${i}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+
+  // fallback (should basically never happen)
+  return `${baseSlug}-${Date.now()}`;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
@@ -110,56 +144,36 @@ export async function POST(req: NextRequest) {
     }
     if (!game || !ALLOWED_GAME.has(game)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "bad_request",
-          message: `Invalid game. Must be one of: ${Array.from(ALLOWED_GAME).join(", ")}`,
-        },
+        { ok: false, error: "bad_request", message: `Invalid game. Must be one of: ${Array.from(ALLOWED_GAME).join(", ")}` },
         { status: 400 },
       );
     }
     if (!format || !ALLOWED_FORMAT.has(format)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "bad_request",
-          message: `Invalid format. Must be one of: ${Array.from(ALLOWED_FORMAT).join(", ")}`,
-        },
+        { ok: false, error: "bad_request", message: `Invalid format. Must be one of: ${Array.from(ALLOWED_FORMAT).join(", ")}` },
         { status: 400 },
       );
     }
     if (!status || !ALLOWED_STATUS.has(status)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "bad_request",
-          message: `Invalid status. Must be one of: ${Array.from(ALLOWED_STATUS).join(", ")}`,
-        },
+        { ok: false, error: "bad_request", message: `Invalid status. Must be one of: ${Array.from(ALLOWED_STATUS).join(", ")}` },
         { status: 400 },
       );
     }
 
     if (grader && !ALLOWED_GRADER.has(grader)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "bad_request",
-          message: `Invalid grader. Must be one of: ${Array.from(ALLOWED_GRADER).join(", ")}`,
-        },
+        { ok: false, error: "bad_request", message: `Invalid grader. Must be one of: ${Array.from(ALLOWED_GRADER).join(", ")}` },
         { status: 400 },
       );
     }
 
-    // If graded, raw condition should be NULL (matches your UI intent)
+    // If graded, raw condition should be NULL
     const finalCondition = isGraded ? null : conditionLower;
 
     if (finalCondition && !ALLOWED_CONDITION.has(finalCondition)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "bad_request",
-          message: `Invalid condition. Must be one of: ${Array.from(ALLOWED_CONDITION).join(", ")}`,
-        },
+        { ok: false, error: "bad_request", message: `Invalid condition. Must be one of: ${Array.from(ALLOWED_CONDITION).join(", ")}` },
         { status: 400 },
       );
     }
@@ -169,100 +183,94 @@ export async function POST(req: NextRequest) {
     const finalGradeX10 = isGraded ? gradeX10 : null;
 
     if (priceCents < 0) {
-      return NextResponse.json(
-        { ok: false, error: "bad_request", message: "priceCents must be >= 0" },
-        { status: 400 },
-      );
+      return NextResponse.json({ ok: false, error: "bad_request", message: "priceCents must be >= 0" }, { status: 400 });
     }
     if (quantity < 0) {
-      return NextResponse.json(
-        { ok: false, error: "bad_request", message: "quantity must be >= 0" },
-        { status: 400 },
-      );
+      return NextResponse.json({ ok: false, error: "bad_request", message: "quantity must be >= 0" }, { status: 400 });
     }
 
     // optional: if user passes a UUID as id, accept it
     const id = norm((body as any)?.id);
     const idOrNull = id && isUuid(id) ? id : null;
 
+    // ✅ Ensure slug is unique
+    const finalSlug = await nextUniqueSlug(slug);
+
     const ins = await db.execute(sql`
-  insert into products (
-    id,
-    title,
-    slug,
-    sku,
-    game,
-    format,
-    sealed,
-    is_graded,
-    grader,
-    grade_x10,
-    condition,
-    price_cents,
-    quantity,
-    status,
-    subtitle,
-    description,
-    source_card_id,
-    source_set_code,
-    source_set_name,
-    source_number
-  )
-  values (
-    coalesce(${idOrNull}::uuid, gen_random_uuid()),
-    ${title},
-    ${slug},
-    ${sku},
-    ${game}::game,
-    ${format}::product_format,
-    ${sealed},
-    ${isGraded},
+      insert into products (
+        id,
+        title,
+        slug,
+        sku,
+        game,
+        format,
+        sealed,
+        is_graded,
+        grader,
+        grade_x10,
+        condition,
+        price_cents,
+        quantity,
+        status,
+        subtitle,
+        description,
+        source_card_id,
+        source_set_code,
+        source_set_name,
+        source_number
+      )
+      values (
+        coalesce(${idOrNull}::uuid, gen_random_uuid()),
+        ${title},
+        ${finalSlug},
+        ${sku},
+        ${game}::game,
+        ${format}::product_format,
+        ${sealed},
+        ${isGraded},
 
-    /* OPTIONAL enum: grader (safe for null/blank) */
-    NULLIF(${finalGrader}, '')::grader,
+        /* OPTIONAL enum: grader (safe for null/blank) */
+        NULLIF(${finalGrader}, '')::grader,
 
-    /* grade_x10 (nullable) */
-    ${finalGradeX10},
+        /* grade_x10 (nullable) */
+        ${finalGradeX10},
 
-    /* OPTIONAL enum: condition (safe for null/blank) */
-    NULLIF(${finalCondition}, '')::card_condition,
+        /* OPTIONAL enum: condition (safe for null/blank) */
+        NULLIF(${finalCondition}, '')::card_condition,
 
-    ${priceCents},
-    ${quantity},
-    ${status}::product_status,
-    ${subtitle},
-    ${description},
-    ${sourceCardId},
-    ${sourceSetCode},
-    ${sourceSetName},
-    ${sourceNumber}
-  )
-  returning id, slug
-`);
-
+        ${priceCents},
+        ${quantity},
+        ${status}::product_status,
+        ${subtitle},
+        ${description},
+        ${sourceCardId},
+        ${sourceSetCode},
+        ${sourceSetName},
+        ${sourceNumber}
+      )
+      returning id, slug
+    `);
 
     const row = (ins as any)?.rows?.[0];
     return NextResponse.json({ ok: true, product: row });
   } catch (err: any) {
-  // Try to expose the *real* Postgres error (code/detail/constraint)
-  const e = err?.cause ?? err;
+    const e = err?.cause ?? err;
 
-  return NextResponse.json(
-    {
-      ok: false,
-      error: "create_failed",
-      message: String(e?.message ?? err?.message ?? err),
-      code: e?.code ?? err?.code ?? null,
-      detail: e?.detail ?? null,
-      hint: e?.hint ?? null,
-      where: e?.where ?? null,
-      schema: e?.schema ?? null,
-      table: e?.table ?? null,
-      column: e?.column ?? null,
-      constraint: e?.constraint ?? null,
-    },
-    { status: 500 },
-  );
-}
-
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "create_failed",
+        message: String(e?.message ?? err?.message ?? err),
+        code: e?.code ?? err?.code ?? null,
+        detail: e?.detail ?? null,
+        hint: e?.hint ?? null,
+        where: e?.where ?? null,
+        schema: e?.schema ?? null,
+        table: e?.table ?? null,
+        column: e?.column ?? null,
+        constraint: e?.constraint ?? null,
+      },
+      { status: 500 },
+    );
+  }
 }
