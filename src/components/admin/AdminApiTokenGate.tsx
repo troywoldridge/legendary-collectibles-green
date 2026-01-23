@@ -3,7 +3,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-const STORAGE_KEY = "ADMIN_UI_Token";
+const STORAGE_KEY = "ADMIN_UI_TOKEN";
 
 let memoryToken: string | null = null;
 
