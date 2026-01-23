@@ -3,9 +3,7 @@ import "server-only";
 
 import type { NextRequest } from "next/server";
 
-type AdminAuthResult =
-  | { ok: true }
-  | { ok: false; error: string };
+type AdminAuthResult = { ok: true } | { ok: false; error: string };
 
 function readHeader(req: Request, name: string) {
   try {
@@ -38,9 +36,13 @@ function getTokenFromRequest(req: Request): string | null {
 }
 
 export function requireAdmin(req: NextRequest | Request): AdminAuthResult {
-  const expected = (process.env.ADMIN_API_TOKEN || "").trim();
+  // ✅ new name
+  const expected =
+    (process.env.ADMIN_UI_TOKEN || "").trim() ||
+    (process.env.ADMIN_API_TOKEN || "").trim(); // fallback so old env still works
+
   if (!expected) {
-    return { ok: false, error: "ADMIN_API_TOKEN is not configured" };
+    return { ok: false, error: "ADMIN_UI_TOKEN is not configured" };
   }
 
   const token = getTokenFromRequest(req as Request);
