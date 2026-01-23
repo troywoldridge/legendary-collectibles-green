@@ -12,16 +12,26 @@ function norm(v: unknown) {
   return String(v ?? "").trim();
 }
 
+function emptyToNull(v: unknown): string | null {
+  const s = norm(v);
+  return s ? s : null;
+}
+
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
 function toBool(v: unknown, fallback = false) {
   if (typeof v === "boolean") return v;
-  if (v === "true") return true;
-  if (v === "false") return false;
+  if (typeof v === "number") return v === 1 ? true : v === 0 ? false : fallback;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true" || s === "1" || s === "yes" || s === "on") return true;
+    if (s === "false" || s === "0" || s === "no" || s === "off") return false;
+  }
   return fallback;
 }
+
 
 function toInt(v: unknown, fallback: number) {
   const n = typeof v === "number" ? v : Number(v);
@@ -142,7 +152,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ productId:
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
   const url = norm(body.url);
-  const alt = norm(body.alt) || null;
+  const alt = emptyToNull(body.alt);
   const isStock = toBool(body.isStock, false);
 
   // sort can be omitted; compute next
