@@ -1,11 +1,18 @@
 import "server-only";
+import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return new Response("ok", {
-    status: 200,
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      origin: process.env.ORIGIN_NAME ?? "unknown",
+      commit: process.env.GIT_COMMIT ?? null,
+      nodeEnv: process.env.NODE_ENV ?? null,
+      now: new Date().toISOString(),
+    },
+    { status: 200 },
+  );
 }
