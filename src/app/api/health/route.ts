@@ -9,8 +9,8 @@ export async function GET() {
     {
       ok: true,
       origin: process.env.ORIGIN_NAME ?? "unknown",
-      commit: process.env.GIT_COMMIT ?? null,
-      nodeEnv: process.env.NODE_ENV ?? null,
+      port: process.env.PORT ?? null,
+      host: process.env.HOSTNAME ?? null,
       now: new Date().toISOString(),
     },
     { status: 200 },
