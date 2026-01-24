@@ -211,12 +211,6 @@ const cartCount = useCartCount();
               Shop
             </NavLink>
 
-            {FEATURES.funko && (
-              <NavLink href="/categories/funko/sets" active={isActive("/categories/funko")}>
-                Funko Pop
-              </NavLink>
-            )}
-
             <NavLink href="/collection" active={isActive("/collection")}>
               My Collection
             </NavLink>
@@ -234,7 +228,8 @@ const cartCount = useCartCount();
             />
             <button
               type="submit"
-              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-white/80 hover:text-white"
+           
+   className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-white/80 hover:text-white"
               aria-label="Search"
             >
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
