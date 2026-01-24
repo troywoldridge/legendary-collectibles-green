@@ -1,3 +1,4 @@
+// src/app/categories/funko/items/page.tsx
 import "server-only";
 
 import Link from "next/link";
@@ -47,15 +48,27 @@ export default async function FunkoItemsPage() {
           image_large,
           updated_at::text
         FROM public.funko_items
-        ORDER BY updated_at DESC NULLS LAST
+        ORDER BY updated_at DESC NULLS LAST, id ASC
         LIMIT 50
       `)
     ).rows ?? [];
 
   return (
     <section className="space-y-6">
+      <nav className="text-xs text-white/70">
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href="/" className="hover:underline">Home</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories" className="hover:underline">Categories</Link>
+          <span className="text-white/40">/</span>
+          <Link href="/categories/funko" className="hover:underline">Funko</Link>
+          <span className="text-white/40">/</span>
+          <span className="text-white/90">Items</span>
+        </div>
+      </nav>
+
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-        <h1 className="text-2xl font-bold text-white">Funko Pops</h1>
+        <h1 className="text-2xl font-bold text-white">Funko Items</h1>
         <p className="mt-2 text-sm text-white/70">Browse Funko catalog items. Click any item to view details.</p>
       </div>
 
@@ -75,6 +88,7 @@ export default async function FunkoItemsPage() {
                   {r.franchise ? <span className="mr-3">Franchise: {r.franchise}</span> : null}
                   {r.series ? <span className="mr-3">Series: {r.series}</span> : null}
                   {r.upc ? <span className="mr-3">UPC: {r.upc}</span> : null}
+                  {r.updated_at ? <span className="mr-3">Updated: {r.updated_at}</span> : null}
                 </div>
               </li>
             ))}
