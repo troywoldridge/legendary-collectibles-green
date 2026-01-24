@@ -12,6 +12,8 @@ export const CF_IMAGE_DELIVERY_BASE =
   (process.env.NEXT_PUBLIC_IMAGE_DELIVERY_BASE || "https://imagedelivery.net").replace(/\/$/, "");
 
 // Exact variants you showed in your screenshot
+// src/lib/cf.ts
+
 export type Variant =
   | "background"
   | "card"
@@ -21,6 +23,8 @@ export type Variant =
   | "hero"
   | "productHero"
   | "productThumb"
+  | "productTile"     
+  | "productDetail"   // not used
   | "public"
   | "saleCard"
   | "subcategoryThumb";
@@ -81,4 +85,44 @@ export function cfUrl(
   if (!looksLikeUuid(imageId)) return undefined;
 
   return `${CF_IMAGE_DELIVERY_BASE}/${CF_ACCOUNT_HASH}/${imageId}/${variant}`;
+}
+
+export function normalizeCloudflareVariant(
+  url: string | null | undefined,
+  variant: Variant | string = "productTile",
+) {
+  if (!url) return "";
+  const raw = String(url).trim();
+  if (!raw) return "";
+
+  // only CF delivery urls
+  if (!/https?:\/\/imagedelivery\.net\//i.test(raw)) return raw;
+
+  // map deprecated -> new
+  const v = variant === "productDetail" ? "productTile" : variant;
+
+  try {
+    const u = new URL(raw);
+
+    // pathname like: /<acct>/<id>/<variant>
+    const parts = u.pathname.split("/").filter(Boolean);
+
+    // Must have at least /<acct>/<id>
+    if (parts.length < 2) return raw;
+
+    const acct = parts[0];
+    const imageId = parts[1];
+
+    // Only rewrite if it looks like YOUR account + uuid id
+    if (CF_ACCOUNT_HASH && acct !== CF_ACCOUNT_HASH) return raw;
+    if (!looksLikeUuid(imageId)) return raw;
+
+    // Force exactly: /acct/id/variant
+    u.pathname = `/${acct}/${imageId}/${String(v)}`;
+
+    return u.toString();
+  } catch {
+    // If URL() fails, do nothing (avoid corrupting data)
+    return raw;
+  }
 }

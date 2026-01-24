@@ -5,8 +5,6 @@ import Link from "next/link";
 import { unstable_noStore as noStore } from "next/cache";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import Image from "next/image";
-
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,7 +31,14 @@ function titleOf(r: Row) {
 }
 
 function bestImage(r: Row) {
-  return r.image_large || r.image_small || null;
+  const v = (r.image_large || r.image_small || "").trim();
+  return v || null;
+}
+
+function withCacheBust(url: string, stamp: string | null | undefined) {
+  if (!stamp) return url;
+  const u = url.includes("?") ? `${url}&` : `${url}?`;
+  return `${u}v=${encodeURIComponent(stamp)}`;
 }
 
 export default async function FunkoItemsPage() {
@@ -63,20 +68,11 @@ export default async function FunkoItemsPage() {
     <section className="space-y-6">
       <nav className="text-xs text-white/70">
         <div className="flex flex-wrap items-center gap-2">
-          <Link href="/" className="hover:underline">
-            Home
-          </Link>
+          <Link href="/" className="hover:underline">Home</Link>
           <span className="text-white/40">/</span>
-          <Link href="/categories" className="hover:underline">
-            Categories
-          </Link>
+          <Link href="/categories" className="hover:underline">Categories</Link>
           <span className="text-white/40">/</span>
-
-          {/* If /categories/funko is still a hard 404, point this at the working index */}
-          <Link href="/categories/funko/items" className="hover:underline">
-            Funko
-          </Link>
-
+          <Link href="/categories/funko/items" className="hover:underline">Funko</Link>
           <span className="text-white/40">/</span>
           <span className="text-white/90">Items</span>
         </div>
@@ -95,26 +91,25 @@ export default async function FunkoItemsPage() {
             {rows.map((r) => {
               const href = `/categories/funko/items/${encodeURIComponent(r.id)}`;
               const title = titleOf(r);
-              const img = bestImage(r);
+
+              const rawImg = bestImage(r);
+              const img = rawImg ? withCacheBust(rawImg, r.updated_at) : null;
 
               return (
                 <Link
                   key={r.id}
                   href={href}
-                  className="group rounded-2xl border border-white/15 bg-black/20 p-3 hover:border-white/30 transition"
+                  className="group rounded-2xl border border-white/15 bg-black/20 p-3 transition hover:border-white/30"
                 >
-                  <div className="relative aspect-3/4 w-full overflow-hidden rounded-xl bg-black/30">
+                  <div className="relative aspect-[3/4] w-full overflow-hidden rounded-xl bg-black/30">
                     {img ? (
-                      // Using <img> is fine for external URLs; Image component would need remotePatterns config
-                      <Image
-                          src={img}
-                          alt={title}
-                          fill
-                          className="object-contain transition-transform group-hover:scale-[1.03]"
-                          sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, (max-width: 1280px) 20vw, 16vw"
-                          priority={false}
-                        />
-
+                      <img
+                        src={img}
+                        alt={title}
+                        className="h-full w-full object-contain transition-transform group-hover:scale-[1.03]"
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                      />
                     ) : (
                       <div className="flex h-full items-center justify-center text-xs text-white/50">
                         No image
@@ -123,14 +118,15 @@ export default async function FunkoItemsPage() {
                   </div>
 
                   <div className="mt-3 space-y-1">
-                    <div className="text-sm font-semibold text-white line-clamp-2">{title}</div>
+                    <div className="line-clamp-2 text-sm font-semibold text-white">{title}</div>
+                    {r.franchise ? <div className="line-clamp-1 text-xs text-white/60">{r.franchise}</div> : null}
+                    {r.series ? <div className="line-clamp-1 text-xs text-white/40">{r.series}</div> : null}
 
-                    {r.franchise ? (
-                      <div className="text-xs text-white/60 line-clamp-1">{r.franchise}</div>
-                    ) : null}
-
-                    {r.series ? (
-                      <div className="text-xs text-white/40 line-clamp-1">{r.series}</div>
+                    {/* quick debug: only show when missing */}
+                    {!img ? (
+                      <div className="mt-2 break-all text-[10px] text-white/40">
+                        img_large={String(r.image_large)} img_small={String(r.image_small)}
+                      </div>
                     ) : null}
                   </div>
                 </Link>
