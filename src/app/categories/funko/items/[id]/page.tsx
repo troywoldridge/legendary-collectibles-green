@@ -1,5 +1,4 @@
 // src/app/categories/funko/items/[id]/page.tsx
- 
 import "server-only";
 
 import type React from "react";
@@ -18,9 +17,15 @@ import MarketPrices from "@/components/MarketPrices";
 import MarketValuePanel from "@/components/market/MarketValuePanel";
 import PriceAlertBell from "@/components/alerts/PriceAlertBell";
 
+import FunkoAlertBanners from "@/components/funko/FunkoAlertBanners";
+import FunkoBuyNowLinks from "@/components/funko/FunkoBuyNowLinks";
+import FunkoRelatedPanel from "@/components/funko/FunkoRelatedPanel";
+import FunkoCollectionControls from "@/components/funko/FunkoCollectionControls";
+
 import { type DisplayCurrency } from "@/lib/pricing";
 import { site } from "@/config/site";
 import { getUserPlan, canUsePriceAlerts } from "@/lib/plans";
+import { queryRelatedFunko, type FunkoListRow } from "@/lib/funko/query";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,28 +44,28 @@ type FunkoMetaRow = {
   variant: string | null;
   image_small: string | null;
   image_large: string | null;
-};
-
-type FunkoRow = {
-  id: string;
-  name: string | null;
-  franchise: string | null;
-  series: string | null;
-  line: string | null;
-  number: string | null;
-  edition: string | null;
-  variant: string | null;
+  upc: string | null;
+  release_year: number | null;
+  exclusivity: string | null;
   is_chase: boolean | null;
   is_exclusive: boolean | null;
-  exclusivity: string | null;
-  release_year: number | null;
-  upc: string | null;
+  extra: any;
+};
+
+type FunkoRow = FunkoMetaRow & {
   description: string | null;
-  image_small: string | null;
-  image_large: string | null;
   source: string | null;
   source_id: string | null;
-  extra: any;
+};
+
+type FunkoItemImageRow = {
+  id: string; // uuid text
+  item_id: string;
+  sort_order: number | null;
+  label: string | null;
+  url: string;
+  created_at: string | null;
+  updated_at: string | null;
 };
 
 type FunkoVariantFlags =
@@ -110,7 +115,7 @@ function readDisplay(sp: SearchParams): DisplayCurrency {
   return v === "USD" || v === "EUR" ? (v as DisplayCurrency) : "NATIVE";
 }
 
-function bestImage(item: FunkoRow | FunkoMetaRow): string | null {
+function legacyBestImage(item: FunkoRow | FunkoMetaRow): string | null {
   return item.image_large || item.image_small || null;
 }
 
@@ -140,17 +145,19 @@ function Field({ label, value }: { label: string; value: string | null }) {
 
 function Chip({ children }: { children: React.ReactNode }) {
   return (
-    <span className="rounded-full border border-white/15 bg-white/10 px-2 py-1 text-xs text-white">{children}</span>
+    <span className="rounded-full border border-white/15 bg-white/10 px-2 py-1 text-xs text-white">
+      {children}
+    </span>
   );
 }
 
 function TextBlock({ title, text }: { title: string; text: string | null }) {
   if (!text) return null;
   return (
-    <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
-      <div className="mb-2 text-sm font-semibold">{title}</div>
-      <div className="whitespace-pre-wrap text-sm text-white/80">{text}</div>
-    </div>
+    <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+      <h2 className="mb-2 text-lg font-semibold">{title}</h2>
+      <p className="whitespace-pre-wrap text-sm text-white/80">{text}</p>
+    </section>
   );
 }
 
@@ -160,7 +167,7 @@ async function getFunkoMeta(itemId: string): Promise<FunkoMetaRow | null> {
     (
       await db.execute<FunkoMetaRow>(sql`
         SELECT
-          id,
+          id::text as id,
           name,
           franchise,
           series,
@@ -169,7 +176,13 @@ async function getFunkoMeta(itemId: string): Promise<FunkoMetaRow | null> {
           edition,
           variant,
           image_small,
-          image_large
+          image_large,
+          upc,
+          release_year,
+          exclusivity,
+          is_chase,
+          is_exclusive,
+          extra
         FROM public.funko_items
         WHERE id = ${itemId}
         LIMIT 1
@@ -184,7 +197,7 @@ async function getFunkoById(itemId: string): Promise<FunkoRow | null> {
     (
       await db.execute<FunkoRow>(sql`
         SELECT
-          id,
+          id::text as id,
           name,
           franchise,
           series,
@@ -192,14 +205,14 @@ async function getFunkoById(itemId: string): Promise<FunkoRow | null> {
           number,
           edition,
           variant,
-          is_chase,
-          is_exclusive,
-          exclusivity,
-          release_year,
-          upc,
-          description,
           image_small,
           image_large,
+          upc,
+          release_year,
+          exclusivity,
+          is_chase,
+          is_exclusive,
+          description,
           source,
           source_id,
           extra
@@ -209,6 +222,28 @@ async function getFunkoById(itemId: string): Promise<FunkoRow | null> {
       `)
     ).rows?.[0] ?? null
   );
+}
+
+async function getFunkoImages(itemId: string): Promise<FunkoItemImageRow[]> {
+  noStore();
+  const res = await db.execute<FunkoItemImageRow>(sql`
+    SELECT
+      id::text as id,
+      item_id,
+      sort_order,
+      label,
+      url,
+      created_at::text,
+      updated_at::text
+    FROM public.funko_item_images
+    WHERE item_id = ${itemId}
+    ORDER BY
+      (CASE WHEN label = 'main' THEN 0 ELSE 1 END) ASC,
+      sort_order ASC NULLS LAST,
+      created_at ASC
+  `);
+
+  return (res.rows ?? []).filter((r) => String(r.url || "").trim().length > 0);
 }
 
 async function getFunkoVariantFlags(itemId: string): Promise<FunkoVariantFlags> {
@@ -281,7 +316,7 @@ async function getMarketItemForFunko(itemId: string): Promise<MarketItemRow | nu
     return (
       (
         await db.execute<MarketItemRow>(sql`
-          SELECT id, display_name
+          SELECT id::text as id, display_name
           FROM public.market_items
           WHERE game = 'funko'
             AND canonical_id::text = ${itemId}::text
@@ -292,6 +327,12 @@ async function getMarketItemForFunko(itemId: string): Promise<MarketItemRow | nu
   } catch {
     return null;
   }
+}
+
+function guessImageFileName(item: FunkoMetaRow) {
+  const num = item.number ? String(item.number).trim() : "";
+  const base = num ? `Funko_Pop_${num}` : `Funko_Pop_${item.id}`;
+  return `${base}.jpg`;
 }
 
 export async function generateMetadata({
@@ -306,12 +347,13 @@ export async function generateMetadata({
     return {
       title: `Funko | ${site.name}`,
       description: `Browse Funko Pops, track prices, and manage your collection on ${site.name}.`,
+      keywords: ["Funko", "Funko Pop", "collectibles", "vinyl figure", "price tracking", "collection"],
       alternates: { canonical: absUrl("/categories/funko/items") },
       robots: { index: false, follow: true },
     };
   }
 
-  const item = await getFunkoMeta(raw);
+  const [item, images] = await Promise.all([getFunkoMeta(raw), getFunkoImages(raw)]);
   const canonical = absUrl(`/categories/funko/items/${encodeURIComponent(item?.id ?? raw)}`);
 
   if (!item) {
@@ -323,28 +365,37 @@ export async function generateMetadata({
     };
   }
 
-  const title = `${fmtTitle(item)} — Price, Details & Collection | ${site.name}`;
-  const description = [
-    `View ${item.name ?? item.id} Funko item details`,
-    item.franchise ? `franchise: ${item.franchise}` : null,
-    item.series ? `series: ${item.series}` : null,
-    item.number ? `number: ${item.number}` : null,
-    item.edition ? `edition: ${item.edition}` : null,
-    item.variant ? `variant: ${item.variant}` : null,
-    "market prices and trends",
-    "add to your collection",
-  ]
-    .filter(Boolean)
-    .join(", ")
-    .concat(".");
+  const title = `${fmtTitle(item)} — Funko Pop Details, Variants & Market Prices | ${site.name}`;
+  const description =
+    `Funko Pop details for ${item.name ?? item.id}` +
+    (item.franchise ? ` • Franchise: ${item.franchise}` : "") +
+    (item.series ? ` • Series: ${item.series}` : "") +
+    (item.number ? ` • Number: ${item.number}` : "") +
+    ` • Images, variants, and market pricing.`;
 
-  const ogImage = absMaybe(bestImage(item) || site.ogImage || "/og-image.png");
+  const ogCandidate = images[0]?.url || legacyBestImage(item) || site.ogImage || "/og-image.png";
+  const ogImage = absMaybe(ogCandidate);
 
   return {
     title,
     description,
+    keywords: [
+      "Funko",
+      "Funko Pop",
+      item.franchise ?? "",
+      item.series ?? "",
+      item.line ?? "",
+      item.number ? `Funko Pop ${item.number}` : "",
+      "chase",
+      "exclusive",
+      "market price",
+      "collection tracker",
+    ].filter(Boolean),
     alternates: { canonical },
     robots: { index: true, follow: true },
+
+    // ✅ Next.js Metadata OpenGraph does NOT support type: "product"
+    // Keep it as "website" and put Product schema in JSON-LD below.
     openGraph: {
       type: "website",
       url: canonical,
@@ -374,16 +425,22 @@ export default async function FunkoItemDetailPage({
 
   const rawId = decodeURIComponent(String(p?.id ?? "")).trim();
   const { userId } = await auth();
-  const canSave = !!userId;
+  const signedIn = !!userId;
+  const canSave = signedIn;
 
-  // ✅ ONLY strip UI-only query params (prevents redirect loops)
+  // strip UI-only currency params
   const hasUiCurrencyParams = sp?.display !== undefined || sp?.currency !== undefined;
   if (hasUiCurrencyParams) {
     redirect(`/categories/funko/items/${encodeURIComponent(rawId)}`);
   }
 
   const display = readDisplay(sp);
-  const [item, flags] = await Promise.all([getFunkoById(rawId), getFunkoVariantFlags(rawId)]);
+
+  const [item, flags, images] = await Promise.all([
+    getFunkoById(rawId),
+    getFunkoVariantFlags(rawId),
+    getFunkoImages(rawId),
+  ]);
 
   const canonicalItem = absUrl(`/categories/funko/items/${encodeURIComponent(rawId)}`);
 
@@ -418,11 +475,12 @@ export default async function FunkoItemDetailPage({
   const pageTitle = fmtTitle(item);
   const itemName = (item.name ?? item.id).trim();
   const canonical = absUrl(`/categories/funko/items/${encodeURIComponent(item.id)}`);
-  const cover = bestImage(item);
+
+  // cover uses funko_item_images first, then fallback
+  const cover = images[0]?.url || legacyBestImage(item);
   const coverAbs = cover ? absMaybe(cover) : null;
 
   const pricesHref = `/categories/funko/items/${encodeURIComponent(item.id)}/prices`;
-
   const ownedCounts = await getOwnedVariantCounts(userId ?? null, item.id);
 
   let planTier: "free" | "collector" | "pro" = "free";
@@ -440,7 +498,7 @@ export default async function FunkoItemDetailPage({
     }
   }
 
-  const thingId = `${canonical}#thing`;
+  const thingId = `${canonical}#product`;
 
   const breadcrumbsJsonLd = {
     "@context": "https://schema.org",
@@ -453,25 +511,45 @@ export default async function FunkoItemDetailPage({
     ],
   };
 
-  const thingJsonLd: any = {
+  const allImageAbs = images.map((i) => absMaybe(i.url)).filter(Boolean);
+  const imageObjects = allImageAbs.map((u, idx) => ({
+    "@type": "ImageObject",
+    contentUrl: u,
+    url: u,
+    name: idx === 0 ? guessImageFileName(item) : `Funko_Pop_${item.number ?? item.id}_${idx + 1}.jpg`,
+    caption: `${pageTitle} — image ${idx + 1}`,
+  }));
+
+  const gtin = (item.upc ?? "").replace(/\D+/g, "");
+  const gtinProps: Record<string, string> = {};
+  if (gtin.length === 12) gtinProps.gtin12 = gtin;
+  else if (gtin.length === 13) gtinProps.gtin13 = gtin;
+  else if (gtin.length === 14) gtinProps.gtin14 = gtin;
+
+  const productJsonLd: any = {
     "@context": "https://schema.org",
-    "@type": "Thing",
+    "@type": "Product",
     "@id": thingId,
     name: pageTitle,
-    identifier: item.id,
+    description:
+      item.description ??
+      [
+        item.franchise ? `Franchise: ${item.franchise}` : null,
+        item.series ? `Series: ${item.series}` : null,
+        item.number ? `Number: ${item.number}` : null,
+        item.edition ? `Edition: ${item.edition}` : null,
+        item.variant ? `Variant: ${item.variant}` : null,
+        item.release_year ? `Release year: ${item.release_year}` : null,
+        item.exclusivity ? `Exclusivity: ${item.exclusivity}` : null,
+      ]
+        .filter(Boolean)
+        .join(" • "),
+    sku: item.id,
+    brand: { "@type": "Brand", name: "Funko" },
     url: canonical,
-    image: coverAbs ? [coverAbs] : undefined,
-    description: [
-      item.franchise ? `Franchise: ${item.franchise}` : null,
-      item.series ? `Series: ${item.series}` : null,
-      item.number ? `Number: ${item.number}` : null,
-      item.edition ? `Edition: ${item.edition}` : null,
-      item.variant ? `Variant: ${item.variant}` : null,
-      item.release_year ? `Release year: ${item.release_year}` : null,
-      item.exclusivity ? `Exclusivity: ${item.exclusivity}` : null,
-    ]
-      .filter(Boolean)
-      .join(" • "),
+    image: imageObjects.length ? imageObjects : coverAbs ? [coverAbs] : undefined,
+    ...gtinProps,
+    category: "Collectibles > Funko Pops",
   };
 
   const webPageJsonLd = {
@@ -497,11 +575,19 @@ export default async function FunkoItemDetailPage({
   if (flags?.chrome) chips.push("Chrome");
   if (flags?.jumbo) chips.push("Jumbo");
 
+  // related items for internal linking
+  const related: FunkoListRow[] = await queryRelatedFunko({
+    itemId: item.id,
+    franchise: item.franchise ?? null,
+    series: item.series ?? null,
+    limit: 120,
+  });
+
   return (
     <section className="space-y-8">
       <Script id="funko-webpage-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }} />
       <Script id="funko-breadcrumbs-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }} />
-      <Script id="funko-thing-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(thingJsonLd) }} />
+      <Script id="funko-product-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }} />
 
       <nav className="text-xs text-white/70">
         <div className="flex flex-wrap items-center gap-2">
@@ -517,12 +603,14 @@ export default async function FunkoItemDetailPage({
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-5">
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+            <h2 className="sr-only">Images</h2>
+
             <div className="relative mx-auto aspect-3/4 w-full max-w-md">
               {cover ? (
                 <Image
                   src={cover}
-                  alt={itemName}
+                  alt={`${pageTitle} — main image`}
                   fill
                   unoptimized
                   className="object-contain"
@@ -534,36 +622,110 @@ export default async function FunkoItemDetailPage({
               )}
             </div>
 
-            {chips.length ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {chips.map((c) => (
-                  <Chip key={c}>{c}</Chip>
-                ))}
-              </div>
+            {cover ? (
+              <p className="mt-2 text-xs text-white/60">
+                Image: <span className="text-white/80">{guessImageFileName(item)}</span>
+              </p>
             ) : null}
 
-            {Object.keys(ownedCounts).length ? (
-              <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-3">
-                <div className="text-xs uppercase tracking-wide text-white/60">Owned</div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {Object.entries(ownedCounts).map(([k, qty]) => (
-                    <Chip key={k}>
-                      {k}: {qty}
-                    </Chip>
+            {images.length > 1 ? (
+              <div className="mt-4">
+                <h3 className="mb-2 text-xs uppercase tracking-wide text-white/60">Gallery</h3>
+                <div className="grid grid-cols-4 gap-2 sm:grid-cols-5">
+                  {images.map((img, idx) => (
+                    <figure
+                      key={img.id}
+                      className="relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-black/30"
+                      title={`${img.label ?? "image"} • sort ${img.sort_order ?? ""}`}
+                    >
+                      <Image
+                        src={img.url}
+                        alt={`${pageTitle} — image ${idx + 1}`}
+                        fill
+                        unoptimized
+                        className="object-contain"
+                        sizes="120px"
+                      />
+                      <figcaption className="sr-only">{`${pageTitle} — image ${idx + 1}`}</figcaption>
+                    </figure>
                   ))}
                 </div>
               </div>
             ) : null}
-          </div>
+
+            <div className="mt-3 space-y-3">
+              <FunkoAlertBanners
+                isChase={item.is_chase === true || flags?.chase}
+                isExclusive={item.is_exclusive === true}
+                exclusivity={item.exclusivity}
+                releaseYear={item.release_year}
+                extra={item.extra}
+              />
+
+              {chips.length ? (
+                <div className="flex flex-wrap gap-2">
+                  {chips.map((c) => (
+                    <Chip key={c}>{c}</Chip>
+                  ))}
+                </div>
+              ) : null}
+
+              {Object.keys(ownedCounts).length ? (
+                <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                  <div className="text-xs uppercase tracking-wide text-white/60">Owned in your collection</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {Object.entries(ownedCounts).map(([k, qty]) => (
+                      <Chip key={k}>
+                        {k}: {qty}
+                      </Chip>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                <h3 className="text-xs uppercase tracking-wide text-white/60">Buy / Trade</h3>
+                <div className="mt-2 space-y-2">
+                  <FunkoBuyNowLinks name={itemName} franchise={item.franchise} series={item.series} number={item.number} upc={item.upc} />
+                  <div className="flex flex-wrap gap-2">
+                    <Link
+                      href={`/trade?item=${encodeURIComponent(item.id)}`}
+                      className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/85 hover:bg-white/10"
+                      prefetch={false}
+                    >
+                      🔁 Trade with others
+                    </Link>
+                    <Link
+                      href={pricesHref}
+                      className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/85 hover:bg-white/10"
+                    >
+                      📈 View prices
+                    </Link>
+                  </div>
+                </div>
+              </div>
+
+              {/* ✅ FIXED: interactive buttons moved into a Client Component */}
+              <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+                <h3 className="text-xs uppercase tracking-wide text-white/60">Collection</h3>
+                <FunkoCollectionControls signedIn={signedIn} itemId={item.id} className="mt-2" />
+              </div>
+            </div>
+          </section>
         </div>
 
         <div className="lg:col-span-7 space-y-4">
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+          <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h1 className="text-2xl font-bold text-white">{pageTitle}</h1>
 
-                <div className="mt-1 text-sm text-white/80">
+                <p className="mt-2 text-sm text-white/70">
+                  Funko Pop details including images, variants, and market prices. Track it in your collection, set alerts,
+                  or explore related items.
+                </p>
+
+                <div className="mt-3 text-sm text-white/80">
                   <span className="mr-3 text-white/60">ID:</span>
                   <span className="mr-4 break-all">{item.id}</span>
                   {item.franchise ? (
@@ -599,7 +761,7 @@ export default async function FunkoItemDetailPage({
                   imageUrl={cover ?? undefined}
                 />
 
-                {userId ? (
+                {signedIn ? (
                   canUseAlerts ? (
                     marketItemId ? (
                       <PriceAlertBell game="funko" marketItemId={marketItemId} label={pageTitle} currentUsd={null} />
@@ -632,22 +794,28 @@ export default async function FunkoItemDetailPage({
                 </Link>
               </div>
             </div>
-          </div>
+          </section>
 
-          <MarketPrices category="funko" cardId={item.id} display={display} />
+          <section>
+            <h2 className="sr-only">Market Prices</h2>
+            <MarketPrices category="funko" cardId={item.id} display={display} />
+          </section>
 
-          <MarketValuePanel
-            game="funko"
-            canonicalId={item.id}
-            title="Market Value"
-            showDisclaimer
-            canSeeRanges={planTier === "collector" || planTier === "pro"}
-            canSeeConfidence={planTier === "pro"}
-          />
+          <section>
+            <h2 className="sr-only">Market Value</h2>
+            <MarketValuePanel
+              game="funko"
+              canonicalId={item.id}
+              title="Market Value"
+              showDisclaimer
+              canSeeRanges={planTier === "collector" || planTier === "pro"}
+              canSeeConfidence={planTier === "pro"}
+            />
+          </section>
         </div>
       </div>
 
-      <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+      <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <h2 className="mb-3 text-lg font-semibold text-white">Item Details</h2>
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -668,7 +836,7 @@ export default async function FunkoItemDetailPage({
 
         {flags ? (
           <div className="mt-4 rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <div className="mb-2 text-sm font-semibold text-white">Variant Flags</div>
+            <h3 className="mb-2 text-sm font-semibold text-white">Variant Flags</h3>
             <div className="flex flex-wrap gap-2">
               {flags.chase ? <Chip>Chase</Chip> : null}
               {flags.gitd || flags.glow ? <Chip>GITD</Chip> : null}
@@ -679,21 +847,23 @@ export default async function FunkoItemDetailPage({
               {flags.chrome ? <Chip>Chrome</Chip> : null}
               {flags.jumbo ? <Chip>Jumbo</Chip> : null}
             </div>
-            {flags.notes ? <div className="mt-3 text-sm text-white/70">{flags.notes}</div> : null}
+            {flags.notes ? <p className="mt-3 text-sm text-white/70">{flags.notes}</p> : null}
           </div>
         ) : null}
-      </div>
+      </section>
 
       <TextBlock title="Description" text={item.description} />
 
       {item.extra ? (
-        <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
-          <div className="mb-2 text-sm font-semibold">Extra</div>
+        <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+          <h2 className="mb-2 text-lg font-semibold">Extra</h2>
           <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/80">
             {typeof item.extra === "string" ? item.extra : JSON.stringify(item.extra, null, 2)}
           </pre>
-        </div>
+        </section>
       ) : null}
+
+      <FunkoRelatedPanel items={related as any} />
 
       <div className="flex flex-wrap gap-4 text-sm">
         <Link href="/categories/funko/items" className="text-sky-300 hover:underline">

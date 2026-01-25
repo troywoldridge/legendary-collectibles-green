@@ -1,13 +1,13 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // src/app/(site)/page.tsx
 import "server-only";
+
 import Link from "next/link";
 import Image from "next/image";
 import Script from "next/script";
 import { db } from "@/lib/db";
-import { categories } from "@/lib/db/schema";
 import { products, productImages } from "@/lib/db/schema/shop";
-import { asc, desc, inArray, sql } from "drizzle-orm";
+import { desc, inArray, sql } from "drizzle-orm";
 import { CF_ACCOUNT_HASH } from "@/lib/cf";
 
 /* ---------------- Types ---------------- */
@@ -20,14 +20,13 @@ type FeaturedItem = {
   alt?: string;
 };
 
-type CategoryCard = {
-  slug: string;
+type CategoryTile = {
+  key: string;
   label: string;
-  blurb: string;
-  cfId: string;
+  href: string;
+  cfId: string; // can be a CF image id OR a full https URL (see tileImageSrc)
+  alt?: string;
 };
-
-type DbCategory = typeof categories.$inferSelect;
 
 /* ---------------- UI constants ---------------- */
 export const dynamic = "force-dynamic";
@@ -36,27 +35,6 @@ const BRANDS = ["Pokémon", "Yu-Gi-Oh!", "Magic: The Gathering", "One Piece", "D
 
 const FALLBACK_IMG =
   "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
-
-const CATEGORIES_FALLBACK: ReadonlyArray<CategoryCard> = [
-  {
-    slug: "pokemon",
-    label: "Pokémon",
-    blurb: "Booster boxes, ETBs, singles",
-    cfId: "b4e6cda2-4739-4717-5005-e0b84d75c200",
-  },
-  {
-    slug: "yugioh",
-    label: "Yu-Gi-Oh!",
-    blurb: "Boxes, tins, structure decks",
-    cfId: "87101a20-6ada-4b66-0057-2d210feb9d00",
-  },
-  {
-    slug: "mtg",
-    label: "Magic: The Gathering",
-    blurb: "Play boosters, commander",
-    cfId: "69ab5d2b-407c-4538-3c82-be8a551efa00",
-  },
-];
 
 /* ---------------- Helpers ---------------- */
 const fmtUSD = (cents: number) =>
@@ -68,6 +46,13 @@ const fmtUSD = (cents: number) =>
 
 const cfImageUrl = (id: string, variant = "categoryThumb") =>
   `https://imagedelivery.net/${CF_ACCOUNT_HASH}/${id}/${variant}`;
+
+function tileImageSrc(cfIdOrUrl: string): string {
+  // If you pass a full Cloudflare delivery URL (or any URL), use it as-is.
+  if (/^https?:\/\//i.test(cfIdOrUrl)) return cfIdOrUrl;
+  // Otherwise treat it as a CF image id and build the delivery URL for category tiles.
+  return cfImageUrl(cfIdOrUrl, "categoryThumb");
+}
 
 /**
  * If a URL is a Cloudflare Images delivery URL, replace its final segment (variant) with the one we want.
@@ -82,34 +67,6 @@ function forceCfVariant(url: string | undefined, variant: string): string | unde
 }
 
 /* ---------------- Queries ---------------- */
-async function getCategoriesFromDB(): Promise<CategoryCard[]> {
-  try {
-    const rows: DbCategory[] = await db
-      .select()
-      .from(categories)
-      .orderBy(asc(categories.name))
-      .limit(6);
-
-    type CatRow = DbCategory &
-      Partial<{ cf_image_id: string | null; cfImageId: string | null; description: string | null }>;
-
-    const mapped = rows.map<CategoryCard>((c) => {
-      const r = c as CatRow;
-      return {
-        slug: c.slug ?? "",
-        label: c.name ?? "Untitled",
-        blurb: r.description ?? "",
-        cfId: r.cf_image_id ?? r.cfImageId ?? "",
-      };
-    });
-
-    return mapped.length ? mapped : [...CATEGORIES_FALLBACK];
-  } catch (err) {
-    console.error("[home] categories query failed:", err);
-    return [...CATEGORIES_FALLBACK];
-  }
-}
-
 async function getFeaturedItems(): Promise<FeaturedItem[]> {
   try {
     const rows = await db
@@ -121,7 +78,9 @@ async function getFeaturedItems(): Promise<FeaturedItem[]> {
         updatedAt: products.updatedAt,
       })
       .from(products)
-      .where(sql`${products.status} = 'active' AND (${products.inventoryType} != 'stock' OR ${products.quantity} > 0)`)
+      .where(
+        sql`${products.status} = 'active' AND (${products.inventoryType} != 'stock' OR ${products.quantity} > 0)`,
+      )
       .orderBy(desc(products.updatedAt))
       .limit(10);
 
@@ -172,10 +131,10 @@ async function getFeaturedItems(): Promise<FeaturedItem[]> {
 
 /* ---------------- Page ---------------- */
 export default async function HomePage() {
-  const [CATEGORIES, FEATURED_ITEMS] = await Promise.all([getCategoriesFromDB(), getFeaturedItems()]);
+  const FEATURED_ITEMS = await getFeaturedItems();
 
-  // Home tiles: keep only the 3 main categories for now
-  const TILES: Array<{ key: string; label: string; href: string; cfId: string; alt?: string }> = [
+  // Home tiles: your “category” entry points (static; no categories table)
+  const TILES: CategoryTile[] = [
     {
       key: "pokemon",
       label: "Pokémon",
@@ -196,6 +155,14 @@ export default async function HomePage() {
       href: "/categories/mtg/sets",
       cfId: "69ab5d2b-407c-4538-3c82-be8a551efa00",
       alt: "Magic: The Gathering category",
+    },
+    {
+      key: "funko",
+      label: "Funko",
+      href: "/categories/funko/items",
+      // Full CF Images delivery URL (use as-is)
+      cfId: "https://imagedelivery.net/pJ0fKvjCAbyoF8aD0BGu8Q/15e8fcec-eaee-4cd9-89a7-e16ab4d45e00/productTile",
+      alt: "Funko category",
     },
   ];
 
@@ -252,14 +219,15 @@ export default async function HomePage() {
 
                   <div className="flex flex-wrap items-center justify-center gap-3">
                     <Link
-                      href="/store"
+                      href="/shop"
                       className="inline-flex items-center rounded-lg border border-white/70 bg-indigo-600/80 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm hover:bg-indigo-600"
                     >
                       Shop Listings
                     </Link>
 
+                    {/* You do not currently have a /categories index page; send to /shop to avoid 404 */}
                     <Link
-                      href="/categories"
+                      href="/shop"
                       className="inline-flex items-center rounded-lg border border-white/60 bg-white/5 px-4 py-2 text-sm font-semibold text-white backdrop-blur-sm hover:bg-white/10"
                     >
                       Browse Categories
@@ -318,8 +286,9 @@ export default async function HomePage() {
                 Find sealed product, singles, slabs, and figures by game or line.
               </p>
 
+              {/* Avoid /categories (no index page currently) */}
               <Link
-                href="/categories"
+                href="/shop"
                 className="text-sm font-semibold text-white/90 underline underline-offset-4 hover:text-white"
               >
                 View all →
@@ -327,7 +296,7 @@ export default async function HomePage() {
 
               <div className="mt-2 flex items-center justify-center gap-4">
                 <Link
-                  href="/store"
+                  href="/shop"
                   className="text-sm font-semibold text-white/90 underline underline-offset-4 hover:text-white"
                 >
                   Shop listings →
@@ -336,9 +305,9 @@ export default async function HomePage() {
             </div>
 
             <div className="mx-auto max-w-4xl">
-              <ul className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <ul className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {TILES.map((t) => {
-                  const src = cfImageUrl(t.cfId, "categoryThumb");
+                  const src = tileImageSrc(t.cfId);
                   return (
                     <li
                       key={t.key}
@@ -353,7 +322,7 @@ export default async function HomePage() {
                             unoptimized
                             priority={t.key === "pokemon"}
                             className="object-cover"
-                            sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
+                            sizes="(max-width: 640px) 50vw, (max-width: 1024px) 25vw, 25vw"
                           />
                         </div>
 
