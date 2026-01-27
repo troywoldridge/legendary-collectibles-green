@@ -63,7 +63,8 @@ function buildSiteUrl(req: Request) {
 }
 
 function buildProductLink(siteUrl: string, slug: unknown) {
-  return `${siteUrl}/products/${encodeURIComponent(String(slug || ""))}`;
+  const s = String(slug || "").trim();
+  return `${siteUrl}/products/${encodeURIComponent(s)}`;
 }
 
 function mapAvailability(status: unknown, qty: unknown) {
@@ -81,6 +82,7 @@ function sellOnGoogleQty(status: unknown, qty: unknown) {
 }
 
 function mapGoogleCondition(_cond: unknown) {
+  // You can expand later; for now keep it simple and safe.
   return "new";
 }
 
@@ -92,7 +94,7 @@ function highlightFromRow(r: any) {
   }
   if (r.sealed) return "Factory sealed product";
   if (String(r.format || "").toLowerCase() === "accessory") return "Collector accessory";
-  return "Collector-quality single";
+  return "Collector-quality item";
 }
 
 function detailFromRow(r: any) {
@@ -125,8 +127,6 @@ function isAcceptedImageUrl(url: unknown) {
   return /\.(jpe?g|png|gif)(\?.*)?$/i.test(s);
 }
 
-
-
 export async function GET(req: Request) {
   if (!process.env.DATABASE_URL) {
     return new Response("Missing DATABASE_URL", { status: 500 });
@@ -142,7 +142,7 @@ export async function GET(req: Request) {
   const client = await pool.connect();
 
   try {
-    const sql = `
+    const q = `
       SELECT
         p.id,
         p.sku,
@@ -163,10 +163,10 @@ export async function GET(req: Request) {
         p.description,
         p.shipping_weight_lbs,
 
-        -- Primary image (lowest sort)
+        -- Primary image: prefer sort=0, else lowest sort, else oldest
         pi_primary.url AS primary_image_url,
 
-        -- Additional images
+        -- Additional images (up to 10, excluding the primary)
         pi_more.urls AS additional_image_urls
 
       FROM products p
@@ -175,7 +175,10 @@ export async function GET(req: Request) {
         SELECT url
         FROM product_images
         WHERE product_id = p.id
-        ORDER BY sort ASC NULLS LAST, created_at ASC
+        ORDER BY
+          CASE WHEN sort = 0 THEN 0 ELSE 1 END,
+          sort ASC NULLS LAST,
+          created_at ASC
         LIMIT 1
       ) pi_primary ON true
 
@@ -185,8 +188,11 @@ export async function GET(req: Request) {
           SELECT url
           FROM product_images
           WHERE product_id = p.id
-          ORDER BY sort ASC NULLS LAST, created_at ASC
-          OFFSET 1
+            AND url IS NOT NULL
+            AND url <> COALESCE(pi_primary.url, '')
+          ORDER BY
+            sort ASC NULLS LAST,
+            created_at ASC
           LIMIT 10
         ) t
       ) pi_more ON true
@@ -194,7 +200,7 @@ export async function GET(req: Request) {
       ORDER BY p.created_at ASC NULLS LAST, p.title ASC
     `;
 
-    const { rows } = await client.query(sql);
+    const { rows } = await client.query(q);
 
     const lines: string[] = [];
     lines.push(HEADERS.map((h) => sanitize(h)).join(DELIM));

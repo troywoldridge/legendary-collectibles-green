@@ -22,7 +22,6 @@ function getPublicBaseUrl(): string {
     process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
     process.env.SITE_URL?.replace(/\/+$/, "");
 
-  // Hard default to production domain to avoid localhost canonicals in prod crawls
   return envBase || "https://legendary-collectibles.com";
 }
 
@@ -35,37 +34,34 @@ type ApiProduct = {
   subtitle?: string | null;
   description?: string | null;
 
-  game?: string | null;     // now returned as text in API
-  format?: string | null;   // text
+  game?: string | null;
+  format?: string | null;
   sealed?: boolean | null;
 
   is_graded?: boolean | null;
-  grader?: string | null;   // text
+  grader?: string | null;
   grade_x10?: number | null;
 
-  condition?: string | null; // text
+  condition?: string | null;
 
   price_cents?: number | null;
   compare_at_cents?: number | null;
 
   quantity?: number | null;
-  status?: string | null;    // text
+  status?: string | null;
 
-  // ✅ SEO enrichment (from your DB schema)
-  card_kind?: string | null;        // monster/spell/trap (yugioh)
-  source_card_id?: string | null;   // e.g. swsh9-175, xy7-56, etc
-  source_set_code?: string | null;  // e.g. swsh9, xy7, sv4
-  source_number?: string | null;    // e.g. "175", "56", "026"
-  source_set_name?: string | null;  // e.g. Brilliant Stars
+  card_kind?: string | null;
+  source_card_id?: string | null;
+  source_set_code?: string | null;
+  source_number?: string | null;
+  source_set_name?: string | null;
 
-  // optional commerce details (nice later)
   shipping_class?: string | null;
   shipping_weight_lbs?: string | number | null;
 
   image_url?: string | null;
   images?: { url: string; alt?: string | null; sort?: number | null }[];
 };
-
 
 async function fetchProduct(id: string): Promise<ApiProduct | null> {
   const base = getPublicBaseUrl();
@@ -91,10 +87,11 @@ function money(cents?: number | null) {
   return (cents / 100).toFixed(2);
 }
 
-function normalizeCloudflareVariant(
-  url: string | null | undefined,
-  variant = "productTile",
-) {
+/**
+ * NOTE: You confirmed your real variant to use is productTile.
+ * So for detail we ALSO keep productTile (no swapping variants).
+ */
+function normalizeCloudflareVariant(url: string | null | undefined, variant = "productTile") {
   const u = String(url ?? "").trim();
   if (!u) return u;
   if (!u.includes("imagedelivery.net/")) return u;
@@ -107,13 +104,14 @@ function brandName(game?: string | null) {
   if (g === "yugioh") return "Yu-Gi-Oh!";
   if (g === "mtg") return "Magic: The Gathering";
   if (g === "sports") return "Sports Cards";
+  if (g === "funko") return "Funko";
   return "Legendary Collectibles";
 }
 
 function conditionUrl(cond?: string | null) {
   const c = String(cond ?? "").toLowerCase();
 
-  if (c === "nm" || c === "near mint" || c === "new") {
+  if (c === "nm" || c === "near mint" || c === "new" || c.includes("new")) {
     return "https://schema.org/NewCondition";
   }
   if (c === "dmg" || c === "damaged") {
@@ -122,9 +120,72 @@ function conditionUrl(cond?: string | null) {
   return "https://schema.org/UsedCondition";
 }
 
-/**
- * Build a nice, keyword-forward title and description.
- */
+/* ---------------- badges: styles may vary + chance of chase ---------------- */
+
+function includesStylesMayVary(text: string) {
+  const t = text.toLowerCase();
+  return t.includes("styles may vary") || t.includes("style may vary") || t.includes("assortment");
+}
+
+type ChaseChance = { odds: number; raw: string } | null;
+
+function extractChaseChance(text: string): ChaseChance {
+  const t = String(text || "");
+  if (!t) return null;
+
+  // Must mention chase-ish language to avoid false positives.
+  const lower = t.toLowerCase();
+  if (!lower.includes("chase")) return null;
+
+  // Common pattern: "There’s a 1 in 6 chance..." or "1 in 6 chance"
+  const m1 = t.match(/\b1\s*in\s*(\d{1,3})\b/i);
+  if (m1?.[1]) {
+    const odds = Number(m1[1]);
+    if (Number.isFinite(odds) && odds >= 2 && odds <= 999) {
+      return { odds, raw: m1[0] };
+    }
+  }
+
+  // Pattern: "1:6" or "1/6"
+  const m2 = t.match(/\b1\s*[:/]\s*(\d{1,3})\b/i);
+  if (m2?.[1]) {
+    const odds = Number(m2[1]);
+    if (Number.isFinite(odds) && odds >= 2 && odds <= 999) {
+      return { odds, raw: m2[0] };
+    }
+  }
+
+  // If it says "chance you may find the chase" but no odds, still show generic badge.
+  if (lower.includes("chance") && lower.includes("may") && lower.includes("find") && lower.includes("chase")) {
+    return { odds: 0, raw: "chance of chase" };
+  }
+
+  return null;
+}
+
+function buildBadges(p: ApiProduct) {
+  const text = `${p.title ?? ""} ${p.subtitle ?? ""} ${p.description ?? ""}`.trim();
+
+  const badges: Array<{ key: string; label: string; tone: "info" | "warn" }> = [];
+
+  if (includesStylesMayVary(text)) {
+    badges.push({ key: "styles", label: "Styles may vary", tone: "info" });
+  }
+
+  const chance = extractChaseChance(text);
+  if (chance) {
+    badges.push({
+      key: "chaseChance",
+      label: chance.odds > 0 ? `Chance of Chase (1 in ${chance.odds})` : "Chance of Chase",
+      tone: "warn",
+    });
+  }
+
+  return { badges, chaseChance: chance };
+}
+
+/* ---------------- SEO helpers (kept from your version) ---------------- */
+
 function fmtGame(g?: string | null) {
   const v = String(g ?? "").toLowerCase();
   if (!v) return "";
@@ -132,13 +193,13 @@ function fmtGame(g?: string | null) {
   if (v === "yugioh") return "Yu-Gi-Oh!";
   if (v === "mtg") return "MTG";
   if (v === "sports") return "Sports Cards";
+  if (v === "funko") return "Funko";
   return v.charAt(0).toUpperCase() + v.slice(1);
 }
 
 function fmtCondition(c?: string | null) {
   const v = String(c ?? "").trim();
   if (!v) return "";
-  // Normalize common abbreviations
   const lc = v.toLowerCase();
   if (lc === "nm") return "NM";
   if (lc === "lp") return "LP";
@@ -160,7 +221,6 @@ function fmtSet(p: ApiProduct) {
 function fmtNumber(p: ApiProduct) {
   const n = String(p.source_number ?? "").trim();
   if (!n) return "";
-  // Keep leading zeros (e.g. 026)
   return `#${n}`;
 }
 
@@ -180,8 +240,6 @@ function fmtGrade(p: ApiProduct) {
 function fmtFormat(p: ApiProduct) {
   const f = String(p.format ?? "").trim();
   if (!f) return "";
-  // Your enum values might be like: single, pack, box, bundle, etc.
-  // Title-case it nicely
   return f
     .split(/[_\s-]+/)
     .filter(Boolean)
@@ -189,31 +247,15 @@ function fmtFormat(p: ApiProduct) {
     .join(" ");
 }
 
-/**
- * Max SEO title:
- * - Leads with product title (most important)
- * - Adds set/name/number when available (collector intent)
- * - Adds graded or condition
- * - Adds format + game when useful
- * - Ends with brand
- *
- * Keeps it readable and avoids stuffing.
- */
 function seoTitle(p: ApiProduct) {
   const parts: string[] = [];
-
-  // Main entity
   parts.push(p.title);
 
-  // Collector identifiers (great for long-tail)
   const set = fmtSet(p);
   const num = fmtNumber(p);
-
-  // Prefer showing # in title; set can be included if it exists
   if (num) parts.push(num);
   if (set) parts.push(set);
 
-  // Graded > Condition
   const grade = fmtGrade(p);
   if (grade) parts.push(grade);
   else {
@@ -221,25 +263,15 @@ function seoTitle(p: ApiProduct) {
     if (cond) parts.push(cond);
   }
 
-  // Format/game signals
   const format = fmtFormat(p);
   const game = fmtGame(p.game);
   if (format) parts.push(format);
   if (game) parts.push(game);
 
-  // Final title
   const raw = `${parts.join(" – ")} | Legendary Collectibles`;
-
-  // Keep reasonable length (soft trim)
   return raw.length > 70 ? raw.slice(0, 67).trimEnd() + "…" : raw;
 }
 
-/**
- * Max SEO description:
- * - Purchase intent (“Buy …”)
- * - Mentions set/number, condition/grade, sealed, format, and shipping promise
- * - Adds a short snippet from your description if present
- */
 function seoDescription(p: ApiProduct) {
   const game = fmtGame(p.game);
   const format = fmtFormat(p);
@@ -261,8 +293,7 @@ function seoDescription(p: ApiProduct) {
   if (num) idBits.push(num);
   const ids = idBits.length ? ` (${idBits.join(", ")})` : "";
 
-  const qual =
-    grade ? `Graded: ${grade}. ` : cond ? `Condition: ${cond}. ` : "";
+  const qual = grade ? `Graded: ${grade}. ` : cond ? `Condition: ${cond}. ` : "";
 
   const formatBits =
     format || game
@@ -272,19 +303,11 @@ function seoDescription(p: ApiProduct) {
   const ship = "Fast, secure shipping and collector-safe packaging.";
   const base = `Buy ${p.title}${ids}. ${formatBits}${qual}${sealed}${stockLine}${ship}`;
 
-  const desc =
-    (p.description ? String(p.description).replace(/\s+/g, " ").trim() : "") || "";
-
+  const desc = (p.description ? String(p.description).replace(/\s+/g, " ").trim() : "") || "";
   const combined = desc ? `${base} ${desc}` : base;
-
-  // Keep within typical meta snippet window
   return combined.slice(0, 300);
 }
 
-/**
- * ✅ Metadata: titles, description, canonical, OG/Twitter, robots.
- * DB/API-driven and safe for crawlers (no localhost canonicals).
- */
 export async function generateMetadata(props: {
   params: { id: string } | Promise<{ id: string }>;
 }): Promise<Metadata> {
@@ -302,12 +325,8 @@ export async function generateMetadata(props: {
   }
 
   const base = getPublicBaseUrl();
-
-  // ✅ Canonical must point to a real, working URL for THIS route.
-  // Your page route is /products/[id], so canonicalize to the product.id URL.
   const canonical = `${base}/products/${encodeURIComponent(product.id)}`;
 
-  // Prefer explicit images[]; fall back to image_url
   const images =
     Array.isArray(product.images) && product.images.length > 0
       ? product.images
@@ -315,70 +334,48 @@ export async function generateMetadata(props: {
         ? [{ url: product.image_url, alt: product.title, sort: 0 }]
         : [];
 
-  // Use a higher-quality variant for social previews when possible
   const ogImageRaw = images[0]?.url ?? "";
-  const ogImage =
-    (normalizeCloudflareVariant(ogImageRaw, "productDetail") || ogImageRaw || "")
-      .trim() || undefined;
+  const ogImage = normalizeCloudflareVariant(ogImageRaw, "productTile")?.trim() || undefined;
 
   const title = seoTitle(product);
   const description = seoDescription(product);
 
-  // Status-based indexing rules
   const status = String(product.status ?? "").toLowerCase();
   const unavailableByStatus = status === "inactive" || status === "disabled";
 
-  // Stock status (can influence snippets)
   const qty = typeof product.quantity === "number" ? product.quantity : null;
-  const soldOut =
-    (qty !== null && qty <= 0) || status === "sold" || status === "sold_out";
+  const soldOut = (qty !== null && qty <= 0) || status === "sold" || status === "sold_out";
 
-  // Price (optional meta tags for social platforms)
   const priceText = money(product.price_cents);
-
-  // ✅ Rich keywords for OG/Twitter titles are fine, but keep the browser title clean
-  // (Your seoTitle() already handles this pattern well.)
-  const ogTitle = title;
-  const ogDescription = description;
 
   return {
     title,
     description,
 
-    alternates: {
-      canonical,
-    },
+    alternates: { canonical },
 
-    robots: unavailableByStatus
-      ? { index: false, follow: true }
-      : { index: true, follow: true },
+    robots: unavailableByStatus ? { index: false, follow: true } : { index: true, follow: true },
 
     openGraph: {
-      // Next.js Metadata typing doesn't support "product" here, so use "website"
       type: "website",
       url: canonical,
-      title: ogTitle,
-      description: ogDescription,
+      title,
+      description,
       siteName: "Legendary Collectibles",
       images: ogImage ? [{ url: ogImage, alt: product.title }] : undefined,
     },
 
     twitter: {
       card: ogImage ? "summary_large_image" : "summary",
-      title: ogTitle,
-      description: ogDescription,
+      title,
+      description,
       images: ogImage ? [ogImage] : undefined,
     },
 
-    // ✅ Extra meta tags (Next-safe) that some platforms read.
-    // Google ranking doesn't depend on these, but they can help rich previews.
     other: {
-      // product-ish OpenGraph fields
       ...(priceText ? { "product:price:amount": priceText } : {}),
       "product:price:currency": "USD",
       "product:availability": soldOut ? "out of stock" : "in stock",
-
-      // Helpful safety signals / consistency
       "application-name": "Legendary Collectibles",
     },
   };
@@ -404,9 +401,9 @@ export default async function ProductDetailPage(props: {
         ? [{ url: product.image_url, alt: product.title, sort: 0 }]
         : [];
 
+  // ✅ keep productTile as the correct variant
   const mainImageRaw = images[0]?.url ?? "";
-  const mainImage =
-    normalizeCloudflareVariant(mainImageRaw, "productDetail") || mainImageRaw;
+  const mainImage = normalizeCloudflareVariant(mainImageRaw, "productTile") || mainImageRaw;
 
   const thumbImages = images.map((im) => ({
     ...im,
@@ -421,20 +418,17 @@ export default async function ProductDetailPage(props: {
     Number.isFinite(product.price_cents) &&
     product.price_cents > 0;
 
-  const soldOut =
-    (qty !== null && qty <= 0) || status === "sold" || status === "sold_out";
-
+  const soldOut = (qty !== null && qty <= 0) || status === "sold" || status === "sold_out";
   const unavailableByStatus = status === "inactive" || status === "disabled";
-
   const addDisabled = !hasPrice || soldOut || unavailableByStatus;
-
   const lowStock = qty !== null && qty > 0 && qty <= 3;
 
-  // Canonical URL MUST match generateMetadata()
   const base = getPublicBaseUrl();
   const canonical = `${base}/products/${encodeURIComponent(product.id)}`;
 
   const includeJsonLd = hasPrice;
+
+  const { badges, chaseChance } = buildBadges(product);
 
   const productJsonLd = includeJsonLd
     ? {
@@ -442,27 +436,17 @@ export default async function ProductDetailPage(props: {
         "@type": "Product",
         name: product.title,
         description: product.description || undefined,
-        image: thumbImages
-          .map((im) => String(im.url || "").trim())
-          .filter(Boolean),
+        image: thumbImages.map((im) => String(im.url || "").trim()).filter(Boolean),
         sku: product.sku || undefined,
-        brand: {
-          "@type": "Brand",
-          name: brandName(product.game ?? null),
-        },
+        brand: { "@type": "Brand", name: brandName(product.game ?? null) },
         offers: {
           "@type": "Offer",
           url: canonical,
           priceCurrency: "USD",
           price: String(priceText),
-          availability: soldOut
-            ? "https://schema.org/OutOfStock"
-            : "https://schema.org/InStock",
+          availability: soldOut ? "https://schema.org/OutOfStock" : "https://schema.org/InStock",
           itemCondition: conditionUrl(product.condition ?? null),
-          seller: {
-            "@type": "Organization",
-            name: "Legendary Collectibles",
-          },
+          seller: { "@type": "Organization", name: "Legendary Collectibles" },
         },
       }
     : null;
@@ -470,42 +454,24 @@ export default async function ProductDetailPage(props: {
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-8 text-white">
       {productJsonLd ? (
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
-        />
+        <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }} />
       ) : null}
 
       <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
         <div>
           <div className="aspect-[3/4] w-full overflow-hidden rounded-2xl border border-white/10 bg-black/30">
             {mainImage ? (
-              <img
-                src={mainImage}
-                alt={product.title}
-                className="h-full w-full object-contain"
-                loading="eager"
-              />
+              <img src={mainImage} alt={product.title} className="h-full w-full object-contain" loading="eager" />
             ) : (
-              <div className="flex h-full items-center justify-center text-white/60">
-                No image
-              </div>
+              <div className="flex h-full items-center justify-center text-white/60">No image</div>
             )}
           </div>
 
           {thumbImages.length > 1 ? (
             <div className="mt-3 grid grid-cols-5 gap-2">
               {thumbImages.slice(0, 10).map((im, i) => (
-                <div
-                  key={`${im.url}-${i}`}
-                  className="aspect-square overflow-hidden rounded-xl border border-white/10 bg-black/30"
-                >
-                  <img
-                    src={im.url}
-                    alt={im.alt ?? product.title}
-                    className="h-full w-full object-cover"
-                    loading="lazy"
-                  />
+                <div key={`${im.url}-${i}`} className="aspect-square overflow-hidden rounded-xl border border-white/10 bg-black/30">
+                  <img src={im.url} alt={im.alt ?? product.title} className="h-full w-full object-cover" loading="lazy" />
                 </div>
               ))}
             </div>
@@ -514,82 +480,58 @@ export default async function ProductDetailPage(props: {
 
         <div>
           <h1 className="text-3xl font-bold">{product.title}</h1>
-          {product.subtitle ? (
-            <p className="mt-2 text-white/70">{product.subtitle}</p>
+          {product.subtitle ? <p className="mt-2 text-white/70">{product.subtitle}</p> : null}
+
+          {/* ✅ auto-badges */}
+          {badges.length ? (
+            <div className="mt-3 flex flex-wrap gap-2 text-xs">
+              {badges.map((b) => (
+                <span
+                  key={b.key}
+                  className={
+                    b.tone === "warn"
+                      ? "rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 font-semibold text-amber-200"
+                      : "rounded-full border border-white/10 bg-white/5 px-3 py-1 text-white/80"
+                  }
+                >
+                  {b.label}
+                </span>
+              ))}
+            </div>
           ) : null}
 
           <div className="mt-4 flex items-end gap-3">
-            {priceText ? (
-              <div className="text-3xl font-extrabold">${priceText}</div>
-            ) : (
-              <div className="text-3xl font-extrabold">—</div>
-            )}
-            {compareAtText && compareAtText !== priceText ? (
-              <div className="text-lg text-white/50 line-through">
-                ${compareAtText}
-              </div>
-            ) : null}
+            {priceText ? <div className="text-3xl font-extrabold">${priceText}</div> : <div className="text-3xl font-extrabold">—</div>}
+            {compareAtText && compareAtText !== priceText ? <div className="text-lg text-white/50 line-through">${compareAtText}</div> : null}
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2 text-xs">
-            {product.game ? (
+            {product.game ? <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">{product.game}</span> : null}
+            {product.format ? <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">{product.format}</span> : null}
+
+            {product.source_set_name || product.source_set_code ? (
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                {product.game}
+                {product.source_set_name ?? String(product.source_set_code).toUpperCase()}
+                {product.source_set_code && product.source_set_name ? ` (${String(product.source_set_code).toUpperCase()})` : null}
               </span>
             ) : null}
 
-            {product.format ? (
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                {product.format}
-              </span>
-            ) : null}
+            {product.source_number ? <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">#{product.source_number}</span> : null}
+            {product.sku ? <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">SKU: {product.sku}</span> : null}
 
-                          {product.source_set_name || product.source_set_code ? (
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                  {product.source_set_name ?? String(product.source_set_code).toUpperCase()}
-                  {product.source_set_code && product.source_set_name
-                    ? ` (${String(product.source_set_code).toUpperCase()})`
-                    : null}
-                </span>
-              ) : null}
-
-              {product.source_number ? (
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                  #{product.source_number}
-                </span>
-              ) : null}
-
-
-              {product.sku ? (
-                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                  SKU: {product.sku}
-                </span>
-              ) : null}
-
-
-            {product.condition ? (
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                {product.condition}
-              </span>
-            ) : null}
+            {product.condition ? <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">{product.condition}</span> : null}
 
             {product.is_graded ? (
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
                 {product.grader ?? "Graded"}{" "}
-                {typeof product.grade_x10 === "number"
-                  ? (product.grade_x10 / 10).toFixed(1)
-                  : ""}
+                {typeof product.grade_x10 === "number" ? (product.grade_x10 / 10).toFixed(1) : ""}
               </span>
             ) : null}
 
             {soldOut ? (
-              <span className="rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1 font-semibold text-red-200">
-                Sold Out
-              </span>
+              <span className="rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1 font-semibold text-red-200">Sold Out</span>
             ) : typeof product.quantity === "number" ? (
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">
-                In Stock: {product.quantity}
-              </span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">In Stock: {product.quantity}</span>
             ) : null}
 
             {lowStock ? (
@@ -599,30 +541,26 @@ export default async function ProductDetailPage(props: {
             ) : null}
           </div>
 
-          <AddToCartWithQty
-            productId={product.id}
-            availableQty={product.quantity ?? null}
-            disabled={addDisabled}
-          />
+          <AddToCartWithQty productId={product.id} availableQty={product.quantity ?? null} disabled={addDisabled} />
 
-          {!hasPrice ? (
-            <p className="mt-2 text-sm text-white/60">
-              This item isn’t purchasable yet (no price set).
+          {/* ✅ chase disclaimer line (only when detected) */}
+          {chaseChance ? (
+            <p className="mt-2 text-sm text-white/70">
+              {chaseChance.odds > 0 ? (
+                <>Chase variant is <strong>not guaranteed</strong>. Supplier indicates approximately <strong>1 in {chaseChance.odds}</strong> chance.</>
+              ) : (
+                <>Chase variant is <strong>not guaranteed</strong>. This listing indicates a chance of chase.</>
+              )}
             </p>
           ) : null}
 
-          {unavailableByStatus ? (
-            <p className="mt-2 text-sm text-white/60">
-              This item is currently unavailable.
-            </p>
-          ) : null}
+          {!hasPrice ? <p className="mt-2 text-sm text-white/60">This item isn’t purchasable yet (no price set).</p> : null}
+          {unavailableByStatus ? <p className="mt-2 text-sm text-white/60">This item is currently unavailable.</p> : null}
 
           {product.description ? (
             <div className="mt-8">
               <h2 className="text-lg font-semibold">Description</h2>
-              <p className="mt-2 whitespace-pre-wrap text-sm text-white/70">
-                {product.description}
-              </p>
+              <p className="mt-2 whitespace-pre-wrap text-sm text-white/70">{product.description}</p>
             </div>
           ) : null}
         </div>

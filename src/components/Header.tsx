@@ -7,10 +7,8 @@ import { usePathname } from "next/navigation";
 import React, { useMemo, useState } from "react";
 import { site } from "@/config/site";
 import { cfUrl, CF_ACCOUNT_HASH, type Variant } from "@/lib/cf";
-import { FEATURES } from "@/config/flags";
 import { SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
 import { useCartCount } from "@/hooks/useCartCount";
-
 
 const LOGO_CF_ID = "f7b75c90-dccb-4c37-e603-2bc749caaa00";
 
@@ -23,7 +21,7 @@ const LOGO_VARIANTS: Variant[] = ["hero"];
 
 export default function Header() {
   const pathname = usePathname();
-const cartCount = useCartCount();
+  const cartCount = useCartCount();
 
   const isActive = (href: string) =>
     pathname === href || (href !== "/" && pathname?.startsWith(href));
@@ -125,12 +123,12 @@ const cartCount = useCartCount();
                   d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"
                 />
               </svg>
-              {cartCount > 0 && (
-  <span className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white">
-    {cartCount}
-  </span>
-)}
 
+              {cartCount > 0 && (
+                <span className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white">
+                  {cartCount}
+                </span>
+              )}
             </Link>
 
             {/* Auth */}
@@ -167,12 +165,7 @@ const cartCount = useCartCount();
                 viewBox="0 0 24 24"
                 stroke="currentColor"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 6h16M4 12h16M4 18h16"
-                />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
               </svg>
             </button>
           </div>
@@ -201,7 +194,14 @@ const cartCount = useCartCount();
             </NavDropdown>
 
             <NavDropdown label="Funko">
-              <DropdownLink href="/categories/funko/items">Funko</DropdownLink>
+              <DropdownLink href="/categories/funko/items">Funko (Catalog)</DropdownLink>
+              <DropdownLink href="/shop/funko/all">Shop Funko</DropdownLink>
+            </NavDropdown>
+
+            {/* ✅ FIXED: Figures & Collectibles is COLLECTION/CATALOG first */}
+            <NavDropdown label="Figures & Collectibles">
+              <DropdownLink href="/categories/collectibles/items">Figures & Collectibles (Catalog)</DropdownLink>
+              <DropdownLink href="/shop/collectibles/all">Shop Figures & Collectibles</DropdownLink>
             </NavDropdown>
 
             <NavLink href="/psa" active={isActive("/psa")}>
@@ -229,17 +229,11 @@ const cartCount = useCartCount();
             />
             <button
               type="submit"
-           
-   className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-white/80 hover:text-white"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-white/80 hover:text-white"
               aria-label="Search"
             >
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 2 2 0 0114 0z"
-                />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 2 2 0 0114 0z" />
               </svg>
             </button>
           </form>
@@ -287,17 +281,11 @@ function NavDropdown({ label, children }: { label: string; children: React.React
   const [open, setOpen] = useState(false);
 
   return (
-    <div
-      className="group relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
+    <div className="group relative" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
       <button className="flex h-12 items-center gap-1 px-4 text-sm font-medium text-white/80 transition-colors hover:text-white">
         {label}
         <svg
-          className={`h-4 w-4 transition-transform duration-200 ${
-            open ? "rotate-180" : "group-hover:translate-y-px"
-          }`}
+          className={`h-4 w-4 transition-transform duration-200 ${open ? "rotate-180" : "group-hover:translate-y-px"}`}
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
@@ -307,7 +295,7 @@ function NavDropdown({ label, children }: { label: string; children: React.React
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-50 min-w-[200px] overflow-hidden rounded-xl border border-white/12 bg-white/6 backdrop-blur-xl shadow-xl">
+        <div className="absolute left-0 top-full z-50 min-w-[240px] overflow-hidden rounded-xl border border-white/12 bg-white/6 backdrop-blur-xl shadow-xl">
           <div className="py-2">{children}</div>
         </div>
       )}

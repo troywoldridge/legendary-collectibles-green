@@ -1,11 +1,10 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 // src/app/admin/funko/new/page.tsx
 import "server-only";
 
 import Link from "next/link";
 import AdminTokenGate from "@/components/admin/AdminApiTokenGate";
 import { upsertFunkoFromForm } from "./actions";
-import FunkoNewFormClient from "./FunkoNewFormClient";
+import FunkoNewFormClient from "./FunkoNewFormClient"; // ✅ must exist in same folder
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,7 +52,7 @@ export default async function AdminFunkoNewPage({
 
           {ok ? (
             <div className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-100">
-              {ok}
+              {ok === "1" ? "Saved." : ok}
             </div>
           ) : null}
 
@@ -64,8 +63,12 @@ export default async function AdminFunkoNewPage({
           ) : null}
         </div>
 
-        {/* Client form (required for auto-generating JSON) */}
+        {/* ✅ client form that auto-builds extra_json */}
         <FunkoNewFormClient action={upsertFunkoFromForm} />
+
+        <div className="text-xs text-white/60">
+          After saving, you can visit: <code className="break-all">/categories/funko/items/&lt;id&gt;</code>
+        </div>
       </section>
     </AdminTokenGate>
   );

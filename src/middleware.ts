@@ -13,6 +13,22 @@ const isProtectedRoute = createRouteMatcher([
   "/api/collection(.*)",
 ]);
 
+/**
+ * Always-public routes (never require auth, never get blocked).
+ * This is the safest place for:
+ * - Google Merchant feed
+ * - robots/sitemaps
+ * - any crawler endpoints
+ */
+const isAlwaysPublicRoute = createRouteMatcher([
+  "/google/merchant-feed",
+  "/google/merchant-feed/(.*)",
+  "/robots.txt",
+  "/sitemap",
+  "/sitemap.xml",
+  "/sitemap/(.*)",
+]);
+
 function getClientIp(req: NextRequest): string {
   return (
     req.headers.get("cf-connecting-ip") ||
@@ -70,6 +86,11 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
   // ✅ Hard bypass for internals/assets
   if (shouldBypassMiddleware(p)) return NextResponse.next();
 
+  // ✅ Absolute allowlist: never gate these, never redirect these
+  if (isAlwaysPublicRoute(req)) {
+    return NextResponse.next();
+  }
+
   // Logging (only action-ish)
   const ip = getClientIp(req);
   const ua = req.headers.get("user-agent") || "";
@@ -87,7 +108,8 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
     p.startsWith("/products/") ||
     p.startsWith("/store/") ||
     p === "/robots.txt" ||
-    p.startsWith("/sitemap");
+    p.startsWith("/sitemap") ||
+    p.startsWith("/google/merchant-feed");
 
   if (maybeAction) {
     console.log(

@@ -1,233 +1,198 @@
-import type { ShopApiQuery } from "@/lib/shop/client";
+// src/lib/shop/catalog.ts
+import "server-only";
 
-export type DepartmentKey = "pokemon" | "yugioh" | "mtg" | "sports" | "accessories";
+/**
+ * This module powers /shop routing + department landing pages.
+ *
+ * IMPORTANT SEPARATION:
+ * - /shop/*  = for-sale inventory browsing
+ * - /categories/* = catalog / collection browsing
+ *
+ * "collectibles" in SHOP is a computed bucket (everything NOT pokemon/yugioh/mtg/funko).
+ * It should never link to /categories/collectibles/items from the shop UI.
+ */
 
-export type CategorySlug =
-  | "all"
-  | "singles"
-  | "graded"
-  | "packs"
-  | "boxes"
-  | "bundles"
-  | "lots"
-  | "accessories";
+export type ShopDepartmentSlug =
+  | "pokemon"
+  | "yugioh"
+  | "mtg"
+  | "funko"
+  | "sports"
+  | "collectibles";
 
-export type CategoryConfig = {
-  slug: CategorySlug;
+export type DepartmentHero = {
+  eyebrow: string;
+  title: string;
+  blurb: string;
+  accent?: string | null;
+};
+
+export type DepartmentCategory = {
+  slug: string; // goes into /shop/[department]/[category]
   name: string;
   description: string;
-  badge?: string;
+  badge?: string | null;
 };
 
 export type DepartmentConfig = {
-  key: DepartmentKey;
+  slug: ShopDepartmentSlug;
   name: string;
-  description: string;
-  hero: {
-    eyebrow: string;
-    title: string;
-    blurb: string;
-    accent?: string;
-  };
-  categories: CategoryConfig[];
+  description: string; // used for SEO metadata
+  hero: DepartmentHero;
+  categories: DepartmentCategory[];
 };
 
-const CATEGORY_ALIASES: Record<CategorySlug, string[]> = {
-  all: ["all", "everything"],
-  singles: ["single", "singles"],
-  graded: ["graded", "slab", "slabs"],
-  packs: ["pack", "packs", "blister", "blisters"],
-  boxes: ["box", "boxes"],
-  bundles: ["bundle", "bundles", "etb", "etbs", "collection", "collections"],
-  lots: ["lot", "lots"],
-  accessories: ["accessory", "accessories", "supply", "supplies"],
-};
+/** Normalize aliases and casing for /shop/[department] */
+export function normalizeDepartmentSlug(raw: string): ShopDepartmentSlug | null {
+  const s = String(raw ?? "").trim().toLowerCase();
+  if (!s) return null;
 
-export const DEPARTMENTS: Record<DepartmentKey, DepartmentConfig> = {
-  pokemon: {
-    key: "pokemon",
-    name: "Pokémon",
-    description: "Singles, slabs, sealed, and trainer accessories.",
-    hero: {
-      eyebrow: "Pokémon Center-grade",
-      title: "Catch grails, slabs, and sealed heat",
-      blurb: "Shop vintage holos, modern alt-arts, Japanese exclusives, and sealed boosters ready to rip.",
-      accent: "Pikachu-approved inventory with transparent grading notes.",
-    },
-    categories: [
-      { slug: "all", name: "All Pokémon", description: "Every Pokémon item in one feed" },
-      { slug: "singles", name: "Singles", description: "Raw Pokémon singles" },
-      { slug: "graded", name: "Graded", description: "PSA / BGS / CGC slabs" },
-      { slug: "packs", name: "Booster Packs", description: "Sealed booster and promo packs" },
-      { slug: "boxes", name: "Booster Boxes", description: "Sealed booster boxes & displays" },
-      { slug: "bundles", name: "Bundles & ETBs", description: "Elite Trainer Boxes, tins, and bundles" },
-      { slug: "accessories", name: "Accessories", description: "Sleeves, binders, storage" },
-    ],
-  },
+  // aliases
+  if (s === "ygo" || s === "yu-gi-oh" || s === "yu-gi-oh!") return "yugioh";
+  if (s === "magic") return "mtg";
 
-  yugioh: {
-    key: "yugioh",
-    name: "Yu-Gi-Oh!",
-    description: "Chase cards, slabs, and sealed product.",
-    hero: {
-      eyebrow: "Duel-ready",
-      title: "Yu-Gi-Oh! vault for duelists",
-      blurb: "From Ghost Rares to tournament staples, browse graded slabs and sealed sets without guesswork.",
-      accent: "Verified inventory with condition notes on every listing.",
-    },
-    categories: [
-      { slug: "all", name: "All Yu-Gi-Oh!", description: "Full feed across YGO" },
-      { slug: "singles", name: "Singles", description: "Raw Yu-Gi-Oh! singles" },
-      { slug: "graded", name: "Graded", description: "PSA / BGS / CGC slabs" },
-      { slug: "packs", name: "Packs", description: "Booster and blister packs" },
-      { slug: "boxes", name: "Boxes", description: "Sealed boxes and cases" },
-      { slug: "bundles", name: "Structure / Bundles", description: "Structure decks and collector bundles" },
-      { slug: "accessories", name: "Accessories", description: "Deck boxes, sleeves, binders" },
-    ],
-  },
+  // treat figures/figure/collectible as the SHOP bucket "collectibles"
+  if (s === "figures" || s === "figure") return "collectibles";
+  if (s === "collectible") return "collectibles";
 
-  mtg: {
-    key: "mtg",
-    name: "Magic: The Gathering",
-    description: "Singles, Commander staples, sealed sets, and graded cards.",
-    hero: {
-      eyebrow: "Commander tuned",
-      title: "MTG singles, staples, and sealed experiences",
-      blurb: "Crack collector boosters, pick up Reserve List singles, or snag graded heavy-hitters.",
-      accent: "Curated for EDH, Modern, and collectors alike.",
-    },
-    categories: [
-      { slug: "all", name: "All MTG", description: "Every Magic listing" },
-      { slug: "singles", name: "Singles", description: "Raw MTG singles" },
-      { slug: "graded", name: "Graded", description: "Slabbed MTG singles" },
-      { slug: "packs", name: "Booster Packs", description: "Set / Draft / Collector packs" },
-      { slug: "boxes", name: "Booster Boxes", description: "Sealed boxes & cases" },
-      { slug: "bundles", name: "Bundles", description: "Bundles, decks, and collections" },
-      { slug: "accessories", name: "Accessories", description: "Sleeves, playmats, deck boxes" },
-    ],
-  },
-
-  sports: {
-    key: "sports",
-    name: "Sports Cards",
-    description: "Singles, lots, graded slabs, and sealed wax.",
-    hero: {
-      eyebrow: "Hobby shop energy",
-      title: "Wax, slabs, and singles for every sport",
-      blurb: "Rip wax, hunt rookies, or add graded grails across baseball, basketball, football, and more.",
-      accent: "Live-stocked inventory with transparent conditions.",
-    },
-    categories: [
-      { slug: "all", name: "All Sports", description: "Everything in one feed" },
-      { slug: "singles", name: "Singles", description: "Raw singles by sport" },
-      { slug: "graded", name: "Graded", description: "PSA / BGS / SGC slabs" },
-      { slug: "packs", name: "Packs", description: "Retail & hobby packs" },
-      { slug: "boxes", name: "Boxes", description: "Wax boxes & cases" },
-      { slug: "bundles", name: "Lots & Bundles", description: "Player lots, mystery stacks, bundles" },
-      { slug: "accessories", name: "Supplies", description: "Toploaders, sleeves, binders" },
-    ],
-  },
-
-  accessories: {
-    key: "accessories",
-    name: "Accessories",
-    description: "Sleeves, binders, storage, grading supplies, and display pieces.",
-    hero: {
-      eyebrow: "Collect with care",
-      title: "Premium supplies for every collection",
-      blurb: "Pro-level sleeves, display cases, binders, and storage that keep cards pristine.",
-      accent: "Cross-compatible accessories for Pokémon, YGO, MTG, and sports.",
-    },
-    categories: [
-      { slug: "all", name: "All Accessories", description: "Everything to protect and display" },
-      { slug: "accessories", name: "Supplies", description: "Sleeves, loaders, binders, storage" },
-    ],
-  },
-};
-
-export function normalizeDepartmentSlug(raw: string | null | undefined): DepartmentKey | null {
-  const slug = (raw ?? "").trim().toLowerCase();
-  if (!slug) return null;
-  return slug === "yugi" ? "yugioh" : ((slug as DepartmentKey) in DEPARTMENTS ? (slug as DepartmentKey) : null);
-}
-
-export function normalizeCategorySlug(raw: string | null | undefined): CategorySlug | null {
-  const slug = (raw ?? "").trim().toLowerCase();
-  if (!slug) return null;
-
-  for (const [canonical, aliases] of Object.entries(CATEGORY_ALIASES) as [CategorySlug, string[]][]) {
-    if (aliases.includes(slug)) return canonical;
+  if (
+    s === "pokemon" ||
+    s === "yugioh" ||
+    s === "mtg" ||
+    s === "funko" ||
+    s === "sports" ||
+    s === "collectibles"
+  ) {
+    return s;
   }
 
   return null;
 }
 
-export function getDepartmentConfig(key: DepartmentKey | null | undefined): DepartmentConfig | null {
-  if (!key) return null;
-  return DEPARTMENTS[key] ?? null;
-}
-
-export function getCategoryConfig(
-  dept: DepartmentKey,
-  category: CategorySlug | null | undefined
-): CategoryConfig | null {
-  if (!category) return null;
-  const cfg = DEPARTMENTS[dept]?.categories.find((c) => c.slug === category);
-  return cfg ?? null;
-}
-
 /**
- * ShopApiQuery's `game` only supports the collectible departments.
- * Accessories is treated as a special "format" query (no `game`).
+ * Department definitions used by /shop/[department]/page.tsx
+ * Each category slug maps to /shop/:department/:category, where :category is typically:
+ * - all, single, pack, box, bundle, lot, accessory
+ *
+ * NOTE: "collectibles" uses the same category slugs, but the API route treats it as a special bucket.
  */
-type GameDepartmentKey = Exclude<DepartmentKey, "accessories">;
+const DEPARTMENTS: Record<ShopDepartmentSlug, DepartmentConfig> = {
+  pokemon: {
+    slug: "pokemon",
+    name: "Pokémon",
+    description: "Shop Pokémon singles, sealed products, and accessories currently for sale.",
+    hero: {
+      eyebrow: "Shop",
+      title: "Pokémon",
+      blurb: "Browse Pokémon listings currently for sale — singles, sealed, and more.",
+      accent: "Tip: Singles default-sort by set + number for easier browsing.",
+    },
+    categories: [
+      { slug: "all", name: "All", description: "All Pokémon listings currently for sale.", badge: "Browse" },
+      { slug: "single", name: "Singles", description: "Individual Pokémon cards for sale." },
+      { slug: "pack", name: "Packs", description: "Booster packs and sealed pack products." },
+      { slug: "box", name: "Boxes", description: "Booster boxes and sealed boxes." },
+      { slug: "bundle", name: "Bundles", description: "Bundles, lots, and multi-item sealed products." },
+      { slug: "accessory", name: "Accessories", description: "Supplies and accessories (sleeves, binders, etc.)." },
+    ],
+  },
 
-export function categoryToApi(
-  dept: DepartmentKey,
-  category: CategorySlug
-): { label: string; api: ShopApiQuery } | null {
-  // Accessories department is special: never set api.game
-  if (dept === "accessories") {
-    switch (category) {
-      case "all":
-      case "accessories":
-        return { label: "Accessories", api: { format: "accessory" } };
-      default:
-        // These categories don't make sense for accessories
-        return null;
-    }
-  }
+  yugioh: {
+    slug: "yugioh",
+    name: "Yu-Gi-Oh!",
+    description: "Shop Yu-Gi-Oh! singles, sealed products, and accessories currently for sale.",
+    hero: {
+      eyebrow: "Shop",
+      title: "Yu-Gi-Oh!",
+      blurb: "Browse Yu-Gi-Oh! listings currently for sale — singles, sealed, and more.",
+      accent: null,
+    },
+    categories: [
+      { slug: "all", name: "All", description: "All Yu-Gi-Oh! listings currently for sale.", badge: "Browse" },
+      { slug: "single", name: "Singles", description: "Individual Yu-Gi-Oh! cards for sale." },
+      { slug: "pack", name: "Packs", description: "Booster packs and sealed pack products." },
+      { slug: "box", name: "Boxes", description: "Booster boxes and sealed boxes." },
+      { slug: "bundle", name: "Bundles", description: "Bundles, lots, and multi-item sealed products." },
+      { slug: "accessory", name: "Accessories", description: "Supplies and accessories." },
+    ],
+  },
 
-  // From here down, dept is a valid game key for ShopApiQuery.game
-  const game = dept as GameDepartmentKey;
+  mtg: {
+    slug: "mtg",
+    name: "Magic: The Gathering",
+    description: "Shop Magic: The Gathering singles, sealed products, and accessories currently for sale.",
+    hero: {
+      eyebrow: "Shop",
+      title: "Magic: The Gathering",
+      blurb: "Browse MTG listings currently for sale — singles, sealed, and more.",
+      accent: null,
+    },
+    categories: [
+      { slug: "all", name: "All", description: "All MTG listings currently for sale.", badge: "Browse" },
+      { slug: "single", name: "Singles", description: "Individual MTG cards for sale." },
+      { slug: "pack", name: "Packs", description: "Booster packs and sealed pack products." },
+      { slug: "box", name: "Boxes", description: "Booster boxes and sealed boxes." },
+      { slug: "bundle", name: "Bundles", description: "Bundles, lots, and multi-item sealed products." },
+      { slug: "accessory", name: "Accessories", description: "Supplies and accessories." },
+    ],
+  },
 
-  switch (category) {
-    case "all":
-      return { label: `${DEPARTMENTS[dept].name} — All`, api: { game } };
+  funko: {
+    slug: "funko",
+    name: "Funko",
+    description: "Shop Funko Pops and Funko collectibles currently for sale.",
+    hero: {
+      eyebrow: "Shop",
+      title: "Funko",
+      blurb: "Browse Funko Pops and Funko collectibles currently for sale.",
+      accent: "Catalog lives under /categories/funko/items — shop inventory lives here.",
+    },
+    categories: [
+      { slug: "all", name: "All", description: "All Funko listings currently for sale.", badge: "Browse" },
+      { slug: "single", name: "Singles", description: "Individual Funko items for sale." },
+      { slug: "bundle", name: "Bundles", description: "Lots and multi-item Funko listings." },
+      { slug: "accessory", name: "Accessories", description: "Protectors and related accessories." },
+    ],
+  },
 
-    case "singles":
-      return { label: "Singles", api: { game, format: "single" } };
+  collectibles: {
+    slug: "collectibles",
+    name: "Figures & Collectibles",
+    description:
+      "Shop figures & collectibles currently for sale that are not Pokémon, Yu-Gi-Oh!, Magic: The Gathering, or Funko.",
+    hero: {
+      eyebrow: "Shop",
+      title: "Figures & Collectibles",
+      blurb: "Everything for sale that isn’t Pokémon, Yu-Gi-Oh!, MTG, or Funko.",
+      accent: "This is a computed shop bucket — it auto-excludes the big four categories.",
+    },
+    categories: [
+      { slug: "all", name: "All", description: "All figures & collectibles for sale.", badge: "Browse" },
+      { slug: "single", name: "Singles", description: "Single-item figures & collectibles listings." },
+      { slug: "bundle", name: "Bundles", description: "Lots and multi-item collectibles listings." },
+      { slug: "accessory", name: "Accessories", description: "Accessories that are not in the main TCG departments." },
+    ],
+  },
 
-    case "graded":
-      return { label: "Graded Singles", api: { game, format: "single", graded: true } };
+  sports: {
+    slug: "sports",
+    name: "Sports",
+    description: "Shop sports cards and sports collectibles currently for sale.",
+    hero: {
+      eyebrow: "Shop",
+      title: "Sports",
+      blurb: "Browse sports cards and sports collectibles currently for sale.",
+      accent: null,
+    },
+    categories: [
+      { slug: "all", name: "All", description: "All sports listings currently for sale.", badge: "Browse" },
+      { slug: "single", name: "Singles", description: "Individual sports cards and items for sale." },
+      { slug: "bundle", name: "Bundles", description: "Lots and multi-item sports listings." },
+      { slug: "accessory", name: "Accessories", description: "Sports-related accessories." },
+    ],
+  },
+};
 
-    case "packs":
-      return { label: "Packs", api: { game, format: "pack", sealed: true } };
-
-    case "boxes":
-      return { label: "Boxes", api: { game, format: "box", sealed: true } };
-
-    case "bundles":
-      return { label: "Bundles", api: { game, format: "bundle", sealed: true } };
-
-    case "lots":
-      return { label: "Lots", api: { game, format: "lot" } };
-
-    case "accessories":
-      // Accessories within a game department (eg Pokémon accessories)
-      return { label: "Accessories", api: { game, format: "accessory" } };
-
-    default:
-      return null;
-  }
+export function getDepartmentConfig(slug: ShopDepartmentSlug): DepartmentConfig {
+  return DEPARTMENTS[slug];
 }

@@ -1,5 +1,7 @@
+// src/app/categories/collectibles/items/[id]/page.tsx
 import "server-only";
 
+import type React from "react";
 import type { Metadata } from "next";
 import Script from "next/script";
 import Image from "next/image";
@@ -99,15 +101,14 @@ function legacyBestImage(item: ItemRow | ItemMetaRow): string | null {
 function getBrandFromExtra(extra: any): string {
   const b = extra?.brand;
   const s = String(b ?? "").trim();
-  return s || "Funko";
+  return s || "Collectibles";
 }
 
 function fmtTitle(item: ItemMetaRow | ItemRow) {
   const brand = getBrandFromExtra(item.extra);
   const name = (item.name ?? item.id).trim();
   const num = item.number ? `#${String(item.number).trim()}` : null;
-  const parts = [brand ? `${brand}` : null, name, num].filter(Boolean).join(" ");
-  return parts;
+  return [brand !== "Collectibles" ? `${brand}` : null, name, num].filter(Boolean).join(" ");
 }
 
 function Field({ label, value }: { label: string; value: string | null }) {
@@ -121,29 +122,45 @@ function Field({ label, value }: { label: string; value: string | null }) {
 }
 
 /**
- * ✅ Redirect helper: if the id exists in collectibles_items but not funko_items,
- * send the user to the correct catalog route.
+ * Prefer the correct tables:
+ * - collectibles_items
+ * - collectibles_item_images
+ *
+ * But DO NOT crash if you haven't created them yet.
+ * Fallback to funko tables during migration to keep the site stable.
  */
-async function existsInCollectibles(itemId: string): Promise<boolean> {
-  noStore();
-  try {
-    const r = await db.execute<{ ok: boolean }>(sql`
-      select true as ok
-      from public.collectibles_items
-      where id = ${itemId}
-      limit 1
-    `);
-    return !!r.rows?.[0]?.ok;
-  } catch {
-    return false;
-  }
-}
-
 async function getItemMeta(itemId: string): Promise<ItemMetaRow | null> {
   noStore();
-  return (
-    (
-      await db.execute<ItemMetaRow>(sql`
+
+  // 1) Preferred: collectibles_items
+  try {
+    const res = await db.execute<ItemMetaRow>(sql`
+      SELECT
+        id::text as id,
+        name,
+        franchise,
+        series,
+        line,
+        number,
+        edition,
+        variant,
+        image_small,
+        image_large,
+        upc,
+        release_year,
+        exclusivity,
+        is_chase,
+        is_exclusive,
+        extra
+      FROM public.collectibles_items
+      WHERE id = ${itemId}
+      LIMIT 1
+    `);
+    return res.rows?.[0] ?? null;
+  } catch {
+    // 2) Fallback: funko_items
+    try {
+      const res2 = await db.execute<ItemMetaRow>(sql`
         SELECT
           id::text as id,
           name,
@@ -164,16 +181,49 @@ async function getItemMeta(itemId: string): Promise<ItemMetaRow | null> {
         FROM public.funko_items
         WHERE id = ${itemId}
         LIMIT 1
-      `)
-    ).rows?.[0] ?? null
-  );
+      `);
+      return res2.rows?.[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
 }
 
 async function getItemById(itemId: string): Promise<ItemRow | null> {
   noStore();
-  return (
-    (
-      await db.execute<ItemRow>(sql`
+
+  // 1) Preferred: collectibles_items
+  try {
+    const res = await db.execute<ItemRow>(sql`
+      SELECT
+        id::text as id,
+        name,
+        franchise,
+        series,
+        line,
+        number,
+        edition,
+        variant,
+        image_small,
+        image_large,
+        upc,
+        release_year,
+        exclusivity,
+        is_chase,
+        is_exclusive,
+        description,
+        source,
+        source_id,
+        extra
+      FROM public.collectibles_items
+      WHERE id = ${itemId}
+      LIMIT 1
+    `);
+    return res.rows?.[0] ?? null;
+  } catch {
+    // 2) Fallback: funko_items
+    try {
+      const res2 = await db.execute<ItemRow>(sql`
         SELECT
           id::text as id,
           name,
@@ -197,47 +247,76 @@ async function getItemById(itemId: string): Promise<ItemRow | null> {
         FROM public.funko_items
         WHERE id = ${itemId}
         LIMIT 1
-      `)
-    ).rows?.[0] ?? null
-  );
+      `);
+      return res2.rows?.[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
 }
 
 async function getImages(itemId: string): Promise<ItemImageRow[]> {
   noStore();
-  const res = await db.execute<ItemImageRow>(sql`
-    SELECT
-      id::text as id,
-      item_id,
-      sort_order,
-      label,
-      url,
-      created_at::text,
-      updated_at::text
-    FROM public.funko_item_images
-    WHERE item_id = ${itemId}
-    ORDER BY
-      (CASE WHEN label = 'main' THEN 0 ELSE 1 END) ASC,
-      sort_order ASC NULLS LAST,
-      created_at ASC
-  `);
 
-  return (res.rows ?? []).filter((r) => String(r.url || "").trim().length > 0);
+  // 1) Preferred: collectibles_item_images
+  try {
+    const res = await db.execute<ItemImageRow>(sql`
+      SELECT
+        id::text as id,
+        item_id,
+        sort_order,
+        label,
+        url,
+        created_at::text,
+        updated_at::text
+      FROM public.collectibles_item_images
+      WHERE item_id = ${itemId}
+      ORDER BY
+        (CASE WHEN label = 'main' THEN 0 ELSE 1 END) ASC,
+        sort_order ASC NULLS LAST,
+        created_at ASC
+    `);
+    return (res.rows ?? []).filter((r) => String(r.url || "").trim().length > 0);
+  } catch {
+    // 2) Fallback: funko_item_images
+    try {
+      const res2 = await db.execute<ItemImageRow>(sql`
+        SELECT
+          id::text as id,
+          item_id,
+          sort_order,
+          label,
+          url,
+          created_at::text,
+          updated_at::text
+        FROM public.funko_item_images
+        WHERE item_id = ${itemId}
+        ORDER BY
+          (CASE WHEN label = 'main' THEN 0 ELSE 1 END) ASC,
+          sort_order ASC NULLS LAST,
+          created_at ASC
+      `);
+      return (res2.rows ?? []).filter((r) => String(r.url || "").trim().length > 0);
+    } catch {
+      return [];
+    }
+  }
 }
 
 async function getMarketItem(itemId: string): Promise<MarketItemRow | null> {
   noStore();
+
+  // If you later add a market_items mapping for collectibles, switch this to game='collectibles'
+  // Keeping 'funko' for now so the page doesn't break if the market system is strict.
   try {
-    return (
-      (
-        await db.execute<MarketItemRow>(sql`
-          SELECT id::text as id, display_name
-          FROM public.market_items
-          WHERE game = 'funko'
-            AND canonical_id::text = ${itemId}::text
-          LIMIT 1
-        `)
-      ).rows?.[0] ?? null
-    );
+    const res = await db.execute<MarketItemRow>(sql`
+      SELECT id::text as id, display_name
+      FROM public.market_items
+      WHERE game = 'funko'
+        AND canonical_id::text = ${itemId}::text
+      LIMIT 1
+    `);
+    return res.rows?.[0] ?? null;
   } catch {
     return null;
   }
@@ -250,33 +329,39 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const p = await params;
   const raw = decodeURIComponent(String(p?.id ?? "")).trim();
-  const canonical = absUrl(`/categories/funko/items/${encodeURIComponent(raw)}`);
+
+  const canonical = absUrl(`/categories/collectibles/items/${encodeURIComponent(raw)}`);
 
   if (!raw) {
     return {
-      title: `Funko | ${site.name}`,
-      alternates: { canonical: absUrl("/categories/funko/items") },
+      title: `Figures & Collectibles | ${site.name}`,
+      description: `Browse figures and collectibles on ${site.name}.`,
+      alternates: { canonical: absUrl("/categories/collectibles/items") },
       robots: { index: false, follow: true },
     };
   }
 
-  const item = await getItemMeta(raw);
+  const [item, images] = await Promise.all([getItemMeta(raw), getImages(raw)]);
 
-  // If not Funko but exists in collectibles, let the page redirect at render-time.
   if (!item) {
     return {
       title: `Item Not Found | ${site.name}`,
-      description: `We couldn’t find that item. Browse Funko and try again.`,
+      description: `We couldn’t find that item. Browse Figures & Collectibles and try again.`,
       alternates: { canonical },
       robots: { index: false, follow: true },
     };
   }
 
   const brand = getBrandFromExtra(item.extra);
-  const title = `${fmtTitle(item)} — ${site.name}`;
-  const description = `Funko item details for ${item.name ?? item.id}.`;
+  const title = `${fmtTitle(item)} — ${brand} Figure Details | ${site.name}`;
+  const description =
+    `Item details for ${item.name ?? item.id}` +
+    (item.franchise ? ` • Franchise: ${item.franchise}` : "") +
+    (item.series ? ` • Series: ${item.series}` : "") +
+    (item.number ? ` • Number: ${item.number}` : "") +
+    ` • Images and details.`;
 
-  const ogCandidate = legacyBestImage(item) || site.ogImage || "/og-image.png";
+  const ogCandidate = images[0]?.url || legacyBestImage(item) || site.ogImage || "/og-image.png";
   const ogImage = absMaybe(ogCandidate);
 
   return {
@@ -301,7 +386,7 @@ export async function generateMetadata({
   };
 }
 
-export default async function FunkoItemDetailPage({
+export default async function CollectibleItemDetailPage({
   params,
   searchParams,
 }: {
@@ -312,16 +397,6 @@ export default async function FunkoItemDetailPage({
   const sp = await searchParams;
 
   const rawId = decodeURIComponent(String(p?.id ?? "")).trim();
-
-  // ✅ If it’s not in Funko, but IS in Collectibles → redirect to the correct route.
-  const meta = await getItemMeta(rawId);
-  if (!meta) {
-    const inCollectibles = await existsInCollectibles(rawId);
-    if (inCollectibles) {
-      redirect(`/categories/collectibles/items/${encodeURIComponent(rawId)}`);
-    }
-  }
-
   const { userId } = await auth();
   const signedIn = !!userId;
   const canSave = signedIn;
@@ -329,23 +404,37 @@ export default async function FunkoItemDetailPage({
   // strip UI-only currency params
   const hasUiCurrencyParams = sp?.display !== undefined || sp?.currency !== undefined;
   if (hasUiCurrencyParams) {
-    redirect(`/categories/funko/items/${encodeURIComponent(rawId)}`);
+    redirect(`/categories/collectibles/items/${encodeURIComponent(rawId)}`);
   }
 
   const display = readDisplay(sp);
 
   const [item, images] = await Promise.all([getItemById(rawId), getImages(rawId)]);
 
+  const canonicalItem = absUrl(`/categories/collectibles/items/${encodeURIComponent(rawId)}`);
+
   if (!item) {
     return (
       <section className="space-y-6">
+        <Script
+          id="collectibles-notfound-jsonld"
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "WebPage",
+              url: canonicalItem,
+              name: "Collectible Item Not Found",
+            }),
+          }}
+        />
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
           <h1 className="text-2xl font-bold text-white">Item not found</h1>
           <p className="mt-2 break-all text-sm text-white/70">
             Looked up: <code>{rawId}</code>
           </p>
-          <Link href="/categories/funko/items" className="mt-4 inline-block text-sky-300 hover:underline">
-            ← Back to Funko
+          <Link href="/categories/collectibles/items" className="mt-4 inline-block text-sky-300 hover:underline">
+            ← Back to Figures &amp; Collectibles
           </Link>
         </div>
       </section>
@@ -354,6 +443,7 @@ export default async function FunkoItemDetailPage({
 
   const brand = getBrandFromExtra(item.extra);
   const pageTitle = fmtTitle(item);
+  const canonical = absUrl(`/categories/collectibles/items/${encodeURIComponent(item.id)}`);
 
   const cover = images[0]?.url || legacyBestImage(item);
   const coverAbs = cover ? absMaybe(cover) : null;
@@ -366,13 +456,13 @@ export default async function FunkoItemDetailPage({
     const plan = await getUserPlan(userId);
     planTier = plan.id === "pro" ? "pro" : plan.id === "collector" ? "collector" : "free";
     canUseAlerts = canUsePriceAlerts(plan);
+
     if (canUseAlerts) {
       const marketItem = await getMarketItem(item.id);
       marketItemId = marketItem?.id ?? null;
     }
   }
 
-  const canonical = absUrl(`/categories/funko/items/${encodeURIComponent(item.id)}`);
   const thingId = `${canonical}#product`;
 
   const breadcrumbsJsonLd = {
@@ -381,7 +471,7 @@ export default async function FunkoItemDetailPage({
     itemListElement: [
       { "@type": "ListItem", position: 1, name: "Home", item: absUrl("/") },
       { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
-      { "@type": "ListItem", position: 3, name: "Funko", item: absUrl("/categories/funko/items") },
+      { "@type": "ListItem", position: 3, name: "Figures & Collectibles", item: absUrl("/categories/collectibles/items") },
       { "@type": "ListItem", position: 4, name: pageTitle, item: canonical },
     ],
   };
@@ -397,19 +487,29 @@ export default async function FunkoItemDetailPage({
     "@type": "Product",
     "@id": thingId,
     name: pageTitle,
-    description: item.description ?? `${pageTitle} details.`,
+    description:
+      item.description ??
+      [
+        brand ? `Brand: ${brand}` : null,
+        item.franchise ? `Franchise: ${item.franchise}` : null,
+        item.series ? `Series: ${item.series}` : null,
+        item.number ? `Number: ${item.number}` : null,
+        item.release_year ? `Release year: ${item.release_year}` : null,
+      ]
+        .filter(Boolean)
+        .join(" • "),
     sku: item.id,
-    brand: { "@type": "Brand", name: brand || "Funko" },
+    brand: { "@type": "Brand", name: brand || "Collectibles" },
     url: canonical,
     image: coverAbs ? [coverAbs] : undefined,
     ...gtinProps,
-    category: "Funko",
+    category: "Collectibles > Figures",
   };
 
   return (
     <section className="space-y-8">
-      <Script id="funko-breadcrumbs-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }} />
-      <Script id="funko-product-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }} />
+      <Script id="collectibles-breadcrumbs-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }} />
+      <Script id="collectibles-product-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }} />
 
       <nav className="text-xs text-white/70">
         <div className="flex flex-wrap items-center gap-2">
@@ -417,7 +517,7 @@ export default async function FunkoItemDetailPage({
           <span className="text-white/40">/</span>
           <Link href="/categories" className="hover:underline">Categories</Link>
           <span className="text-white/40">/</span>
-          <Link href="/categories/funko/items" className="hover:underline">Funko</Link>
+          <Link href="/categories/collectibles/items" className="hover:underline">Figures &amp; Collectibles</Link>
           <span className="text-white/40">/</span>
           <span className="text-white/90">{pageTitle}</span>
         </div>
@@ -443,12 +543,40 @@ export default async function FunkoItemDetailPage({
                 <div className="absolute inset-0 grid place-items-center text-white/70">No image</div>
               )}
             </div>
+
+            {images.length > 1 ? (
+              <div className="mt-4">
+                <h3 className="mb-2 text-xs uppercase tracking-wide text-white/60">Gallery</h3>
+                <div className="grid grid-cols-4 gap-2 sm:grid-cols-5">
+                  {images.map((img, idx) => (
+                    <figure
+                      key={img.id}
+                      className="relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-black/30"
+                      title={`${img.label ?? "image"} • sort ${img.sort_order ?? ""}`}
+                    >
+                      <Image
+                        src={img.url}
+                        alt={`${pageTitle} — image ${idx + 1}`}
+                        fill
+                        unoptimized
+                        className="object-contain"
+                        sizes="120px"
+                      />
+                      <figcaption className="sr-only">{`${pageTitle} — image ${idx + 1}`}</figcaption>
+                    </figure>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </section>
         </div>
 
         <div className="lg:col-span-7 space-y-4">
           <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <h1 className="text-2xl font-bold text-white">{pageTitle}</h1>
+            <p className="mt-2 text-sm text-white/70">
+              Item details including images and market references where available.
+            </p>
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <Field label="Brand" value={brand || null} />
@@ -461,6 +589,8 @@ export default async function FunkoItemDetailPage({
             </div>
 
             <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
+              {/* Keeping game="funko" for now to avoid breaking strict unions in existing components.
+                  When you add "collectibles" support to CardActions/MarketPrices, we’ll switch it cleanly. */}
               <CardActions
                 canSave={canSave}
                 game="funko"
@@ -515,12 +645,21 @@ export default async function FunkoItemDetailPage({
               <p className="whitespace-pre-wrap text-sm text-white/80">{item.description}</p>
             </section>
           ) : null}
+
+          {item.extra ? (
+            <section className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+              <h2 className="mb-2 text-lg font-semibold">Extra</h2>
+              <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/80">
+                {typeof item.extra === "string" ? item.extra : JSON.stringify(item.extra, null, 2)}
+              </pre>
+            </section>
+          ) : null}
         </div>
       </div>
 
       <div className="flex flex-wrap gap-4 text-sm">
-        <Link href="/categories/funko/items" className="text-sky-300 hover:underline">
-          ← Back to Funko
+        <Link href="/categories/collectibles/items" className="text-sky-300 hover:underline">
+          ← Back to Figures &amp; Collectibles
         </Link>
       </div>
     </section>

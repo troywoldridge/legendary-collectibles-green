@@ -68,6 +68,19 @@ function toInt(v: unknown): number | null {
   return null;
 }
 
+function isUuid(v: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/['"]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+}
+
 type UpsertBody = {
   id?: string; // preferred: funko:72471
   name?: string;
@@ -88,12 +101,42 @@ type UpsertBody = {
   source?: string; // e.g. "supplier"
   source_id?: string; // e.g. "FUKO72471"
   extra?: unknown; // jsonb
+
+  /**
+   * OPTIONAL: also upsert a row into public.products (your store catalog).
+   * This is OFF unless you provide this object.
+   *
+   * Why: ensures anything created from this endpoint is always game='funko', format='single'
+   * and can’t accidentally land in pokemon again.
+   */
+  product?: {
+    product_id?: string; // uuid (optional)
+    slug?: string; // if omitted we derive from name/number
+    title?: string; // if omitted uses name
+    subtitle?: string | null;
+    price_cents?: number | string; // default 0
+    quantity?: number | string; // default 1
+    status?: string; // default "draft"
+    compare_at_cents?: number | string | null;
+  };
 };
 
 type ReturnRow = {
   id: string;
   name: string | null;
   upc: string | null;
+  updated_at: string;
+};
+
+type ProductReturnRow = {
+  id: string;
+  slug: string;
+  title: string;
+  game: string;
+  format: string;
+  price_cents: number;
+  quantity: number;
+  status: string;
   updated_at: string;
 };
 
@@ -127,7 +170,6 @@ export async function POST(req: NextRequest) {
   }
 
   // If id missing but UPC present, mint a canonical id.
-  // Opinionated: funko:<model_number or last 5 of UPC> is fine; here we use funko:<upc> to be deterministic.
   const canonicalId = id || `funko:${upc}`;
 
   const isChase = toBool(body.is_chase);
@@ -144,7 +186,6 @@ export async function POST(req: NextRequest) {
         try {
           extra = JSON.parse(s);
         } catch {
-          // store raw string if it isn't valid JSON
           extra = { raw: s };
         }
       }
@@ -153,7 +194,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const row =
+  const item =
     (
       await db.execute<ReturnRow>(sql`
         INSERT INTO public.funko_items (
@@ -223,9 +264,130 @@ export async function POST(req: NextRequest) {
       `)
     ).rows?.[0] ?? null;
 
-  if (!row) {
+  if (!item) {
     return NextResponse.json({ error: "server_error", message: "Upsert failed." }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, item: row });
+  // Optional: upsert into products (only if body.product is provided)
+  let product: ProductReturnRow | null = null;
+  if (body.product) {
+    const p = body.product;
+
+    const title = norm(p.title) || norm(body.name) || canonicalId;
+    const derivedSlugBase = norm(p.slug) || slugify(`${title}${body.number ? ` ${norm(body.number)}` : ""}`);
+    const slug = derivedSlugBase || slugify(canonicalId);
+
+    const priceCents = toInt(p.price_cents) ?? 0;
+    const quantity = toInt(p.quantity) ?? 1;
+    const status = norm(p.status) || "draft";
+    const compareAtCents = p.compare_at_cents === null ? null : (toInt(p.compare_at_cents) ?? null);
+
+    const productId = norm(p.product_id);
+    const hasProductId = !!productId && isUuid(productId);
+
+    // IMPORTANT: force correct Funko classification here
+    // - game='funko'
+    // - format='single'
+    // - sealed=false (Funko is not "sealed wax")
+    // - is_graded=false
+    // You can extend later with real funko grading logic if you support it.
+    const res = await db.execute<ProductReturnRow>(sql`
+      ${
+        hasProductId
+          ? sql`
+            INSERT INTO public.products (
+              id,
+              title,
+              subtitle,
+              slug,
+              game,
+              format,
+              sealed,
+              is_graded,
+              price_cents,
+              compare_at_cents,
+              quantity,
+              status
+            ) VALUES (
+              ${productId}::uuid,
+              ${title},
+              ${p.subtitle ?? null},
+              ${slug},
+              'funko'::game,
+              'single'::product_format,
+              false,
+              false,
+              ${priceCents},
+              ${compareAtCents},
+              ${quantity},
+              ${status}::product_status
+            )
+            ON CONFLICT (id) DO UPDATE SET
+              title = EXCLUDED.title,
+              subtitle = COALESCE(EXCLUDED.subtitle, public.products.subtitle),
+              slug = EXCLUDED.slug,
+              game = 'funko'::game,
+              format = 'single'::product_format,
+              sealed = false,
+              is_graded = false,
+              price_cents = EXCLUDED.price_cents,
+              compare_at_cents = COALESCE(EXCLUDED.compare_at_cents, public.products.compare_at_cents),
+              quantity = EXCLUDED.quantity,
+              status = EXCLUDED.status
+          `
+          : sql`
+            INSERT INTO public.products (
+              title,
+              subtitle,
+              slug,
+              game,
+              format,
+              sealed,
+              is_graded,
+              price_cents,
+              compare_at_cents,
+              quantity,
+              status
+            ) VALUES (
+              ${title},
+              ${p.subtitle ?? null},
+              ${slug},
+              'funko'::game,
+              'single'::product_format,
+              false,
+              false,
+              ${priceCents},
+              ${compareAtCents},
+              ${quantity},
+              ${status}::product_status
+            )
+            ON CONFLICT (slug) DO UPDATE SET
+              title = EXCLUDED.title,
+              subtitle = COALESCE(EXCLUDED.subtitle, public.products.subtitle),
+              game = 'funko'::game,
+              format = 'single'::product_format,
+              sealed = false,
+              is_graded = false,
+              price_cents = EXCLUDED.price_cents,
+              compare_at_cents = COALESCE(EXCLUDED.compare_at_cents, public.products.compare_at_cents),
+              quantity = EXCLUDED.quantity,
+              status = EXCLUDED.status
+          `
+      }
+      RETURNING
+        id::text AS id,
+        slug,
+        title,
+        game::text AS game,
+        format::text AS format,
+        price_cents,
+        quantity,
+        status::text AS status,
+        updated_at::text AS updated_at
+    `);
+
+    product = res.rows?.[0] ?? null;
+  }
+
+  return NextResponse.json({ ok: true, item, product });
 }

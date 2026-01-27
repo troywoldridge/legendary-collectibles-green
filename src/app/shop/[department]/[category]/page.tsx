@@ -1,391 +1,275 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 // src/app/shop/[department]/[category]/page.tsx
 import "server-only";
 
-import type { Metadata } from "next";
 import Link from "next/link";
 import Image from "next/image";
-import { notFound, redirect } from "next/navigation";
 import { unstable_noStore as noStore } from "next/cache";
 
-import AddToCartButton from "@/components/shop/AddToCartButton";
-import ShopFilters from "@/components/shop/ShopFilters";
-import PaginationBar from "@/components/shop/PaginationBar";
-import { buildImageAlt } from "@/lib/seo/imageAlt";
-
 import {
-  categoryToApi,
-  getDepartmentConfig,
-  normalizeCategorySlug,
-  normalizeDepartmentSlug,
-} from "@/lib/shop/catalog";
-import { fetchShopProducts, formatCurrency, type ShopProduct } from "@/lib/shop/client";
-import { site } from "@/config/site";
+  fetchShopProducts,
+  formatCurrency,
+  type ShopApiQuery,
+  type ShopFormat,
+  type ShopGame,
+  type ShopProduct,
+} from "@/lib/shop/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-export const fetchCache = "force-no-store";
 
-type Params = { department: string; category: string };
-type SearchParams = Record<string, string | string[] | undefined>;
-
-function norm(v: unknown) {
+function s(v: unknown): string {
   return String(v ?? "").trim();
 }
 
-function asString(v: string | string[] | undefined): string {
-  if (Array.isArray(v)) return v[0] ?? "";
-  return v ?? "";
-}
-
-function toPosInt(v: unknown, fallback: number, max = 999999) {
-  const n = Number(String(v ?? ""));
+function toInt(v: unknown, fallback: number): number {
+  const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
-  const m = Math.floor(n);
-  if (m < 1) return fallback;
-  if (m > max) return max;
-  return m;
+  return Math.trunc(n);
 }
 
-async function resolveSearchParams(v: unknown): Promise<SearchParams> {
-  const maybePromise = v as any;
-  if (maybePromise && typeof maybePromise.then === "function") return (await maybePromise) ?? {};
-  return (v ?? {}) as SearchParams;
+/**
+ * IMPORTANT:
+ * We intentionally treat "collectibles" as a SHOP DEPARTMENT even if it isn't a "game" enum.
+ * It is a computed bucket (everything NOT pokemon/yugioh/mtg/funko).
+ */
+type ShopDepartment = ShopGame | "collectibles";
+
+function isShopDepartment(v: string): v is ShopDepartment {
+  return (
+    v === "pokemon" ||
+    v === "yugioh" ||
+    v === "mtg" ||
+    v === "sports" ||
+    v === "funko" ||
+    v === "collectibles"
+  );
 }
 
-function buildQueryString(
-  searchParams: Record<string, string | string[] | undefined>,
-  patch: Record<string, string | null | undefined>,
-) {
-  const qs = new URLSearchParams();
+function isShopFormat(v: string): v is ShopFormat {
+  return (
+    v === "single" ||
+    v === "pack" ||
+    v === "box" ||
+    v === "bundle" ||
+    v === "lot" ||
+    v === "accessory"
+  );
+}
 
-  for (const [k, v] of Object.entries(searchParams)) {
-    const val = asString(v).trim();
-    if (val) qs.set(k, val);
+function normalizeImageCandidate(v: unknown): { url: string; alt?: string | null } | null {
+  if (!v) return null;
+
+  if (typeof v === "string") {
+    const url = s(v);
+    return url ? { url } : null;
   }
 
-  for (const [k, v] of Object.entries(patch)) {
-    if (v === null) qs.delete(k);
-    else if (typeof v === "string" && v.trim()) qs.set(k, v.trim());
-    else if (v === "") qs.delete(k);
+  if (typeof v === "object") {
+    const url = s((v as any).url);
+    if (!url) return null;
+    const alt = (v as any).alt;
+    return { url, alt: alt == null ? null : s(alt) || null };
   }
 
-  return qs.toString();
+  return null;
 }
 
-function normalizeCloudflareVariant(url: string | null | undefined, variant = "productTile") {
-  const u = String(url ?? "").trim();
-  if (!u) return "";
-  if (!u.includes("imagedelivery.net/")) return u;
-  return u.replace(/\/[^/]+$/, `/${variant}`);
-}
-
-export async function generateMetadata(props: {
-  params: Params | Promise<Params>;
-}): Promise<Metadata> {
-  const p = await props.params;
-  const departmentRaw = norm(p?.department);
-  const categoryRaw = norm(p?.category);
-
-  const dept = normalizeDepartmentSlug(departmentRaw);
-  const category = normalizeCategorySlug(categoryRaw);
-
-  // If bad URL, don't index it
-  if (!dept || !category) {
-    const canonical = `${site.url}/shop`;
-    return {
-      title: `Shop | ${site.name}`,
-      description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
-      alternates: { canonical },
-      robots: { index: false, follow: true },
-      openGraph: {
-        type: "website",
-        url: canonical,
-        title: `Shop | ${site.name}`,
-        description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
-        siteName: site.name,
-      },
-      twitter: {
-        card: "summary",
-        title: `Shop | ${site.name}`,
-        description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
-      },
-    };
+function pickImage(p: ShopProduct): { url: string; alt: string } | null {
+  const imgs = (p as any).images ?? null;
+  if (Array.isArray(imgs) && imgs.length) {
+    for (const c of imgs) {
+      const picked = normalizeImageCandidate(c);
+      if (picked?.url) return { url: picked.url, alt: picked.alt ?? p.title };
+    }
   }
 
-  const deptCfg = getDepartmentConfig(dept);
-  const cfg = categoryToApi(dept, category);
+  const legacy = normalizeImageCandidate((p as any).image);
+  if (legacy?.url) return { url: legacy.url, alt: legacy.alt ?? p.title };
 
-  const canonical = `${site.url}/shop/${encodeURIComponent(dept)}/${encodeURIComponent(category)}`;
-
-  if (!deptCfg || !cfg) {
-    return {
-      title: `Shop | ${site.name}`,
-      description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
-      alternates: { canonical },
-      robots: { index: false, follow: true },
-      openGraph: {
-        type: "website",
-        url: canonical,
-        title: `Shop | ${site.name}`,
-        description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
-        siteName: site.name,
-      },
-      twitter: {
-        card: "summary",
-        title: `Shop | ${site.name}`,
-        description: `Browse live inventory across Pokémon, Yu-Gi-Oh!, MTG, and more. Fast shipping, secure packaging.`,
-      },
-    };
-  }
-
-  const deptName = deptCfg.name; // e.g. "Pokémon"
-  const catLabel = cfg.label;    // e.g. "Singles", "Sealed", etc.
-
-  // Keyword-forward, readable, not spammy
-  const title = `${deptName} ${catLabel} | ${site.name}`;
-  const description = `Shop ${deptName} ${catLabel}. Live inventory with fast shipping, secure packaging, and safe checkout.`;
-
-  return {
-    title,
-    description,
-    alternates: { canonical },
-    robots: { index: true, follow: true },
-
-    openGraph: {
-      type: "website",
-      url: canonical,
-      title,
-      description,
-      siteName: site.name,
-    },
-
-    twitter: {
-      card: "summary",
-      title,
-      description,
-    },
-
-    other: {
-      "application-name": site.name,
-    },
-  };
+  return null;
 }
 
-
-export default async function ShopCategoryPage(props: {
-  params: Params | Promise<Params>;
-  searchParams: SearchParams | Promise<SearchParams>;
+export default async function Page({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ department: string; category: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  // ✅ This is the real fix for “URL changes but page stays the same”
   noStore();
 
-  const params = await props.params;
-  const sp = await resolveSearchParams(props.searchParams);
+  const p = await params;
+  const sp = (await searchParams) ?? {};
 
-  const departmentRaw = norm(params?.department);
-  const categoryRaw = norm(params?.category);
+  const departmentRaw = s(p.department).toLowerCase();
+  const categoryRaw = s(p.category).toLowerCase();
 
-  const dept = normalizeDepartmentSlug(departmentRaw);
-  const category = normalizeCategorySlug(categoryRaw);
-  if (!dept || !category) notFound();
+  const q = Array.isArray(sp.q) ? s(sp.q[0]) : s(sp.q);
+  const page = Math.max(1, toInt(Array.isArray(sp.page) ? sp.page[0] : sp.page, 1));
+  const limit = Math.min(
+    60,
+    Math.max(1, toInt(Array.isArray(sp.limit) ? sp.limit[0] : sp.limit, 24)),
+  );
 
-  const canonicalPath = `/shop/${dept}/${category}`;
+  const department: ShopDepartment | undefined = isShopDepartment(departmentRaw)
+    ? departmentRaw
+    : undefined;
 
-  // Canonicalize casing/aliases, but KEEP query string
-  const rawDeptLower = departmentRaw.toLowerCase();
-  const rawCatLower = categoryRaw.toLowerCase();
-  if (rawDeptLower !== dept || rawCatLower !== category) {
-    const qs = buildQueryString(sp, {});
-    redirect(qs ? `${canonicalPath}?${qs}` : canonicalPath);
-  }
+  const format: ShopFormat | undefined =
+    categoryRaw && categoryRaw !== "all" && isShopFormat(categoryRaw) ? categoryRaw : undefined;
 
-  const deptCfg = getDepartmentConfig(dept);
-  if (!deptCfg) notFound();
-
-  const cfg = categoryToApi(dept, category);
-  if (!cfg) notFound();
-
-  const page = toPosInt(asString(sp.page), 1);
-  const limit = toPosInt(asString(sp.limit), 24, 48);
-
-  const requestSearchParams: SearchParams = {
-    ...sp,
-    page: String(page),
-    limit: String(limit),
+  // Build query
+  const query: ShopApiQuery = {
+    ...(department ? { game: department as any } : {}), // "collectibles" is a special bucket supported by API
+    ...(format ? { format } : {}),
+    ...(q ? { q } : {}),
+    page,
+    limit,
   };
 
-  // everything except page (used by PaginationBar)
-  const baseQuery = buildQueryString(requestSearchParams, { page: null });
+  const res = await fetchShopProducts(query);
 
-  const data = await fetchShopProducts(cfg.api, requestSearchParams);
+  // Title/subtitle by department
+  const title =
+    department === "pokemon"
+      ? "Shop Pokémon"
+      : department === "yugioh"
+        ? "Shop Yu-Gi-Oh!"
+        : department === "mtg"
+          ? "Shop Magic: The Gathering"
+          : department === "funko"
+            ? "Shop Funko"
+            : department === "sports"
+              ? "Shop Sports"
+              : department === "collectibles"
+                ? "Shop Figures & Collectibles"
+                : "Shop";
 
-  const total = Number(data.total ?? 0);
-  const totalPages = Math.max(1, Math.ceil(total / Math.max(1, limit)));
+  const subtitle =
+    department === "collectibles"
+      ? "Figures & collectibles that are not Pokémon, Yu-Gi-Oh!, MTG, or Funko."
+      : "Browse listings across the store.";
+
+  if (!res.ok) {
+    return (
+      <main className="mx-auto w-full max-w-6xl px-4 py-10">
+        <h1 className="text-2xl font-semibold text-white">{title}</h1>
+        <p className="mt-2 text-sm text-white/70">{subtitle}</p>
+
+        <div className="mt-6 rounded-2xl border border-white/15 bg-white/5 p-4 text-sm text-white/80">
+          <div className="font-medium">Shop feed error</div>
+          <div className="mt-1 text-white/70">{res.message || res.error}</div>
+        </div>
+      </main>
+    );
+  }
+
+  const items = res.items ?? [];
 
   return (
-    <main className="shopShell shopShell--wide">
-      <header className="shopHeader">
-        <div className="eyebrow">{deptCfg.hero.eyebrow}</div>
+    <main className="mx-auto w-full max-w-6xl px-4 py-10">
+      <div className="rounded-2xl border border-white/15 bg-white/5 p-5 backdrop-blur-sm">
+        <div className="text-xs uppercase tracking-wide text-white/60">Shop</div>
+        <h1 className="mt-2 text-2xl font-semibold text-white">{title}</h1>
+        <p className="mt-2 text-sm text-white/70">{subtitle}</p>
 
-        <h1 className="shopTitle">
-          {deptCfg.name} / {cfg.label}
-        </h1>
-
-        <p className="shopIntro">
-          Shop {deptCfg.name} {cfg.label} at Legendary Collectibles — live inventory ready to ship with secure packaging and safe checkout.
-        </p>
-
-
-
-        <p className="shopSubtitle">{deptCfg.description}</p>
-        {deptCfg.hero.accent ? <p className="shopAccent">{deptCfg.hero.accent}</p> : null}
-
-        <div className="shopMeta">
-          <span className="pill">{total.toLocaleString()} items</span>
-          <span className="pill pillGhost">Fast shipping · Secure packaging</span>
-          <span className="pill pillGhost">Safe checkout</span>
+        <div className="mt-4 text-xs text-white/60">
+          Showing <span className="text-white">{items.length}</span> of{" "}
+          <span className="text-white">{res.total}</span>
         </div>
+      </div>
 
-        <div className="chipRow">
-          <Link className="chip" href={`/shop/${dept}`} prefetch={false}>
-            ← Back to {deptCfg.name}
-          </Link>
-          <Link className="chip" href="/shop" prefetch={false}>
-            All Departments
-          </Link>
-          <Link className="chip" href="/cart" prefetch={false}>
-            Cart
-          </Link>
+      {items.length === 0 ? (
+        <div className="mt-6 rounded-2xl border border-white/15 bg-white/5 p-4 text-sm text-white/70">
+          No items found in this category yet.
         </div>
+      ) : (
+        <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {items.map((prod: ShopProduct) => {
+            const img = pickImage(prod);
 
-        <details className="shopFiltersDetails">
-          <summary className="shopFiltersSummary">
-            Filters <span className="shopFiltersSummaryHint">Search + refine</span>
-          </summary>
-          <div className="shopFiltersPanel">
-            <ShopFilters game={dept} format={category} />
-          </div>
-        </details>
-      </header>
+            const qty = Number((prod as any).quantity ?? 0);
+            const showQty = Number.isFinite(qty);
 
-      <section className="shopSection">
-        {total === 0 ? (
-          <div className="emptyState">
-            <div className="emptyTitle">No products found.</div>
-            <p className="emptySubtitle">Try clearing filters or picking a different category.</p>
-            {"_error" in data && (data as any)._error ? (
-              <div className="emptyError">API: {String((data as any)._error)}</div>
-            ) : null}
-          </div>
-        ) : (
-          <>
-            <div className="productMasonry">
-              {(data.items ?? []).map((product: ShopProduct) => {
-                const rawImgUrl = product.image?.url ?? null;
-
-                const imgAlt = buildImageAlt({
-                  title: product.title,
-                  subtitle: product.subtitle ?? null,
-                  game: dept,
-                  setName: (product as any)?.setName ?? (product as any)?.set?.name ?? null,
-                  cardNumber: (product as any)?.number ?? null,
-                  condition: product.condition ?? null,
-                  isGraded: product.isGraded ?? null,
-                  grader: product.grader ?? null,
-                  grade: (product as any)?.gradeLabel ?? product.gradeX10 ?? null,
-                  sealed: product.sealed ?? null,
-                });
-
-                const imgUrl = normalizeCloudflareVariant(rawImgUrl, "productTile") || rawImgUrl || "";
-                const href = `/products/${product.id}`;
-
-                const badge = product.isGraded
-                  ? product.grader
-                    ? `${String(product.grader).toUpperCase()} Slab`
-                    : "GRADED"
-                  : product.sealed
-                    ? "SEALED"
-                    : null;
-
-                const hasCompare =
-                  product.compareAtCents != null &&
-                  Number(product.compareAtCents) > 0 &&
-                  Number(product.compareAtCents) > Number(product.priceCents);
-
-                return (
-                  <article key={product.id} className="productTile">
-                    <Link href={href} className="productTile__media" prefetch={false}>
-                      <div className="productTile__imgWrap">
-                        {imgUrl ? (
-                          <Image
-                            src={imgUrl}
-                            alt={imgAlt}
-                            fill
-                            sizes="(max-width: 1024px) 100vw, 33vw"
-                            className="productTile__img"
-                            priority={false}
-                          />
-                        ) : (
-                          <div className="productTile__placeholder">No image</div>
-                        )}
+            return (
+              <Link
+                key={(prod as any).id}
+                href={`/products/${encodeURIComponent((prod as any).slug)}`}
+                className="group overflow-hidden rounded-2xl border border-white/15 bg-white/5 backdrop-blur-sm hover:border-white/25"
+              >
+                <div className="relative aspect-[3/4] w-full overflow-hidden bg-black/25 p-3">
+                  <div className="relative h-full w-full overflow-hidden rounded-xl border border-white/10 bg-black/30">
+                    {img ? (
+                      <Image
+                        src={img.url}
+                        alt={img.alt}
+                        fill
+                        sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                        className="object-contain transition-transform duration-300 group-hover:scale-[1.01]"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-xs text-white/40">
+                        No image
                       </div>
-                      {badge ? <div className="productTile__badge">{badge}</div> : null}
-                    </Link>
+                    )}
+                  </div>
+                </div>
 
-                    <div className="productTile__body productTile__body--tight">
-                      <div className="productTile__title">
-                        <Link className="hover:underline" href={href} prefetch={false}>
-                          {product.title}
-                        </Link>
-                      </div>
+                <div className="p-4">
+                  <div className="line-clamp-2 text-sm font-medium text-white">
+                    {(prod as any).title}
+                  </div>
 
-                      <div className="productTile__subtitle">
-                        {product.subtitle ??
-                          (product.isGraded
-                            ? `Graded${product.grader ? ` • ${String(product.grader).toUpperCase()}` : ""}`
-                            : "In stock and ready to ship")}
-                      </div>
-
-                      <div className="productTile__priceRow">
-                        <div className="productTile__price">{formatCurrency(product.priceCents)}</div>
-                        {hasCompare ? (
-                          <div className="productTile__compare">
-                            {formatCurrency(product.compareAtCents as number)}
-                          </div>
-                        ) : null}
-                      </div>
-
-                      <div className="productTile__meta">
-                        {typeof product.quantity === "number"
-                          ? product.quantity > 0
-                            ? `${product.quantity} in stock`
-                            : "Out of stock"
-                          : "Live inventory"}
-                      </div>
-
-                      <div className="productTile__actions">
-                        <Link href={href} className="btn btnGhost btnInline" prefetch={false}>
-                          View
-                        </Link>
-                        <AddToCartButton productId={product.id} availableQty={product.quantity ?? undefined} />
-                      </div>
+                  <div className="mt-2 flex items-baseline gap-2">
+                    <div className="text-sm font-semibold text-white">
+                      {formatCurrency(Number((prod as any).priceCents || 0))}
                     </div>
-                  </article>
-                );
-              })}
-            </div>
 
-            <PaginationBar
-              canonicalPath={canonicalPath}
-              page={page}
-              totalPages={totalPages}
-              baseQuery={baseQuery}
-              backHref={`/shop/${dept}`}
-            />
-          </>
-        )}
-      </section>
+                    {(prod as any).compareAtCents != null &&
+                    Number((prod as any).compareAtCents) > Number((prod as any).priceCents || 0) ? (
+                      <div className="text-xs text-white/50 line-through">
+                        {formatCurrency(Number((prod as any).compareAtCents))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {showQty ? (
+                    <div className="mt-2 text-xs text-white/60">
+                      Qty: <span className="text-white/80">{qty}</span>
+                    </div>
+                  ) : null}
+                </div>
+              </Link>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="mt-10 flex items-center justify-between">
+        <Link
+          className="rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+          href={`/shop/${encodeURIComponent(departmentRaw)}/${encodeURIComponent(
+            categoryRaw,
+          )}?page=${Math.max(1, page - 1)}&limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ""}`}
+        >
+          ← Prev
+        </Link>
+
+        <div className="text-xs text-white/60">
+          Page <span className="text-white/80">{res.page}</span>
+        </div>
+
+        <Link
+          className="rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+          href={`/shop/${encodeURIComponent(departmentRaw)}/${encodeURIComponent(
+            categoryRaw,
+          )}?page=${page + 1}&limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ""}`}
+        >
+          Next →
+        </Link>
+      </div>
     </main>
   );
 }

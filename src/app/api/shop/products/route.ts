@@ -1,3 +1,4 @@
+// src/app/api/shop/products/route.ts
 import "server-only";
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -28,6 +29,21 @@ function toBool(v: unknown): boolean | null {
   return null;
 }
 
+/** -------------------------
+ *  Canonical allow-lists
+ *  ------------------------- */
+
+// "collectibles" is a SPECIAL BUCKET, not a true "game equals collectibles" filter.
+const ALLOWED_GAMES = ["pokemon", "yugioh", "mtg", "sports", "funko", "collectibles"] as const;
+
+type AllowedGame = (typeof ALLOWED_GAMES)[number];
+
+const ALLOWED_GAMES_SET = new Set<AllowedGame>(ALLOWED_GAMES);
+
+function isAllowedGame(v: string): v is AllowedGame {
+  return ALLOWED_GAMES_SET.has(v as AllowedGame);
+}
+
 // normalize plural slugs -> enum values
 function normFormat(v: string) {
   const s = (v || "").trim().toLowerCase();
@@ -44,30 +60,34 @@ function normFormat(v: string) {
 function normGame(v: string) {
   const s = (v || "").trim().toLowerCase();
   if (!s) return "";
-  if (s === "ygo" || s === "yu-gi-oh") return "yugioh";
+
+  if (s === "ygo" || s === "yu-gi-oh" || s === "yu-gi-oh!") return "yugioh";
   if (s === "magic") return "mtg";
+
+  // Treat these as the SPECIAL BUCKET
+  if (s === "collectible") return "collectibles";
+  if (s === "figures" || s === "figure") return "collectibles";
+
   return s;
 }
 
-// "13/98" -> 13, "175/172" -> 175, "" -> null
+// "13/98" -> 13
 const leadingInt = (expr: any) =>
   sql`nullif(regexp_replace(coalesce(${expr}::text, ''), '[^0-9].*$', ''), '')::int`;
 
-// "LOB-001" -> 1, "12a" -> 12, "TG12" -> 12
+// "LOB-001" -> 1
 const anyInt = (expr: any) =>
   sql`nullif(regexp_replace(coalesce(${expr}::text, ''), '[^0-9]+', '', 'g'), '')::int`;
 
-// Pokémon release_date is text; normalize "YYYY/MM/DD" -> "YYYY-MM-DD" then cast
 const pokemonReleaseDate = sql`nullif(replace(coalesce(tcg.release_date, ''), '/', '-'), '')::date`;
 
-// UUID check for MTG source_card_id stored as text in products
 const UUID_RE =
   "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
 
-  const game = normGame(norm(searchParams.get("game")));
+  const gameRaw = normGame(norm(searchParams.get("game")));
   const format = normFormat(norm(searchParams.get("format")));
   const sortRaw = norm(searchParams.get("sort")).toLowerCase();
   const sort = sortRaw || "featured";
@@ -85,11 +105,33 @@ export async function GET(req: NextRequest) {
   const priceMin = norm(searchParams.get("priceMin"));
   const priceMax = norm(searchParams.get("priceMax"));
 
-  // WHERE
+  const game: AllowedGame | "" = gameRaw ? (isAllowedGame(gameRaw) ? gameRaw : "") : "";
+
+  if (gameRaw && !game) {
+    return NextResponse.json(
+      {
+        error: "bad_request",
+        message: `Invalid game '${gameRaw}'. Allowed: ${ALLOWED_GAMES.join(", ")}.`,
+      },
+      { status: 400, headers: { "Cache-Control": "no-store, max-age=0" } },
+    );
+  }
+
   const where: any[] = [];
   where.push(sql`p.status = 'active'`);
 
-  if (game) where.push(sql`p.game = ${game}::game`);
+  /**
+   * ✅ KEY FIX:
+   * collectibles = bucket = NOT pokemon/yugioh/mtg/funko
+   */
+  if (game === "collectibles") {
+    where.push(
+      sql`p.game not in ('pokemon'::game, 'yugioh'::game, 'mtg'::game, 'funko'::game)`,
+    );
+  } else if (game) {
+    where.push(sql`p.game = ${game}::game`);
+  }
+
   if (format) where.push(sql`p.format = ${format}::product_format`);
 
   if (sealed !== null) where.push(sql`p.sealed = ${sealed}`);
@@ -112,17 +154,14 @@ export async function GET(req: NextRequest) {
 
   const whereSql = where.length ? sql`where ${sql.join(where, sql` and `)}` : sql``;
 
-  // Smart default: singles should browse by set+number
   const isSingles = format === "single";
   const effectiveSort = isSingles && (sort === "featured" || !sortRaw) ? "set_number" : sort;
 
-  // ORDER BY defaults
   let orderBy = sql`p.updated_at desc, p.id desc`;
   if (effectiveSort === "price_asc") orderBy = sql`p.price_cents asc, p.updated_at desc, p.id desc`;
   if (effectiveSort === "price_desc") orderBy = sql`p.price_cents desc, p.updated_at desc, p.id desc`;
   if (effectiveSort === "new") orderBy = sql`p.created_at desc, p.id desc`;
 
-  // Universal set + number sort for Pokemon + YGO + MTG
   if (effectiveSort === "set_number") {
     orderBy = sql`
       coalesce(${pokemonReleaseDate}, ss.released_at) asc nulls last,
@@ -141,7 +180,6 @@ export async function GET(req: NextRequest) {
     `;
   }
 
-  // COUNT
   const countRow = await db.execute<{ count: string }>(sql`
     select count(*)::text as count
     from products p
@@ -149,7 +187,6 @@ export async function GET(req: NextRequest) {
   `);
   const total = Number(countRow.rows?.[0]?.count ?? "0");
 
-  // ITEMS
   const rows = await db.execute(sql`
     select
       p.id,
@@ -168,11 +205,9 @@ export async function GET(req: NextRequest) {
       p.inventory_type::text as "inventoryType",
       p.quantity,
 
-      -- extra metadata for UI (optional)
       coalesce(tcg.set_name, ss.name, ycs.set_name, ycs.set_code) as "setName",
       coalesce(tcg.number::text, ycs.set_code::text, scry.collector_number::text) as "cardNumber",
 
-      -- Pokemon-first image strategy (HIRES)
       case
         when p.game = 'pokemon'::game
          and tcg.small_image is not null
@@ -189,17 +224,14 @@ export async function GET(req: NextRequest) {
 
     from products p
 
-    -- ✅ Pokemon
     left join tcg_cards tcg
       on p.game = 'pokemon'::game
      and tcg.id = p.source_card_id
 
-    -- ✅ Yu-Gi-Oh
     left join ygo_cards ygo
       on p.game = 'yugioh'::game
      and ygo.card_id = p.source_card_id
 
-    -- Pick ONE primary set printing row (lowest set_code)
     left join lateral (
       select ycs.set_code, ycs.set_name
       from ygo_card_sets ycs
@@ -208,21 +240,18 @@ export async function GET(req: NextRequest) {
       limit 1
     ) ycs on true
 
-    -- ✅ MTG (Scryfall raw)
-   left join scryfall_cards_raw scry
-  on scry.id = (
-    case
-      when p.game = 'mtg'::game and p.source_card_id ~* ${UUID_RE}
-      then p.source_card_id::uuid
-      else null
-    end
-  )
-
+    left join scryfall_cards_raw scry
+      on scry.id = (
+        case
+          when p.game = 'mtg'::game and p.source_card_id ~* ${UUID_RE}
+          then p.source_card_id::uuid
+          else null
+        end
+      )
 
     left join scryfall_sets ss
       on ss.id = scry.set_id
 
-    -- Product image fallback
     left join lateral (
       select url, alt
       from product_images
@@ -253,15 +282,13 @@ export async function GET(req: NextRequest) {
     compareAtCents: r.compareAtCents != null ? Number(r.compareAtCents) : null,
     inventoryType: r.inventoryType ?? null,
     quantity: r.quantity != null ? Number(r.quantity) : null,
-
     setName: r.setName ?? null,
     number: r.cardNumber ?? null,
-
     image: r.imageUrl ? { url: r.imageUrl, alt: r.imageAlt ?? null } : null,
   }));
 
   return NextResponse.json(
     { items, total, page, limit },
-    { headers: { "Cache-Control": "no-store, max-age=0" } }
+    { headers: { "Cache-Control": "no-store, max-age=0" } },
   );
 }
