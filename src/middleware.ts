@@ -8,25 +8,29 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
  * - Collection pages + APIs require auth
  * - Cart remains guest-safe
  */
-const isProtectedRoute = createRouteMatcher([
-  "/collection(.*)",
-  "/api/collection(.*)",
-]);
+const isProtectedRoute = createRouteMatcher(["/collection(.*)", "/api/collection(.*)"]);
 
 /**
  * Always-public routes (never require auth, never get blocked).
- * This is the safest place for:
+ * Safe place for:
  * - Google Merchant feed
  * - robots/sitemaps
- * - any crawler endpoints
+ * - crawler endpoints
  */
 const isAlwaysPublicRoute = createRouteMatcher([
-  "/google/merchant-feed",
-  "/google/merchant-feed/(.*)",
+  "/google/merchant-feed(.*)",
   "/robots.txt",
-  "/sitemap",
+  "/sitemap(.*)",
   "/sitemap.xml",
-  "/sitemap/(.*)",
+]);
+
+/**
+ * Endpoints we never want to include in general request logs.
+ * (Webhooks, probes, health checks, etc.)
+ */
+const isNoisyLogRoute = createRouteMatcher([
+  "/api/health",
+  "/api/ebay/account-deletion",
 ]);
 
 function getClientIp(req: NextRequest): string {
@@ -39,11 +43,30 @@ function getClientIp(req: NextRequest): string {
 }
 
 function isAuthPage(pathname: string) {
-  return (
-    pathname.startsWith("/sign-in") ||
-    pathname.startsWith("/sign-up") ||
-    pathname.startsWith("/post-auth")
-  );
+  return pathname.startsWith("/sign-in") || pathname.startsWith("/sign-up") || pathname.startsWith("/post-auth");
+}
+
+/**
+ * Treat Cloudflare health / traffic manager requests as non-loggable noise.
+ * Cloudflare load balancers / traffic manager often hit /api/health with:
+ *   UA: Cloudflare-Traffic-Manager/1.0 ...
+ */
+function isCloudflareProbe(req: NextRequest): boolean {
+  const ua = (req.headers.get("user-agent") || "").toLowerCase();
+  const cfHealth = (req.headers.get("cf-health-check") || "").toLowerCase();
+  const p = req.nextUrl.pathname;
+
+  // If it's the dedicated health endpoint, never log it.
+  if (p === "/api/health") return true;
+
+  // Cloudflare-specific probes
+  if (ua.includes("cloudflare-traffic-manager")) return true;
+  if (ua.includes("cloudflare-healthchecks")) return true;
+
+  // Some environments send an explicit header
+  if (cfHealth === "true") return true;
+
+  return false;
 }
 
 /**
@@ -87,9 +110,11 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
   if (shouldBypassMiddleware(p)) return NextResponse.next();
 
   // ✅ Absolute allowlist: never gate these, never redirect these
-  if (isAlwaysPublicRoute(req)) {
-    return NextResponse.next();
-  }
+  if (isAlwaysPublicRoute(req)) return NextResponse.next();
+
+  // ✅ Silence probes + selected webhook endpoints from general logs
+  const isProbe = isCloudflareProbe(req);
+  const isNoisy = isNoisyLogRoute(req);
 
   // Logging (only action-ish)
   const ip = getClientIp(req);
@@ -106,12 +131,9 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
     p.includes("action") ||
     p.startsWith("/product/") ||
     p.startsWith("/products/") ||
-    p.startsWith("/store/") ||
-    p === "/robots.txt" ||
-    p.startsWith("/sitemap") ||
-    p.startsWith("/google/merchant-feed");
+    p.startsWith("/store/");
 
-  if (maybeAction) {
+  if (maybeAction && !isProbe && !isNoisy) {
     console.log(
       "[REQ]",
       "ip=",
@@ -120,7 +142,7 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
       req.method,
       p,
       "ua=",
-      ua.slice(0, 120),
+      ua.slice(0, 160),
       nextAction ? `next-action=${nextAction}` : "",
       "ref=",
       ref,
@@ -142,7 +164,7 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
 
   if (!userId) {
     if (p.startsWith("/api")) {
-      console.log("[AUTH] 401 api", "ip=", ip, req.method, p);
+      if (!isProbe && !isNoisy) console.log("[AUTH] 401 api", "ip=", ip, req.method, p);
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -152,7 +174,7 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
     signInUrl.search = "";
     signInUrl.searchParams.set("redirect_url", sanitizeRedirectUrl(redirectPath));
 
-    console.log("[AUTH] redirect", "ip=", ip, req.method, p, "-> /sign-in");
+    if (!isProbe && !isNoisy) console.log("[AUTH] redirect", "ip=", ip, req.method, p, "-> /sign-in");
     return NextResponse.redirect(signInUrl);
   }
 

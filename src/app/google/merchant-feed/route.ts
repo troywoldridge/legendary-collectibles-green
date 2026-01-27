@@ -31,14 +31,17 @@ const HEADERS = [
   "product_detail",
   "item_group_id",
   "sell_on_google_quantity",
-];
+] as const;
 
 const DELIM = "\t";
 
-function moneyUSDFromCents(cents: unknown) {
-  const v = Number(cents ?? 0) / 100;
-  return `${v.toFixed(2)} USD`;
-}
+// One pool for the lifetime of the Node process
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 3,
+  idleTimeoutMillis: 10_000,
+  connectionTimeoutMillis: 10_000,
+});
 
 function sanitize(value: unknown) {
   if (value === null || value === undefined) return "";
@@ -52,24 +55,51 @@ function sanitize(value: unknown) {
   return s;
 }
 
+function moneyUSDFromCents(cents: unknown) {
+  const n = Number(cents ?? 0);
+  if (!Number.isFinite(n)) return "0.00 USD";
+  const v = n / 100;
+  return `${v.toFixed(2)} USD`;
+}
+
+/**
+ * Canonical site url rules:
+ * 1) Prefer env SITE_URL / NEXT_PUBLIC_SITE_URL
+ * 2) Otherwise derive from req.url
+ * 3) Force https
+ * 4) Force non-www
+ */
 function buildSiteUrl(req: Request) {
   const env =
     process.env.SITE_URL?.replace(/\/+$/, "") ||
     process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "");
-  if (env) return env;
 
-  const url = new URL(req.url);
-  return `${url.protocol}//${url.host}`;
+  const raw =
+    env ||
+    (() => {
+      const u = new URL(req.url);
+      return `${u.protocol}//${u.host}`;
+    })();
+
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.replace(/^www\./i, "");
+    return `https://${host}`;
+  } catch {
+    return "https://legendary-collectibles.com";
+  }
 }
 
 function buildProductLink(siteUrl: string, slug: unknown) {
-  const s = String(slug || "").trim();
+  const s = String(slug ?? "").trim();
+  if (!s) return `${siteUrl}/products`;
   return `${siteUrl}/products/${encodeURIComponent(s)}`;
 }
 
 function mapAvailability(status: unknown, qty: unknown) {
-  const q = Number(qty ?? 0);
   const s = String(status ?? "").toLowerCase();
+  const q = Number(qty ?? 0);
+
   if (s !== "active") return "out_of_stock";
   return q > 0 ? "in_stock" : "out_of_stock";
 }
@@ -78,27 +108,34 @@ function sellOnGoogleQty(status: unknown, qty: unknown) {
   const s = String(status ?? "").toLowerCase();
   if (s !== "active") return 0;
   const q = Number(qty ?? 0);
-  return q > 0 ? q : 0;
+  return Number.isFinite(q) && q > 0 ? Math.floor(q) : 0;
 }
 
 function mapGoogleCondition(_cond: unknown) {
-  // You can expand later; for now keep it simple and safe.
   return "new";
 }
 
 function highlightFromRow(r: any) {
-  if (r.is_graded) {
-    const g = String(r.grader || "").toUpperCase();
-    const grade = r.grade_x10 ? (Number(r.grade_x10) / 10).toFixed(1) : "";
-    return `${g ? g + " " : ""}${grade ? "Grade " + grade : "Graded"} collectible`;
+  if (r?.is_graded) {
+    const g = String(r.grader || "").toUpperCase().trim();
+
+    const gx10 = Number(r.grade_x10);
+    const hasGrade = Number.isFinite(gx10) && gx10 > 0;
+    const gradeStr = hasGrade ? (gx10 / 10).toFixed(1) : "";
+
+    if (g && gradeStr) return `${g} Grade ${gradeStr} collectible`;
+    if (g) return `${g} graded collectible`;
+    if (gradeStr) return `Grade ${gradeStr} collectible`;
+    return "Graded collectible";
   }
-  if (r.sealed) return "Factory sealed product";
-  if (String(r.format || "").toLowerCase() === "accessory") return "Collector accessory";
+
+  if (r?.sealed) return "Factory sealed product";
+  if (String(r?.format || "").toLowerCase() === "accessory") return "Collector accessory";
   return "Collector-quality item";
 }
 
 function detailFromRow(r: any) {
-  return r.subtitle || "";
+  return r?.subtitle || "";
 }
 
 function formatShippingWeightLb(weight: unknown) {
@@ -114,16 +151,11 @@ function isAcceptedImageUrl(url: unknown) {
   if (!s) return false;
   if (!/^https?:\/\//i.test(s)) return false;
 
-  // block placeholders
   if (s.includes("placehold.co")) return false;
 
-  // allow Cloudflare Images
   if (s.includes("imagedelivery.net/")) return true;
-
-  // allow PokemonTCG.io images
   if (s.includes("images.pokemontcg.io/")) return true;
 
-  // otherwise require classic extensions
   return /\.(jpe?g|png|gif)(\?.*)?$/i.test(s);
 }
 
@@ -134,14 +166,10 @@ export async function GET(req: Request) {
 
   const siteUrl = buildSiteUrl(req);
 
-  const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    max: 3,
-  });
-
   const client = await pool.connect();
-
   try {
+    // Note: Only "active" products are included for Merchant Center safety.
+    // If you truly want all statuses, remove the WHERE clause.
     const q = `
       SELECT
         p.id,
@@ -163,10 +191,7 @@ export async function GET(req: Request) {
         p.description,
         p.shipping_weight_lbs,
 
-        -- Primary image: prefer sort=0, else lowest sort, else oldest
         pi_primary.url AS primary_image_url,
-
-        -- Additional images (up to 10, excluding the primary)
         pi_more.urls AS additional_image_urls
 
       FROM products p
@@ -197,6 +222,8 @@ export async function GET(req: Request) {
         ) t
       ) pi_more ON true
 
+      WHERE p.status = 'active'
+
       ORDER BY p.created_at ASC NULLS LAST, p.title ASC
     `;
 
@@ -210,25 +237,22 @@ export async function GET(req: Request) {
       const qtyForGoogle = sellOnGoogleQty(r.status, r.quantity);
 
       const pc = Number(r.price_cents ?? 0);
+      const compareRaw = r.compare_at_cents;
+
       const compare =
-        r.compare_at_cents === null || r.compare_at_cents === undefined || r.compare_at_cents === ""
-          ? null
-          : Number(r.compare_at_cents);
+        compareRaw === null || compareRaw === undefined || compareRaw === "" ? null : Number(compareRaw);
 
       let priceOut = moneyUSDFromCents(pc);
       let salePriceOut = "";
 
-      if (compare && compare > pc) {
+      if (compare !== null && Number.isFinite(compare) && compare > pc) {
         priceOut = moneyUSDFromCents(compare);
         salePriceOut = moneyUSDFromCents(pc);
       }
 
       const link = buildProductLink(siteUrl, r.slug);
 
-      // ONLY product_images. No placeholders. No relative URLs.
       const imageLink = (r.primary_image_url && String(r.primary_image_url).trim()) || "";
-
-      // Hard rule: skip any product with no acceptable image.
       if (!isAcceptedImageUrl(imageLink)) continue;
 
       const more = String(r.additional_image_urls || "")
@@ -237,10 +261,10 @@ export async function GET(req: Request) {
         .filter((u: string) => isAcceptedImageUrl(u))
         .join(",");
 
-      const row: Record<string, string> = {
-        id: r.sku || r.id,
-        title: r.title,
-        description: r.description || "",
+      const row: Record<(typeof HEADERS)[number], string> = {
+        id: (r.sku && String(r.sku).trim()) || String(r.id),
+        title: sanitize(r.title),
+        description: sanitize(r.description || r.subtitle || ""),
         availability,
         availability_date: "",
         expiration_date: "",
@@ -278,6 +302,5 @@ export async function GET(req: Request) {
     return new Response(`Feed error: ${e?.message || String(e)}`, { status: 500 });
   } finally {
     client.release();
-    await pool.end();
   }
 }
