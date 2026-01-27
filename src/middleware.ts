@@ -24,15 +24,6 @@ const isAlwaysPublicRoute = createRouteMatcher([
   "/sitemap.xml",
 ]);
 
-/**
- * Endpoints we never want to include in general request logs.
- * (Webhooks, probes, health checks, etc.)
- */
-const isNoisyLogRoute = createRouteMatcher([
-  "/api/health",
-  "/api/ebay/account-deletion",
-]);
-
 function getClientIp(req: NextRequest): string {
   return (
     req.headers.get("cf-connecting-ip") ||
@@ -44,29 +35,6 @@ function getClientIp(req: NextRequest): string {
 
 function isAuthPage(pathname: string) {
   return pathname.startsWith("/sign-in") || pathname.startsWith("/sign-up") || pathname.startsWith("/post-auth");
-}
-
-/**
- * Treat Cloudflare health / traffic manager requests as non-loggable noise.
- * Cloudflare load balancers / traffic manager often hit /api/health with:
- *   UA: Cloudflare-Traffic-Manager/1.0 ...
- */
-function isCloudflareProbe(req: NextRequest): boolean {
-  const ua = (req.headers.get("user-agent") || "").toLowerCase();
-  const cfHealth = (req.headers.get("cf-health-check") || "").toLowerCase();
-  const p = req.nextUrl.pathname;
-
-  // If it's the dedicated health endpoint, never log it.
-  if (p === "/api/health") return true;
-
-  // Cloudflare-specific probes
-  if (ua.includes("cloudflare-traffic-manager")) return true;
-  if (ua.includes("cloudflare-healthchecks")) return true;
-
-  // Some environments send an explicit header
-  if (cfHealth === "true") return true;
-
-  return false;
 }
 
 /**
@@ -103,6 +71,32 @@ function shouldBypassMiddleware(pathname: string) {
   return false;
 }
 
+function getAdminToken(req: NextRequest) {
+  return (
+    req.headers.get("x-admin-token") ||
+    req.headers.get("X-Admin-Token") ||
+    ""
+  ).trim();
+}
+
+function hasValidAdminToken(req: NextRequest) {
+  const want = (process.env.ADMIN_TOKEN || "").trim();
+  if (!want) return false;
+  const got = getAdminToken(req);
+  return !!got && got === want;
+}
+
+function isNoisyHealthCheck(req: NextRequest) {
+  const p = req.nextUrl.pathname;
+  const ua = (req.headers.get("user-agent") || "").toLowerCase();
+
+  // Cloudflare Traffic Manager / health checks
+  if (p === "/api/health" && ua.includes("cloudflare-traffic-manager")) return true;
+
+  // You can add more patterns here if needed
+  return false;
+}
+
 export default clerkMiddleware(async (auth, req: NextRequest) => {
   const p = req.nextUrl.pathname;
 
@@ -112,9 +106,10 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
   // ✅ Absolute allowlist: never gate these, never redirect these
   if (isAlwaysPublicRoute(req)) return NextResponse.next();
 
-  // ✅ Silence probes + selected webhook endpoints from general logs
-  const isProbe = isCloudflareProbe(req);
-  const isNoisy = isNoisyLogRoute(req);
+  // ✅ Admin token bypass for protected routes (so curl can hit /api/collection/*)
+  if (isProtectedRoute(req) && hasValidAdminToken(req)) {
+    return NextResponse.next();
+  }
 
   // Logging (only action-ish)
   const ip = getClientIp(req);
@@ -133,7 +128,7 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
     p.startsWith("/products/") ||
     p.startsWith("/store/");
 
-  if (maybeAction && !isProbe && !isNoisy) {
+  if (maybeAction && !isNoisyHealthCheck(req)) {
     console.log(
       "[REQ]",
       "ip=",
@@ -142,7 +137,7 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
       req.method,
       p,
       "ua=",
-      ua.slice(0, 160),
+      ua.slice(0, 120),
       nextAction ? `next-action=${nextAction}` : "",
       "ref=",
       ref,
@@ -159,12 +154,12 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
   // Public by default
   if (!isProtectedRoute(req)) return NextResponse.next();
 
-  // Protected requires sign-in
+  // Protected requires sign-in (unless admin token bypass above)
   const { userId } = await auth();
 
   if (!userId) {
     if (p.startsWith("/api")) {
-      if (!isProbe && !isNoisy) console.log("[AUTH] 401 api", "ip=", ip, req.method, p);
+      console.log("[AUTH] 401 api", "ip=", ip, req.method, p);
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -174,7 +169,7 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
     signInUrl.search = "";
     signInUrl.searchParams.set("redirect_url", sanitizeRedirectUrl(redirectPath));
 
-    if (!isProbe && !isNoisy) console.log("[AUTH] redirect", "ip=", ip, req.method, p, "-> /sign-in");
+    console.log("[AUTH] redirect", "ip=", ip, req.method, p, "-> /sign-in");
     return NextResponse.redirect(signInUrl);
   }
 

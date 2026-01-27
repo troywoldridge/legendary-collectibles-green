@@ -10,93 +10,110 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-type Body = {
-  itemId?: string;
-  variantType?: string; // default "normal"
-  qty?: number; // default 1
-  mode?: "add" | "decrement"; // default "add"
-};
-
-function clampInt(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
+function norm(v: unknown) {
+  return String(v ?? "").trim();
 }
 
-export async function POST(req: NextRequest) {
-  const { userId } = await auth();
-  if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    body = {};
-  }
-
-  const itemId = String(body.itemId ?? "").trim();
-  if (!itemId) return NextResponse.json({ error: "bad_request", message: "Missing itemId" }, { status: 400 });
-
-  const variantType = String(body.variantType ?? "normal").trim() || "normal";
-  const qty = clampInt(Number(body.qty ?? 1) || 1, 1, 99);
-  const mode = body.mode === "decrement" ? "decrement" : "add";
-
-  // add/upsert or decrement
-  if (mode === "add") {
-    await db.execute(sql`
-      INSERT INTO public.user_collection_items (user_id, game, card_id, variant_type, quantity)
-      VALUES (${userId}, 'funko', ${itemId}, ${variantType}, ${qty})
-      ON CONFLICT (user_id, game, card_id, variant_type)
-      DO UPDATE SET quantity = public.user_collection_items.quantity + EXCLUDED.quantity
-    `);
-  } else {
-    await db.execute(sql`
-      UPDATE public.user_collection_items
-      SET quantity = GREATEST(COALESCE(quantity,0) - ${qty}, 0)
-      WHERE user_id = ${userId}
-        AND game = 'funko'
-        AND card_id = ${itemId}
-        AND variant_type = ${variantType}
-    `);
-
-    await db.execute(sql`
-      DELETE FROM public.user_collection_items
-      WHERE user_id = ${userId}
-        AND game = 'funko'
-        AND card_id = ${itemId}
-        AND variant_type = ${variantType}
-        AND COALESCE(quantity,0) <= 0
-    `);
-  }
-
-  return NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+function toInt(v: unknown, fallback: number, max: number) {
+  const n = Number(String(v ?? ""));
+  if (!Number.isFinite(n)) return fallback;
+  const m = Math.floor(n);
+  if (m < 0) return fallback;
+  return Math.min(m, max);
 }
 
-export async function DELETE(req: NextRequest) {
+function normListType(v: unknown): "owned" | "wishlist" | "for_sale" | "" {
+  const s = norm(v).toLowerCase();
+  if (!s) return "";
+  if (s === "owned" || s === "wishlist" || s === "for_sale") return s;
+  return "";
+}
+
+function getAdminToken(req: NextRequest) {
+  return (req.headers.get("x-admin-token") || req.headers.get("X-Admin-Token") || "").trim();
+}
+
+function hasValidAdminToken(req: NextRequest) {
+  const want = (process.env.ADMIN_TOKEN || "").trim();
+  if (!want) return false;
+  const got = getAdminToken(req);
+  return !!got && got === want;
+}
+
+async function getEffectiveUserId(req: NextRequest): Promise<string | null> {
+  // 1) Normal Clerk auth
   const { userId } = await auth();
-  if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (userId) return userId;
+
+  // 2) Admin token impersonation
+  if (hasValidAdminToken(req)) {
+    const uid = norm(req.headers.get("x-user-id") || req.headers.get("X-User-Id"));
+    return uid || null;
+  }
+
+  return null;
+}
+
+export async function GET(req: NextRequest) {
+  const userId = await getEffectiveUserId(req);
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const url = new URL(req.url);
-  const itemId = (url.searchParams.get("itemId") ?? "").trim();
-  const variantType = (url.searchParams.get("variantType") ?? "").trim();
+  const listType = normListType(url.searchParams.get("list_type"));
+  const limit = Math.max(1, toInt(url.searchParams.get("limit"), 50, 200));
+  const offset = toInt(url.searchParams.get("offset"), 0, 5000);
 
-  if (!itemId) return NextResponse.json({ error: "bad_request", message: "Missing itemId" }, { status: 400 });
+  const rows = await db.execute(sql`
+    select
+      c.id as "collectionId",
+      c.user_id as "userId",
+      c.funko_item_id as "funkoItemId",
+      c.list_type as "listType",
+      c.qty,
+      c.purchase_price_cents as "purchasePriceCents",
+      c.notes,
+      c.created_at as "createdAt",
+      c.updated_at as "updatedAt",
 
-  if (variantType) {
-    await db.execute(sql`
-      DELETE FROM public.user_collection_items
-      WHERE user_id = ${userId}
-        AND game = 'funko'
-        AND card_id = ${itemId}
-        AND variant_type = ${variantType}
-    `);
-  } else {
-    // delete all variants for this item
-    await db.execute(sql`
-      DELETE FROM public.user_collection_items
-      WHERE user_id = ${userId}
-        AND game = 'funko'
-        AND card_id = ${itemId}
-    `);
-  }
+      f.name,
+      f.franchise,
+      f.series,
+      f.line,
+      f.number,
+      f.edition,
+      f.variant,
+      f.is_chase as "isChase",
+      f.is_exclusive as "isExclusive",
+      f.exclusivity,
+      f.release_year as "releaseYear",
+      f.upc,
+      f.image_small as "imageSmall",
+      f.image_large as "imageLarge",
+      f.source,
+      f.source_id as "sourceId"
+    from funko_collection_items c
+    join funko_items f on f.id = c.funko_item_id
+    where
+      c.user_id = ${userId}
+      and (${listType} = '' or c.list_type = ${listType})
+    order by c.updated_at desc
+    limit ${limit} offset ${offset};
+  `);
 
-  return NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+  const countRes = await db.execute(sql`
+    select count(*)::int as total
+    from funko_collection_items c
+    where
+      c.user_id = ${userId}
+      and (${listType} = '' or c.list_type = ${listType});
+  `);
+
+  return NextResponse.json({
+    ok: true,
+    listType: listType || null,
+    limit,
+    offset,
+    total: Number((countRes as any).rows?.[0]?.total ?? 0),
+    items: (rows as any).rows ?? [],
+  });
 }
