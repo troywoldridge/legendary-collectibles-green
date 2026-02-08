@@ -1,13 +1,20 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 "use client";
 
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import React, { useMemo, useState } from "react";
+
 import { site } from "@/config/site";
 import { cfUrl, CF_ACCOUNT_HASH, type Variant } from "@/lib/cf";
-import { SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
+import {
+  ClerkLoaded,
+  ClerkLoading,
+  SignedIn,
+  SignedOut,
+  SignInButton,
+  UserButton,
+} from "@clerk/nextjs";
 import { useCartCount } from "@/hooks/useCartCount";
 
 const LOGO_CF_ID = "f7b75c90-dccb-4c37-e603-2bc749caaa00";
@@ -71,7 +78,9 @@ export default function Header() {
                   priority
                   className="object-contain object-left drop-shadow-[0_6px_18px_rgba(0,0,0,0.65)] brightness-110"
                   onError={() =>
-                    setLogoIdx((i) => (i + 1 < logoCandidates.length ? i + 1 : i))
+                    setLogoIdx((i) =>
+                      i + 1 < logoCandidates.length ? i + 1 : i,
+                    )
                   }
                 />
               </div>
@@ -131,27 +140,41 @@ export default function Header() {
               )}
             </Link>
 
-            {/* Auth */}
-            <SignedOut>
-              <SignInButton mode="modal">
-                <button
-                  type="button"
-                  className="hidden h-10 items-center rounded-xl border border-white/15 bg-white/5 px-4 text-sm font-medium text-white transition-colors hover:bg-white/10 lg:flex"
-                >
-                  Sign In
-                </button>
-              </SignInButton>
-            </SignedOut>
+            {/* Auth slot (stable SSR/CSR markup to avoid hydration mismatch) */}
+            <div className="flex items-center">
+              <ClerkLoading>
+                {/* Keep this element present on SSR + first client paint */}
+                <div
+                  className="hidden h-10 w-[96px] items-center rounded-xl border border-white/15 bg-white/5 px-4 lg:flex"
+                  aria-hidden="true"
+                />
+              </ClerkLoading>
 
-            <SignedIn>
-              <UserButton
-                appearance={{
-                  elements: { userButtonAvatarBox: "h-10 w-10 ring-2 ring-white/25" },
-                }}
-                userProfileMode="modal"
-                afterSignOutUrl="/"
-              />
-            </SignedIn>
+              <ClerkLoaded>
+                <SignedOut>
+                  <SignInButton mode="modal">
+                    <button
+                      type="button"
+                      className="hidden h-10 items-center rounded-xl border border-white/15 bg-white/5 px-4 text-sm font-medium text-white transition-colors hover:bg-white/10 lg:flex"
+                    >
+                      Sign In
+                    </button>
+                  </SignInButton>
+                </SignedOut>
+
+                <SignedIn>
+                  <UserButton
+                    appearance={{
+                      elements: {
+                        userButtonAvatarBox: "h-10 w-10 ring-2 ring-white/25",
+                      },
+                    }}
+                    userProfileMode="modal"
+                    afterSignOutUrl="/"
+                  />
+                </SignedIn>
+              </ClerkLoaded>
+            </div>
 
             {/* Mobile menu button (visual only for now) */}
             <button
@@ -165,7 +188,12 @@ export default function Header() {
                 viewBox="0 0 24 24"
                 stroke="currentColor"
               >
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 6h16M4 12h16M4 18h16"
+                />
               </svg>
             </button>
           </div>
@@ -179,29 +207,44 @@ export default function Header() {
             </NavLink>
 
             <NavDropdown label="Pokémon">
-              <DropdownLink href="/categories/pokemon/sets">Pokémon Sets</DropdownLink>
-              <DropdownLink href="/categories/pokemon/cards">Pokémon Cards</DropdownLink>
+              <DropdownLink href="/categories/pokemon/sets">
+                Pokémon Sets
+              </DropdownLink>
+              <DropdownLink href="/categories/pokemon/cards">
+                Pokémon Cards
+              </DropdownLink>
             </NavDropdown>
 
             <NavDropdown label="Yu-Gi-Oh!">
-              <DropdownLink href="/categories/yugioh/sets">Yu-Gi-Oh! Sets</DropdownLink>
-              <DropdownLink href="/categories/yugioh/cards">Yu-Gi-Oh! Cards</DropdownLink>
+              <DropdownLink href="/categories/yugioh/sets">
+                Yu-Gi-Oh! Sets
+              </DropdownLink>
+              <DropdownLink href="/categories/yugioh/cards">
+                Yu-Gi-Oh! Cards
+              </DropdownLink>
             </NavDropdown>
 
             <NavDropdown label="Magic: The Gathering">
               <DropdownLink href="/categories/mtg/sets">MTG Sets</DropdownLink>
-              <DropdownLink href="/categories/mtg/cards">MTG Cards</DropdownLink>
+              <DropdownLink href="/categories/mtg/cards">
+                MTG Cards
+              </DropdownLink>
             </NavDropdown>
 
             <NavDropdown label="Funko">
-              <DropdownLink href="/categories/funko/items">Funko (Catalog)</DropdownLink>
+              <DropdownLink href="/categories/funko/items">
+                Funko (Catalog)
+              </DropdownLink>
               <DropdownLink href="/shop/funko/all">Shop Funko</DropdownLink>
             </NavDropdown>
 
-            {/* ✅ FIXED: Figures & Collectibles is COLLECTION/CATALOG first */}
             <NavDropdown label="Figures & Collectibles">
-              <DropdownLink href="/categories/collectibles/items">Figures & Collectibles (Catalog)</DropdownLink>
-              <DropdownLink href="/shop/collectibles/all">Shop Figures & Collectibles</DropdownLink>
+              <DropdownLink href="/categories/collectibles/items">
+                Figures & Collectibles (Catalog)
+              </DropdownLink>
+              <DropdownLink href="/shop/collectibles/all">
+                Shop Figures & Collectibles
+              </DropdownLink>
             </NavDropdown>
 
             <NavLink href="/psa" active={isActive("/psa")}>
@@ -232,8 +275,18 @@ export default function Header() {
               className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-white/80 hover:text-white"
               aria-label="Search"
             >
-              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 2 2 0 0114 0z" />
+              <svg
+                className="h-5 w-5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 2 2 0 0114 0z"
+                />
               </svg>
             </button>
           </form>
@@ -260,7 +313,9 @@ function NavLink({
         "transition-all duration-200",
         "rounded-lg",
         "focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50",
-        active ? "text-white bg-white/6" : "text-white/80 hover:text-white hover:bg-white/6",
+        active
+          ? "text-white bg-white/6"
+          : "text-white/80 hover:text-white hover:bg-white/6",
       ].join(" ")}
     >
       {children}
@@ -277,25 +332,42 @@ function NavLink({
   );
 }
 
-function NavDropdown({ label, children }: { label: string; children: React.ReactNode }) {
+function NavDropdown({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
   const [open, setOpen] = useState(false);
 
   return (
-    <div className="group relative" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+    <div
+      className="group relative"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
       <button className="flex h-12 items-center gap-1 px-4 text-sm font-medium text-white/80 transition-colors hover:text-white">
         {label}
         <svg
-          className={`h-4 w-4 transition-transform duration-200 ${open ? "rotate-180" : "group-hover:translate-y-px"}`}
+          className={`h-4 w-4 transition-transform duration-200 ${
+            open ? "rotate-180" : "group-hover:translate-y-px"
+          }`}
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
         >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M19 9l-7 7-7-7"
+          />
         </svg>
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-50 min-w-[240px] overflow-hidden rounded-xl border border-white/12 bg-white/6 backdrop-blur-xl shadow-xl">
+        <div className="absolute left-0 top-full z-50 min-w-60 overflow-hidden rounded-xl border border-white/12 bg-white/6 backdrop-blur-xl shadow-xl">
           <div className="py-2">{children}</div>
         </div>
       )}
@@ -303,7 +375,13 @@ function NavDropdown({ label, children }: { label: string; children: React.React
   );
 }
 
-function DropdownLink({ href, children }: { href: string; children: React.ReactNode }) {
+function DropdownLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: React.ReactNode;
+}) {
   return (
     <Link
       href={href}

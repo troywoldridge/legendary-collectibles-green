@@ -2,21 +2,25 @@
 import "server-only";
 
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { db } from "@/lib/db";
 import { sql } from "drizzle-orm";
 import { baseShippingCentsForWeight } from "@/lib/shipping/rates";
 import { insuranceCentsForShipment } from "@/lib/shipping/insurance";
 import CheckoutButton from "@/app/cart/CheckoutButton";
+import CheckoutWithEmail from "./CheckoutWithEmail";
+
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const CART_COOKIE = "lc_cart_id";
 
 function money(cents: number): string {
   const v = (Number(cents || 0) / 100).toFixed(2);
   return `$${v}`;
 }
-
 function toNumber(v: unknown): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -25,23 +29,27 @@ function toInt(v: unknown, fallback = 0): number {
   const n = Math.floor(toNumber(v));
   return Number.isFinite(n) ? n : fallback;
 }
+function s(v: unknown) {
+  return String(v ?? "").trim();
+}
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v,
+  );
+}
 
 export default async function CartReviewPage() {
-  const { userId } = await auth();
-
-  if (!userId) {
-    return (
-      <main className="mx-auto max-w-4xl px-4 py-10">
-        <h1 className="text-2xl font-semibold">Review your cart</h1>
-        <p className="mt-3 text-sm opacity-80">Please sign in to review your cart.</p>
-        <div className="mt-6">
-          <Link className="underline" href="/sign-in">
-            Sign in
-          </Link>
-        </div>
-      </main>
-    );
+  // Optional auth (guest allowed)
+  let userId: string | null = null;
+  try {
+    const a = await auth();
+    userId = a?.userId || null;
+  } catch {
+    userId = null;
   }
+
+  const jar = await cookies();
+  const cookieCartId = s(jar.get(CART_COOKIE)?.value);
 
   // Keep review math consistent with /api/checkout/sessions
   const FREE_SHIPPING_THRESHOLD_CENTS = Math.max(
@@ -49,32 +57,37 @@ export default async function CartReviewPage() {
     toInt(process.env.FREE_SHIPPING_THRESHOLD_CENTS, 15000),
   );
 
-  // Get latest open cart (create one if missing)
-  const cartRes = await db.execute(sql`
-    SELECT id
-    FROM carts
-    WHERE user_id = ${userId}
-      AND status = 'open'
-    ORDER BY updated_at DESC, created_at DESC
-    LIMIT 1
-  `);
-
-  let cartId = (cartRes as any)?.rows?.[0]?.id as string | undefined;
-
-  if (!cartId) {
-    const created = await db.execute(sql`
-      INSERT INTO carts (user_id, status)
-      VALUES (${userId}, 'open')
-      RETURNING id
+  // Determine cartId (cookie first; fallback to signed-in user's open cart)
+  let cartId = "";
+  if (cookieCartId && isUuid(cookieCartId)) {
+    cartId = cookieCartId;
+  } else if (userId) {
+    const cartRes = await db.execute(sql`
+      SELECT id
+      FROM carts
+      WHERE user_id = ${userId}
+        AND coalesce(status, 'open') = 'open'
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 1
     `);
-    cartId = (created as any)?.rows?.[0]?.id as string | undefined;
+    cartId = (cartRes as any)?.rows?.[0]?.id ? String((cartRes as any).rows[0].id) : "";
   }
 
-  if (!cartId) {
+  if (!cartId || !isUuid(cartId)) {
     return (
       <main className="mx-auto max-w-4xl px-4 py-10">
-        <h1 className="text-2xl font-semibold">Review your cart</h1>
-        <p className="mt-3 text-sm opacity-80">Could not load your cart. Please try again.</p>
+        <h1 className="text-2xl font-semibold">Review your order</h1>
+        <p className="mt-3 text-sm opacity-80">
+          Your cart is empty.
+        </p>
+        <div className="mt-6 flex gap-3">
+          <Link className="underline" href="/shop">
+            Continue shopping
+          </Link>
+          <Link className="underline" href="/cart">
+            Go to cart
+          </Link>
+        </div>
       </main>
     );
   }
@@ -117,7 +130,7 @@ export default async function CartReviewPage() {
   if (!rows.length) {
     return (
       <main className="mx-auto max-w-4xl px-4 py-10">
-        <h1 className="text-2xl font-semibold">Review your cart</h1>
+        <h1 className="text-2xl font-semibold">Review your order</h1>
         <p className="mt-3 text-sm opacity-80">Your cart is empty.</p>
         <div className="mt-6 flex gap-3">
           <Link className="underline" href="/shop">
@@ -146,7 +159,6 @@ export default async function CartReviewPage() {
     const shippingClass = r.shipping_class ? String(r.shipping_class) : null;
     const w = toNumber(r.shipping_weight_lbs);
 
-    // fallback weights if any product is missing weight
     const fallbackW =
       String(shippingClass || "").toLowerCase() === "graded"
         ? 0.5
@@ -163,16 +175,13 @@ export default async function CartReviewPage() {
     insuranceItems.push({ shippingClass, qty });
   }
 
-  // Match checkout sessions logic: free shipping threshold applies to base shipping (not insurance)
   const freeShipping = subtotalCents >= FREE_SHIPPING_THRESHOLD_CENTS;
 
   const baseShippingCents = freeShipping ? 0 : baseShippingCentsForWeight(totalWeight);
   const insuranceCents = insuranceCentsForShipment(insuranceItems);
   const shippingTotalCents = baseShippingCents + insuranceCents;
 
-  // Taxes: leave 0 for now (Stripe will calculate real tax at checkout)
   const taxCents = 0;
-
   const estimatedTotalCents = subtotalCents + shippingTotalCents + taxCents;
 
   return (
@@ -183,9 +192,18 @@ export default async function CartReviewPage() {
           <p className="mt-2 text-sm opacity-80">
             Shipping is estimated using weight + your USPS Ground Advantage tiers.
           </p>
-          <p className="mt-1 text-xs opacity-70">
-            Tax is calculated at checkout.
-          </p>
+          <p className="mt-1 text-xs opacity-70">Tax is calculated at checkout.</p>
+
+          {!userId && (
+            <p className="mt-3 text-sm opacity-80">
+              Checking out as a guest. You’ll enter email + shipping at checkout.
+              {" "}
+              <Link className="underline" href="/sign-in">
+                Sign in
+              </Link>{" "}
+              if you want this order tied to your account.
+            </p>
+          )}
         </div>
 
         <div className="flex gap-3">
@@ -282,9 +300,6 @@ export default async function CartReviewPage() {
               <span>{money(estimatedTotalCents)}</span>
             </div>
 
-            
-
-
             {freeShipping && (
               <div className="text-xs opacity-70">
                 Free shipping applied (subtotal ≥ {money(FREE_SHIPPING_THRESHOLD_CENTS)}).
@@ -293,15 +308,15 @@ export default async function CartReviewPage() {
           </div>
 
           <div className="mt-5 grid gap-2">
-            <CheckoutButton mode="checkout" />
+  <CheckoutWithEmail />
 
+  {insuranceCents > 0 && (
+    <div className="text-xs opacity-70">
+      Insurance is automatically added for graded cards.
+    </div>
+  )}
+</div>
 
-            {insuranceCents > 0 && (
-              <div className="text-xs opacity-70">
-                Insurance is automatically added for graded cards.
-              </div>
-            )}
-          </div>
         </aside>
       </div>
     </main>

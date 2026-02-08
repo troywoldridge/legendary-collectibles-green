@@ -2,6 +2,7 @@
 import "server-only";
 
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import Stripe from "stripe";
 import { sql } from "drizzle-orm";
@@ -13,6 +14,8 @@ import { insuranceCentsForShipment } from "@/lib/shipping/insurance";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+const CART_COOKIE = "lc_cart_id";
 
 function s(v: unknown): string {
   return String(v ?? "").trim();
@@ -36,12 +39,17 @@ function toNumber(v: unknown): number {
   const x = Number(v);
   return Number.isFinite(x) ? x : 0;
 }
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v,
+  );
+}
 
 function getSiteUrl() {
   return s(
     process.env.NEXT_PUBLIC_SITE_URL ||
       process.env.SITE_URL ||
-      "https://legendary-collectibles.com"
+      "https://legendary-collectibles.com",
   ).replace(/\/+$/, "");
 }
 
@@ -51,7 +59,7 @@ function getStripe() {
   return new Stripe(key, { apiVersion: "2025-10-29.clover" });
 }
 
-type CartRow = { id: string };
+type CartRow = { id: string; user_id: string | null };
 
 type LineRow = {
   productId: string;
@@ -63,38 +71,80 @@ type LineRow = {
   shippingClass: string | null;
 };
 
+async function readJsonBody(req: Request) {
+  const ct = (req.headers.get("content-type") || "").toLowerCase();
+  if (!ct.includes("application/json")) return null;
+  return await req.json().catch(() => null);
+}
+
 export async function POST(req: Request) {
   try {
     const stripe = getStripe();
     const SITE_URL = getSiteUrl();
 
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    // Optional auth (guest allowed)
+    let userId: string | null = null;
+    try {
+      const a = await auth();
+      userId = a?.userId || null;
+    } catch {
+      userId = null;
     }
+
+    const jar = await cookies();
+    const cookieCartId = s(jar.get(CART_COOKIE)?.value);
 
     const FREE_SHIPPING_THRESHOLD_CENTS = toInt(
       process.env.FREE_SHIPPING_THRESHOLD_CENTS,
-      15000
+      15000,
     );
     const ALLOW_INTERNATIONAL = toBool(process.env.ALLOW_INTERNATIONAL, false);
 
-    // 1) active cart for this user
-    const cartRes = await db.execute<CartRow>(sql`
-      select id
+    // Optional: allow client to pass email (nice for guests), but not required
+    const body = await readJsonBody(req);
+    const customerEmail = s(body?.email);
+
+    // 1) determine cartId (cookie first, then signed-in user's open cart)
+    let cartId = "";
+    if (cookieCartId && isUuid(cookieCartId)) {
+      cartId = cookieCartId;
+    } else if (userId) {
+      const cartRes = await db.execute<CartRow>(sql`
+        select id, user_id
+        from carts
+        where user_id = ${userId}
+          and coalesce(status, 'open') = 'open'
+        order by updated_at desc nulls last, created_at desc
+        limit 1
+      `);
+
+      cartId = s(cartRes.rows?.[0]?.id);
+    }
+
+    if (!cartId || !isUuid(cartId)) {
+      return NextResponse.json({ error: "No active cart" }, { status: 400 });
+    }
+
+    // 1.1) validate cart exists + open, and is not someone else’s cart (if signed in)
+    const cartCheck = await db.execute<CartRow>(sql`
+      select id, user_id
       from carts
-      where user_id = ${userId}
+      where id = ${cartId}::uuid
         and coalesce(status, 'open') = 'open'
-      order by updated_at desc nulls last, created_at desc
       limit 1
     `);
 
-    const cartId = s(cartRes.rows?.[0]?.id);
-    if (!cartId) {
+    const cartRow = cartCheck.rows?.[0];
+    if (!cartRow?.id) {
       return NextResponse.json({ error: "Cart is empty" }, { status: 400 });
     }
 
-    // 2) purchasable lines
+    const cartOwner = s(cartRow.user_id);
+    if (userId && cartOwner && cartOwner !== userId) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    // 2) purchasable lines (cookie cart)
     const linesRes = await db.execute<LineRow>(sql`
       select
         p.id as "productId",
@@ -119,7 +169,7 @@ export async function POST(req: Request) {
     if (!rows.length) {
       return NextResponse.json(
         { error: "No purchasable items in cart" },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -142,12 +192,12 @@ export async function POST(req: Request) {
         sc === "graded"
           ? 0.5
           : sc === "etb"
-          ? 2.0
-          : sc === "booster_box"
-          ? 3.0
-          : sc === "accessory"
-          ? 0.5
-          : 0.25;
+            ? 2.0
+            : sc === "booster_box"
+              ? 3.0
+              : sc === "accessory"
+                ? 0.5
+                : 0.25;
 
       totalWeight += (w > 0 ? w : fallbackW) * qty;
       insuranceItems.push({ shippingClass, qty });
@@ -215,12 +265,16 @@ export async function POST(req: Request) {
         title: s(r.title) || "Item",
         shippingClass: r.shippingClass ? String(r.shippingClass) : null,
         shippingWeightLbs: r.shippingWeightLbs ? Number(r.shippingWeightLbs) : null,
-      }))
+      })),
     );
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       line_items,
+
+      // Guest-safe + signed-in safe:
+      // Checkout will collect email if not provided; passing customer_email helps.
+      ...(customerEmail ? { customer_email: customerEmail } : {}),
 
       // Collect address
       shipping_address_collection: { allowed_countries },
@@ -234,7 +288,8 @@ export async function POST(req: Request) {
 
       metadata: {
         cartId: String(cartId),
-        userId: String(userId),
+        userId: userId ?? "",
+        isGuest: String(!userId),
         items_json,
         subtotalCents: String(Math.max(0, Math.floor(subtotalCents))),
         shippingModel: "weight_tiers+insurance_line_items",
@@ -248,16 +303,13 @@ export async function POST(req: Request) {
     });
 
     const url = session.url;
-
     if (!url) {
       return NextResponse.json(
         { error: "Checkout failed: missing Stripe URL" },
-        { status: 500 }
+        { status: 500 },
       );
     }
 
-    // If request came from a normal <form> submit, redirect the browser.
-    // If it came from fetch(), return JSON so the client can do window.location.assign().
     const accept = (req.headers.get("accept") || "").toLowerCase();
     const wantsHtml = accept.includes("text/html");
 
@@ -270,7 +322,7 @@ export async function POST(req: Request) {
     console.error("[api/checkout/sessions] error", err);
     return NextResponse.json(
       { error: s(err?.message || err) || "Internal Server Error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
