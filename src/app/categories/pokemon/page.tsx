@@ -1,5 +1,23 @@
 // src/app/categories/pokemon/page.tsx
-import { redirect } from "next/navigation";
+"use client";
+
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+
 export default function Page() {
-  redirect("/categories/pokemon/sets");
+  const router = useRouter();
+
+  useEffect(() => {
+    router.replace("/categories/pokemon/sets");
+  }, [router]);
+
+  return (
+    <main style={{ padding: 24 }}>
+      <p>Redirecting…</p>
+      <p>
+        If you aren’t redirected automatically,{" "}
+        <a href="/categories/pokemon/sets">click here</a>.
+      </p>
+    </main>
+  );
 }

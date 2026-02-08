@@ -86,3 +86,6 @@ legendary_neon.sql
 !drizzle/**
 
 .env*
+
+# local build artifacts
+Build/

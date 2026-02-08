@@ -7,18 +7,19 @@ import { auth } from "@clerk/nextjs/server";
 import Stripe from "stripe";
 
 import { db } from "@/lib/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { cart_lines } from "@/lib/db/schema/cart";
 import { products } from "@/lib/db/schema/shop";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 const CART_COOKIE = "lc_cart_id";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
-  apiVersion: "2025-10-29.clover",
-});
+function s(v: unknown) {
+  return String(v ?? "").trim();
+}
 
 function json(data: any, status = 200) {
   return NextResponse.json(data, { status });
@@ -36,14 +37,18 @@ function isUuid(v: string) {
   );
 }
 
+function getStripe() {
+  const key = s(process.env.STRIPE_SECRET_KEY);
+  if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
+  return new Stripe(key, { apiVersion: "2025-10-29.clover" });
+}
+
 export async function POST(req: Request) {
   try {
-    if (!process.env.STRIPE_SECRET_KEY) {
-      return json({ error: "STRIPE_SECRET_KEY is not set" }, 500);
-    }
+    const stripe = getStripe();
 
     const jar = await cookies();
-    const cartId = jar.get(CART_COOKIE)?.value?.trim();
+    const cartId = s(jar.get(CART_COOKIE)?.value);
 
     if (!cartId || !isUuid(cartId)) {
       return json({ error: "No active cart" }, 400);
@@ -130,7 +135,6 @@ export async function POST(req: Request) {
 
     // If anything is wrong, do NOT charge
     if (issues.length) {
-      // Optional: self-heal here too (clamp / delete) — but safer to just return issues
       return json(
         {
           error: "Cart validation failed",
@@ -179,6 +183,6 @@ export async function POST(req: Request) {
     });
   } catch (err: any) {
     console.error("[create-payment-intent] error", err);
-    return json({ error: err?.message || "Failed to create payment intent" }, 500);
+    return json({ error: s(err?.message || err) || "Failed to create payment intent" }, 500);
   }
 }

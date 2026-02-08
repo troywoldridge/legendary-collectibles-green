@@ -7,6 +7,7 @@ import { db } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function s(v: unknown): string {
   return String(v ?? "").trim();
@@ -16,12 +17,13 @@ function toInt(v: unknown, fallback = 0): number {
   return Number.isFinite(n) ? Math.floor(n) : fallback;
 }
 
-const STRIPE_SECRET_KEY = s(process.env.STRIPE_SECRET_KEY);
-const STRIPE_WEBHOOK_SECRET = s(process.env.STRIPE_WEBHOOK_SECRET);
-
-const stripe = new Stripe(STRIPE_SECRET_KEY, {
-  apiVersion: "2025-10-29.clover",
-});
+function getStripe() {
+  const key = s(process.env.STRIPE_SECRET_KEY);
+  if (!key) throw new Error("Missing STRIPE_SECRET_KEY");
+  return new Stripe(key, {
+    apiVersion: "2025-10-29.clover",
+  });
+}
 
 type ItemsJsonRow = {
   productId: string;
@@ -34,22 +36,30 @@ type ItemsJsonRow = {
 
 export async function POST(req: Request) {
   try {
-    if (!STRIPE_SECRET_KEY) {
-      return NextResponse.json({ error: "Missing STRIPE_SECRET_KEY" }, { status: 500 });
-    }
-    if (!STRIPE_WEBHOOK_SECRET) {
-      return NextResponse.json({ error: "Missing STRIPE_WEBHOOK_SECRET" }, { status: 500 });
+    const webhookSecret = s(process.env.STRIPE_WEBHOOK_SECRET);
+    if (!webhookSecret) {
+      return NextResponse.json(
+        { error: "Missing STRIPE_WEBHOOK_SECRET" },
+        { status: 500 }
+      );
     }
 
     const sig = req.headers.get("stripe-signature");
-    if (!sig) return NextResponse.json({ error: "Missing stripe-signature" }, { status: 400 });
+    if (!sig) {
+      return NextResponse.json(
+        { error: "Missing stripe-signature" },
+        { status: 400 }
+      );
+    }
 
     // IMPORTANT: use RAW body for signature verification
     const rawBody = await req.text();
 
+    const stripe = getStripe();
+
     let event: Stripe.Event;
     try {
-      event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
+      event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
     } catch (err: any) {
       console.error("[stripe/webhook] signature error", err?.message || err);
       return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
@@ -109,7 +119,10 @@ export async function POST(req: Request) {
     // If items_json missing, don't create an empty order.
     if (!items.length) {
       console.error("[stripe/webhook] missing items_json; session:", stripeSessionId);
-      return NextResponse.json({ error: "Missing items_json in session metadata" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Missing items_json in session metadata" },
+        { status: 400 }
+      );
     }
 
     // pull first image per product for order_items.image_url
@@ -261,7 +274,7 @@ export async function POST(req: Request) {
     console.error("[stripe/webhook] error", err);
     return NextResponse.json(
       { error: String(err?.message || err) || "Webhook error" },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }

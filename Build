@@ -1,0 +1,59 @@
+import { NextRequest, NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// POST handler must match Next's type: params is a Promise<{ id: string }>
+export async function POST(
+    request: NextRequest,
+    context: { params: Promise<{ id: string }> }
+) {
+    // Await params because Next's types require it
+    const { id } = await context.params;
+
+    // Strong validation: non-empty, reasonable max length, safe chars
+    if (!id || typeof id !== "string") {
+        return NextResponse.json({ error: "Missing session id" }, { status: 400 });
+    }
+    if (id.length > 255) {
+        return NextResponse.json({ error: "Session id too long" }, { status: 400 });
+    }
+    const SAFE_ID_RE = /^[A-Za-z0-9._-]+$/;
+    if (!SAFE_ID_RE.test(id)) {
+        return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+    }
+
+    // Read stripe secret at runtime only (do not do this at module scope)
+    const secret = process.env.STRIPE_SECRET_KEY;
+    if (!secret) {
+        // Configuration/server error
+        return NextResponse.json({ error: "Stripe secret not configured" }, { status: 500 });
+    }
+
+    try {
+        // Dynamic import to avoid importing Stripe at module evaluation time
+        const StripePkg = await import("stripe");
+        const Stripe = StripePkg.default;
+        const stripe = new Stripe(secret, { apiVersion: "2025-10-29.clover" });
+
+        // Expire the checkout session
+        const expired = await stripe.checkout.sessions.expire(id);
+
+        // Return minimal success info (do not leak secrets)
+        return NextResponse.json(
+            { success: true, session: { id: expired.id, status: expired.status } },
+            { status: 200 }
+        );
+    } catch (err: unknown) {
+        // Handle Stripe 404 / not found explicitly
+        const anyErr = err as any;
+        if (anyErr && typeof anyErr === "object" && "statusCode" in anyErr) {
+            if (anyErr.statusCode === 404) {
+                return NextResponse.json({ error: "Session not found" }, { status: 404 });
+            }
+        }
+
+        // Unexpected error
+        return NextResponse.json({ error: "Unexpected error" }, { status: 500 });
+    }
+}

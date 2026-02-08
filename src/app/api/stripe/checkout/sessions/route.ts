@@ -1,3 +1,4 @@
+// src/app/api/stripe/checkout/sessions/route.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
 
@@ -5,7 +6,7 @@ import Stripe from "stripe";
 import { NextRequest } from "next/server";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
-import { stripe, baseUrlFromReq, parseJson, errorJson } from "../../_shared";
+import { getStripe, baseUrlFromReq, parseJson, errorJson } from "../../_shared";
 import { db } from "@/lib/db";
 import { carts, cart_lines } from "@/lib/db/schema/cart";
 import { products } from "@/lib/db/schema/shop";
@@ -29,7 +30,9 @@ function clampQty(n: unknown) {
 // strict UUID check (matches what you used in webhook)
 function isUuid(v: unknown): v is string {
   if (typeof v !== "string") return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v
+  );
 }
 
 async function buildLineItemsFromCart(cartId: string, currency: string) {
@@ -41,10 +44,7 @@ async function buildLineItemsFromCart(cartId: string, currency: string) {
     })
     .from(cart_lines)
     .where(
-      and(
-        eq(cart_lines.cart_id, cartId),
-        sql`${cart_lines.listing_id} is not null`
-      )
+      and(eq(cart_lines.cart_id, cartId), sql`${cart_lines.listing_id} is not null`)
     );
 
   const productIds = lines
@@ -74,9 +74,7 @@ async function buildLineItemsFromCart(cartId: string, currency: string) {
   for (const l of lines) {
     const pid = l.listingId as string;
     const p = byId.get(pid);
-    if (!p) {
-      throw new Error(`Cart contains missing product id: ${pid}`);
-    }
+    if (!p) throw new Error(`Cart contains missing product id: ${pid}`);
 
     const qty = clampQty(l.qty);
     const unitCents = Number(p.priceCents ?? 0);
@@ -113,13 +111,14 @@ async function buildLineItemsFromCart(cartId: string, currency: string) {
 }
 
 // POST /api/stripe/checkout/sessions
-export async function POST(req: NextRequest) {
+export async function POST(req: NextRequest): Promise<Response> {
   try {
     const body = await parseJson<any>(req);
 
     const base = baseUrlFromReq(req);
     const success_url =
-      body?.success_url ?? `${base}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
+      body?.success_url ??
+      `${base}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
     const cancel_url = body?.cancel_url ?? `${base}/checkout/canceled`;
 
     const currency =
@@ -144,7 +143,9 @@ export async function POST(req: NextRequest) {
       .where(eq(carts.id, cartId))
       .limit(1);
 
-    if (!c.length) return Response.json({ error: "Cart not found" }, { status: 404 });
+    if (!c.length) {
+      return Response.json({ error: "Cart not found" }, { status: 404 });
+    }
 
     // ✅ ALWAYS build from DB (ignore any provided line_items)
     const { line_items, snapshot } = await buildLineItemsFromCart(cartId, currency);
@@ -155,11 +156,15 @@ export async function POST(req: NextRequest) {
       throw new Error("Failed to build items_json snapshot");
     }
 
+    // ✅ IMPORTANT: Stripe client must be created at request-time
+    const stripe = getStripe();
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       success_url,
       cancel_url,
-      currency,
+      // NOTE: In Stripe Checkout, currency is typically set via price_data.currency per line item.
+      // Keeping this out avoids compatibility issues. Your line items already include currency.
       line_items,
       metadata: {
         cartId,

@@ -12,6 +12,7 @@ import { insuranceCentsForShipment } from "@/lib/shipping/insurance";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function s(v: unknown): string {
   return String(v ?? "").trim();
@@ -36,16 +37,19 @@ function toNumber(v: unknown): number {
   return Number.isFinite(x) ? x : 0;
 }
 
-const STRIPE_SECRET_KEY = s(process.env.STRIPE_SECRET_KEY);
-const SITE_URL = s(
-  process.env.NEXT_PUBLIC_SITE_URL ||
-    process.env.SITE_URL ||
-    "https://legendary-collectibles.com",
-).replace(/\/+$/, "");
+function getSiteUrl() {
+  return s(
+    process.env.NEXT_PUBLIC_SITE_URL ||
+      process.env.SITE_URL ||
+      "https://legendary-collectibles.com"
+  ).replace(/\/+$/, "");
+}
 
-const stripe = new Stripe(STRIPE_SECRET_KEY, {
-  apiVersion: "2025-10-29.clover",
-});
+function getStripe() {
+  const key = s(process.env.STRIPE_SECRET_KEY);
+  if (!key) throw new Error("Stripe not configured (missing STRIPE_SECRET_KEY)");
+  return new Stripe(key, { apiVersion: "2025-10-29.clover" });
+}
 
 type CartRow = { id: string };
 
@@ -60,14 +64,9 @@ type LineRow = {
 };
 
 export async function POST(req: Request) {
-
   try {
-    if (!STRIPE_SECRET_KEY) {
-      return NextResponse.json(
-        { error: "Stripe not configured (missing STRIPE_SECRET_KEY)" },
-        { status: 500 },
-      );
-    }
+    const stripe = getStripe();
+    const SITE_URL = getSiteUrl();
 
     const { userId } = await auth();
     if (!userId) {
@@ -76,7 +75,7 @@ export async function POST(req: Request) {
 
     const FREE_SHIPPING_THRESHOLD_CENTS = toInt(
       process.env.FREE_SHIPPING_THRESHOLD_CENTS,
-      15000,
+      15000
     );
     const ALLOW_INTERNATIONAL = toBool(process.env.ALLOW_INTERNATIONAL, false);
 
@@ -120,7 +119,7 @@ export async function POST(req: Request) {
     if (!rows.length) {
       return NextResponse.json(
         { error: "No purchasable items in cart" },
-        { status: 400 },
+        { status: 400 }
       );
     }
 
@@ -138,12 +137,17 @@ export async function POST(req: Request) {
       const shippingClass = r.shippingClass ? String(r.shippingClass) : null;
       const w = toNumber(r.shippingWeightLbs);
 
+      const sc = String(shippingClass || "").toLowerCase();
       const fallbackW =
-        String(shippingClass || "").toLowerCase() === "graded" ? 0.5 :
-        String(shippingClass || "").toLowerCase() === "etb" ? 2.0 :
-        String(shippingClass || "").toLowerCase() === "booster_box" ? 3.0 :
-        String(shippingClass || "").toLowerCase() === "accessory" ? 0.5 :
-        0.25;
+        sc === "graded"
+          ? 0.5
+          : sc === "etb"
+          ? 2.0
+          : sc === "booster_box"
+          ? 3.0
+          : sc === "accessory"
+          ? 0.5
+          : 0.25;
 
       totalWeight += (w > 0 ? w : fallbackW) * qty;
       insuranceItems.push({ shippingClass, qty });
@@ -211,7 +215,7 @@ export async function POST(req: Request) {
         title: s(r.title) || "Item",
         shippingClass: r.shippingClass ? String(r.shippingClass) : null,
         shippingWeightLbs: r.shippingWeightLbs ? Number(r.shippingWeightLbs) : null,
-      })),
+      }))
     );
 
     const session = await stripe.checkout.sessions.create({
@@ -243,12 +247,12 @@ export async function POST(req: Request) {
       },
     });
 
-        const url = session.url;
+    const url = session.url;
 
     if (!url) {
       return NextResponse.json(
         { error: "Checkout failed: missing Stripe URL" },
-        { status: 500 },
+        { status: 500 }
       );
     }
 
@@ -262,12 +266,11 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({ url }, { status: 200 });
-
   } catch (err: any) {
     console.error("[api/checkout/sessions] error", err);
     return NextResponse.json(
       { error: s(err?.message || err) || "Internal Server Error" },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }

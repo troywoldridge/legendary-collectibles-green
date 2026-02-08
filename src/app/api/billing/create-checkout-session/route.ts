@@ -1,26 +1,36 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import "server-only";
+
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { auth, clerkClient } from "@clerk/nextjs/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+function s(v: unknown) {
+  return String(v ?? "").trim();
+}
 
 /** Env guard */
 function requireEnv(name: string): string {
-  const v = process.env[name];
+  const v = s(process.env[name]);
   if (!v) throw new Error(`Missing env: ${name}`);
   return v;
 }
 
 /** Build absolute base URL from request headers or APP_URL fallback */
 function getBaseUrlFromRequest(req: NextRequest): string {
-  const fromEnv = process.env.APP_URL?.trim();
+  const fromEnv = s(process.env.APP_URL);
   if (fromEnv) return fromEnv.replace(/\/+$/, "");
 
   const h = req.headers;
-  const proto = h.get("x-forwarded-proto") ?? (req.nextUrl.protocol.replace(":", "") || "https");
+  const proto =
+    h.get("x-forwarded-proto") ??
+    (req.nextUrl.protocol ? req.nextUrl.protocol.replace(":", "") : "https") ??
+    "https";
+
   const host =
     h.get("x-forwarded-host") ??
     h.get("host") ??
@@ -36,12 +46,19 @@ async function getClerkClientCompat(): Promise<any> {
   return typeof cc === "function" ? await cc() : cc;
 }
 
-async function createSessionForUser(userId: string, baseUrl: string) {
+function getStripe(): Stripe {
   const STRIPE_SECRET_KEY = requireEnv("STRIPE_SECRET_KEY");
-  const STRIPE_PRICE_PRO = requireEnv("STRIPE_PRICE_PRO"); // should be a TEST recurring price for test runs
-  const stripe = new Stripe(STRIPE_SECRET_KEY);
+  // If you want a pinned API version, do it here:
+  return new Stripe(STRIPE_SECRET_KEY, {
+    // apiVersion: "2025-10-29.clover",
+  });
+}
 
-  // --- Optional preflight: catch the #1 error (wrong price or wrong mode) ---
+async function createSessionForUser(userId: string, baseUrl: string) {
+  const STRIPE_PRICE_PRO = requireEnv("STRIPE_PRICE_PRO"); // recurring price id
+  const stripe = getStripe();
+
+  // --- Optional preflight: catch common errors early (wrong price or wrong mode) ---
   try {
     const price = await stripe.prices.retrieve(STRIPE_PRICE_PRO);
     if (price.type !== "recurring") {
@@ -53,7 +70,6 @@ async function createSessionForUser(userId: string, baseUrl: string) {
       throw new Error(`STRIPE_PRICE_PRO (${price.id}) is inactive.`);
     }
   } catch (e: any) {
-    // If this throws “No such price”, you grabbed a LIVE id while using a TEST key (or vice-versa).
     const msg = e?.raw?.message || e?.message || String(e);
     console.error("[create-checkout-session] price preflight failed:", msg);
     throw new Error(msg);
@@ -86,7 +102,6 @@ async function createSessionForUser(userId: string, baseUrl: string) {
     if (!session.url) throw new Error("Stripe Checkout did not return a URL");
     return session.url;
   } catch (e: any) {
-    // Bubble a clear message upward so handler can return it to you
     const msg = e?.raw?.message || e?.message || String(e);
     console.error("[create-checkout-session] stripe.create error:", msg, {
       type: e?.type,
@@ -100,7 +115,8 @@ async function createSessionForUser(userId: string, baseUrl: string) {
 /** Shared handler */
 async function handler(req: NextRequest) {
   try {
-    const { userId } = await auth();
+    const a = await auth();
+    const userId = a?.userId;
     const base = getBaseUrlFromRequest(req);
 
     if (!userId) {
@@ -119,7 +135,6 @@ async function handler(req: NextRequest) {
 
     return NextResponse.json({ url });
   } catch (err: any) {
-    // ⚠️ During bring-up, return the actual message so you can see it:
     const msg = err?.raw?.message || err?.message || "Failed to start checkout";
     console.error("[create-checkout-session] error:", msg, {
       type: err?.type,
@@ -127,7 +142,7 @@ async function handler(req: NextRequest) {
       raw: err?.raw,
       stack: err?.stack,
     });
-    // Use 400 for most Stripe validation errors so you see the text in the response
+
     const status = /no such price|mode|recurring|one_time|inactive/i.test(msg) ? 400 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
