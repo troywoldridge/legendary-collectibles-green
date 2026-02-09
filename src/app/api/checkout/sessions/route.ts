@@ -79,6 +79,8 @@ async function readJsonBody(req: Request) {
 
 export async function POST(req: Request) {
   try {
+    console.log("[checkout/sessions] HIT", new Date().toISOString());
+
     const stripe = getStripe();
     const SITE_URL = getSiteUrl();
 
@@ -90,6 +92,9 @@ export async function POST(req: Request) {
     } catch {
       userId = null;
     }
+
+    console.log("[checkout/sessions] userId", userId || "GUEST");
+
 
     const jar = await cookies();
     const cookieCartId = s(jar.get(CART_COOKIE)?.value);
