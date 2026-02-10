@@ -85,5 +85,9 @@
         "wotc",
         "ygoprodeck",
         "zonersp"
-    ]
+    ],
+    "docwriter.style": "Auto-detect",
+    "docwriter.progress.trackFunctions": true,
+    "docwriter.progress.trackClasses": true,
+    "docwriter.progress.trackTypes": true
 }

@@ -14,7 +14,7 @@ function fmtMoney(cents: number, currency: string) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: cur,
-  }).format((Number(cents || 0) / 100));
+  }).format(Number(cents || 0) / 100);
 }
 
 function yyyyMmDd(d: Date) {
@@ -24,28 +24,55 @@ function yyyyMmDd(d: Date) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function asIso2Country(v: unknown): string | null {
+  const s = String(v ?? "").trim().toUpperCase();
+  if (/^[A-Z]{2}$/.test(s)) return s;
+  return null;
+}
+
+/**
+ * Your DB columns:
+ * - orders.shipping_address (jsonb)
+ * - orders.billing_address (jsonb)
+ *
+ * We try shipping first (delivery country), then billing.
+ * Supports common shapes:
+ * - { country: "US" }
+ * - { country_code: "US" }
+ * - { address: { country: "US" } }
+ * - Stripe-ish nested variants
+ */
 function pickCountryCode(order: any): string {
-  // Drizzle model uses camelCase fields based on your schema
-  const ship = order?.shippingAddress;
-  const bill = order?.billingAddress;
+  const ship = order?.shippingAddress ?? order?.shipping_address;
+  const bill = order?.billingAddress ?? order?.billing_address;
 
-  // Stripe-ish address JSON commonly has `country` (ISO 2-letter)
-  const shipCountry =
-    ship?.country ||
-    ship?.country_code ||
-    ship?.countryCode ||
-    ship?.address?.country ||
-    ship?.address?.country_code;
+  const candidates: unknown[] = [
+    ship?.country,
+    ship?.country_code,
+    ship?.countryCode,
+    ship?.address?.country,
+    ship?.address?.country_code,
+    ship?.address?.countryCode,
 
-  const billCountry =
-    bill?.country ||
-    bill?.country_code ||
-    bill?.countryCode ||
-    bill?.address?.country ||
-    bill?.address?.country_code;
+    bill?.country,
+    bill?.country_code,
+    bill?.countryCode,
+    bill?.address?.country,
+    bill?.address?.country_code,
+    bill?.address?.countryCode,
+  ];
 
-  const c = String(shipCountry || billCountry || "US").trim().toUpperCase();
-  return /^[A-Z]{2}$/.test(c) ? c : "US";
+  for (const c of candidates) {
+    const iso2 = asIso2Country(c);
+    if (iso2) return iso2;
+  }
+
+  return "US";
+}
+
+function parseMerchantId(v: string | undefined): number {
+  const n = Number(String(v ?? "").trim());
+  return Number.isFinite(n) ? n : 0;
 }
 
 type Props = {
@@ -53,7 +80,6 @@ type Props = {
 };
 
 export default async function CheckoutSuccessPage({ searchParams }: Props) {
-  // ✅ accept either param name (session_id preferred)
   const sessionId = searchParams?.session_id || searchParams?.sid;
 
   if (!sessionId) {
@@ -81,7 +107,6 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
     );
   }
 
-  // Order may take a moment to appear if webhook is still processing
   const o = await db
     .select()
     .from(orders)
@@ -130,7 +155,7 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
     .where(eq(orderItems.orderId, order.id));
 
   // --- Google Customer Reviews values ---
-  const merchantId = process.env.GCR_MERCHANT_ID || "";
+  const merchantId = parseMerchantId(process.env.GCR_MERCHANT_ID);
   const orderId = String(order.id);
   const email = String(order.email ?? "");
   const deliveryCountry = pickCountryCode(order);
@@ -142,7 +167,7 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
   const estimatedDeliveryDate = yyyyMmDd(est);
 
   const showGcr =
-    merchantId.length > 0 &&
+    merchantId > 0 &&
     orderId.length > 0 &&
     email.length > 0 &&
     deliveryCountry.length === 2 &&
@@ -246,7 +271,7 @@ export default async function CheckoutSuccessPage({ searchParams }: Props) {
               </div>
             </div>
 
-            {/* ✅ Google Customer Reviews Opt-in (don’t obscure it) */}
+            {/* ✅ Google Customer Reviews Opt-in */}
             {showGcr ? (
               <div className="mt-6">
                 <GoogleCustomerReviewsOptIn

@@ -2,39 +2,66 @@ import "server-only";
 
 import { db } from "@/lib/db";
 import { sql } from "drizzle-orm";
-import { headers } from "next/headers";
+import { headers as nextHeaders } from "next/headers";
 
-type CheckoutEvent = {
+export type CheckoutEvent = {
   eventType: string;
   userId?: string | null;
   cartId?: string | null;
   email?: string | null;
 
-  subtotalCents?: number;
-  shippingCents?: number;
-  taxCents?: number;
-  totalCents?: number;
+  subtotalCents?: number | null;
+  shippingCents?: number | null;
+  taxCents?: number | null;
+  totalCents?: number | null;
 
   metadata?: unknown;
 };
 
-function getHeader(name: string) {
+async function getHeader(name: string): Promise<string | null> {
   try {
-    return headers().get(name) ?? null;
+    const h = await nextHeaders();
+    return h.get(name) ?? null;
   } catch {
     return null;
   }
 }
 
-export async function logCheckoutEvent(evt: CheckoutEvent) {
+function getHeaderFromReq(req: Request | null | undefined, name: string): string | null {
+  if (!req) return null;
+  try {
+    return req.headers.get(name) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function pickIp(req?: Request | null) {
+  return (
+    getHeaderFromReq(req, "cf-connecting-ip") ||
+    getHeaderFromReq(req, "x-forwarded-for")?.split(",")[0]?.trim() ||
+    getHeaderFromReq(req, "x-real-ip")
+  );
+}
+
+/**
+ * Preferred usage (best typing + easiest testing):
+ *   await logCheckoutEvent(evt, req)
+ *
+ * Fallback usage (no req available):
+ *   await logCheckoutEvent(evt)
+ */
+export async function logCheckoutEvent(evt: CheckoutEvent, req?: Request): Promise<void> {
   try {
     const ip =
-      getHeader("cf-connecting-ip") ||
-      getHeader("x-forwarded-for")?.split(",")[0]?.trim() ||
-      getHeader("x-real-ip") ||
-      null;
+      pickIp(req) ||
+      (await getHeader("cf-connecting-ip")) ||
+      (await getHeader("x-forwarded-for")) ||
+      (await getHeader("x-real-ip"));
 
-    const userAgent = getHeader("user-agent");
+    const userAgent =
+      getHeaderFromReq(req, "user-agent") ||
+      (await getHeader("user-agent"));
 
     await db.execute(sql`
       insert into checkout_events (
@@ -51,21 +78,20 @@ export async function logCheckoutEvent(evt: CheckoutEvent) {
         metadata
       )
       values (
-        ${String(evt.eventType || "").trim() || "unknown"},
+        ${String(evt.eventType || "")},
         ${evt.userId ?? null},
         ${evt.cartId ?? null},
         ${evt.email ?? null},
-        ${Number.isFinite(evt.subtotalCents as any) ? Math.max(0, Math.floor(evt.subtotalCents as any)) : null},
-        ${Number.isFinite(evt.shippingCents as any) ? Math.max(0, Math.floor(evt.shippingCents as any)) : null},
-        ${Number.isFinite(evt.taxCents as any) ? Math.max(0, Math.floor(evt.taxCents as any)) : null},
-        ${Number.isFinite(evt.totalCents as any) ? Math.max(0, Math.floor(evt.totalCents as any)) : null},
-        ${ip},
-        ${userAgent},
+        ${evt.subtotalCents ?? null},
+        ${evt.shippingCents ?? null},
+        ${evt.taxCents ?? null},
+        ${evt.totalCents ?? null},
+        ${ip ?? null},
+        ${userAgent ?? null},
         ${JSON.stringify(evt.metadata ?? {})}::jsonb
       )
     `);
   } catch (err) {
-    // never block checkout due to analytics failures
     console.error("[checkout-analytics-error]", err);
   }
 }

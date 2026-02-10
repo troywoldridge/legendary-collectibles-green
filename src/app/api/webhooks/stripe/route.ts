@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import Stripe from "stripe";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { logCheckoutEvent } from "@/lib/checkoutAnalytics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,6 +34,15 @@ type ItemsJsonRow = {
   shippingClass?: string | null;
   shippingWeightLbs?: number | null;
 };
+
+function mdGet(md: Record<string, string> | null | undefined, ...keys: string[]) {
+  const m = md || {};
+  for (const k of keys) {
+    const v = s(m[k]);
+    if (v) return v;
+  }
+  return "";
+}
 
 export async function POST(req: Request) {
   try {
@@ -65,7 +75,77 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
     }
 
-    // We only need to finalize on session completed (paid or async)
+    // ------------------------------------------------------------
+    // ✅ payment_failed analytics (no DB fulfillment here)
+    // ------------------------------------------------------------
+    if (event.type === "payment_intent.payment_failed") {
+      const pi = event.data.object as Stripe.PaymentIntent;
+
+      const reason =
+        s((pi.last_payment_error as any)?.message) ||
+        s((pi.last_payment_error as any)?.code) ||
+        s((pi as any)?.cancellation_reason) ||
+        "payment_failed";
+
+      const meta = (pi.metadata || {}) as Record<string, string>;
+      const cartId = mdGet(meta, "cartId", "cart_id");
+      const userId = mdGet(meta, "userId", "user_id");
+
+      await logCheckoutEvent({
+        eventType: "payment_failed",
+        userId: userId || null,
+        cartId: cartId || null,
+        email: null,
+        metadata: {
+          stripeEventId: s(event.id),
+          stripePaymentIntentId: s(pi.id),
+          amountCents: toInt(pi.amount, 0),
+          currency: s(pi.currency || "usd").toLowerCase(),
+          failure: reason,
+          lastPaymentError: pi.last_payment_error
+            ? {
+                code: s((pi.last_payment_error as any)?.code),
+                decline_code: s((pi.last_payment_error as any)?.decline_code),
+                message: s((pi.last_payment_error as any)?.message),
+                type: s((pi.last_payment_error as any)?.type),
+              }
+            : null,
+        },
+      });
+
+      return new NextResponse("ok", { status: 200 });
+    }
+
+    if (event.type === "checkout.session.async_payment_failed") {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const md = (session.metadata || {}) as Record<string, string>;
+
+      const cartId = mdGet(md, "cartId", "cart_id");
+      const userId = mdGet(md, "userId", "user_id");
+      const email = s((session.customer_details as any)?.email || session.customer_email) || null;
+
+      await logCheckoutEvent({
+        eventType: "payment_failed",
+        userId: userId || null,
+        cartId: cartId || null,
+        email,
+        subtotalCents: toInt(md.subtotalCents, 0) || null,
+        shippingCents: Math.max(0, toInt(md.baseShippingCents, 0) + toInt(md.insuranceCents, 0)) || null,
+        taxCents: toInt((session.total_details as any)?.amount_tax, 0) || null,
+        totalCents: toInt(session.amount_total, 0) || null,
+        metadata: {
+          stripeEventId: s(event.id),
+          stripeSessionId: s(session.id),
+          reason: "async_payment_failed",
+        },
+      });
+
+      return new NextResponse("ok", { status: 200 });
+    }
+
+    // ------------------------------------------------------------
+    // Existing fulfillment path (unchanged): only finalize on completed
+    // ------------------------------------------------------------
     if (
       event.type !== "checkout.session.completed" &&
       event.type !== "checkout.session.async_payment_succeeded"
@@ -90,7 +170,6 @@ export async function POST(req: Request) {
     const shippingCents = Math.max(0, baseShippingCents + insuranceCents);
 
     const taxCents =
-      // Stripe Tax puts details here on completed sessions
       toInt((session.total_details as any)?.amount_tax, 0);
 
     const totalCents = toInt(session.amount_total, 0);
@@ -107,7 +186,6 @@ export async function POST(req: Request) {
     const billingAddress = (session.customer_details as any)?.address || null;
     const shippingAddress = shippingDetails?.address || null;
 
-    // Items snapshot from metadata (the stuff you want as order_items)
     let items: ItemsJsonRow[] = [];
     try {
       items = JSON.parse(md.items_json || "[]");
@@ -116,7 +194,6 @@ export async function POST(req: Request) {
       items = [];
     }
 
-    // If items_json missing, don't create an empty order.
     if (!items.length) {
       console.error("[stripe/webhook] missing items_json; session:", stripeSessionId);
       return NextResponse.json(
@@ -125,12 +202,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // pull first image per product for order_items.image_url
     const productIds = items.map((it) => it.productId).filter(Boolean);
 
-    // Use a DB transaction: create order, create items, mark cart checked_out, decrement inventory
     await db.transaction(async (tx) => {
-      // 1) create order (idempotent via UNIQUE stripe_session_id)
       const orderRes = await tx.execute(sql`
         INSERT INTO orders (
           user_id,
@@ -199,7 +273,6 @@ export async function POST(req: Request) {
       const orderId = (orderRes as any)?.rows?.[0]?.id as string | undefined;
       if (!orderId) throw new Error("Failed to create order");
 
-      // 2) get images
       const imgRes = await tx.execute(sql`
         WITH first_image AS (
           SELECT DISTINCT ON (pi.product_id)
@@ -216,7 +289,6 @@ export async function POST(req: Request) {
       const imgRows: Array<{ product_id: string; url: string }> = (imgRes as any)?.rows ?? [];
       const imgByProductId = new Map(imgRows.map((r) => [String(r.product_id), String(r.url)]));
 
-      // 3) wipe existing order_items (safe for idempotent retries), then insert
       await tx.execute(sql`DELETE FROM order_items WHERE order_id = ${orderId}::uuid`);
 
       for (const it of items) {
@@ -249,7 +321,6 @@ export async function POST(req: Request) {
           )
         `);
 
-        // 4) decrement inventory (only if product still exists)
         await tx.execute(sql`
           UPDATE products
           SET quantity = GREATEST(COALESCE(quantity, 0) - ${qty}, 0),
@@ -258,7 +329,6 @@ export async function POST(req: Request) {
         `);
       }
 
-      // 5) mark cart checked_out (optional but nice)
       if (cartId) {
         await tx.execute(sql`
           UPDATE carts

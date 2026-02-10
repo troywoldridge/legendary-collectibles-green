@@ -11,6 +11,9 @@ import { db } from "@/lib/db";
 import { baseShippingCentsForWeight } from "@/lib/shipping/rates";
 import { insuranceCentsForShipment } from "@/lib/shipping/insurance";
 
+// ✅ correct import (DB writer)
+import { logCheckoutEvent } from "@/lib/analytics/logCheckoutEvent";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -77,40 +80,38 @@ async function readJsonBody(req: Request) {
   return await req.json().catch(() => null);
 }
 
+function errMeta(code: string, message: string, extra?: Record<string, unknown>) {
+  return { code, message, ...(extra || {}) };
+}
+
 export async function POST(req: Request) {
+  const startedAt = Date.now();
+
+  // Optional auth (guest allowed)
+  let userId: string | null = null;
   try {
-    console.log("[checkout/sessions] HIT", new Date().toISOString());
+    const a = await auth();
+    userId = a?.userId || null;
+  } catch {
+    userId = null;
+  }
 
-    const stripe = getStripe();
-    const SITE_URL = getSiteUrl();
+  const jar = await cookies();
+  const cookieCartId = s(jar.get(CART_COOKIE)?.value);
 
-    // Optional auth (guest allowed)
-    let userId: string | null = null;
-    try {
-      const a = await auth();
-      userId = a?.userId || null;
-    } catch {
-      userId = null;
-    }
+  const FREE_SHIPPING_THRESHOLD_CENTS = toInt(
+    process.env.FREE_SHIPPING_THRESHOLD_CENTS,
+    15000,
+  );
+  const ALLOW_INTERNATIONAL = toBool(process.env.ALLOW_INTERNATIONAL, false);
 
-    console.log("[checkout/sessions] userId", userId || "GUEST");
+  // Optional: allow client to pass email (nice for guests), but not required
+  const body = await readJsonBody(req);
+  const customerEmail = s(body?.email) || null;
 
-
-    const jar = await cookies();
-    const cookieCartId = s(jar.get(CART_COOKIE)?.value);
-
-    const FREE_SHIPPING_THRESHOLD_CENTS = toInt(
-      process.env.FREE_SHIPPING_THRESHOLD_CENTS,
-      15000,
-    );
-    const ALLOW_INTERNATIONAL = toBool(process.env.ALLOW_INTERNATIONAL, false);
-
-    // Optional: allow client to pass email (nice for guests), but not required
-    const body = await readJsonBody(req);
-    const customerEmail = s(body?.email);
-
-    // 1) determine cartId (cookie first, then signed-in user's open cart)
-    let cartId = "";
+  // 1) determine cartId (cookie first, then signed-in user's open cart)
+  let cartId = "";
+  try {
     if (cookieCartId && isUuid(cookieCartId)) {
       cartId = cookieCartId;
     } else if (userId) {
@@ -125,10 +126,54 @@ export async function POST(req: Request) {
 
       cartId = s(cartRes.rows?.[0]?.id);
     }
+  } catch (e: any) {
+    await logCheckoutEvent(
+      {
+        eventType: "checkout_failed",
+        userId,
+        cartId: cookieCartId || null,
+        email: customerEmail,
+        metadata: errMeta("cart_lookup_failed", s(e?.message || e)),
+      },
+      req,
+    );
+    return NextResponse.json({ error: "No active cart" }, { status: 400 });
+  }
 
-    if (!cartId || !isUuid(cartId)) {
-      return NextResponse.json({ error: "No active cart" }, { status: 400 });
-    }
+  // ✅ checkout_started
+  await logCheckoutEvent(
+    {
+      eventType: "checkout_started",
+      userId,
+      cartId: cartId || (cookieCartId || null),
+      email: customerEmail,
+      metadata: {
+        msFromStart: Date.now() - startedAt,
+        isGuest: !userId,
+        hasEmail: Boolean(customerEmail),
+        source: "api/checkout/sessions",
+      },
+    },
+    req,
+  );
+
+  if (!cartId || !isUuid(cartId)) {
+    await logCheckoutEvent(
+      {
+        eventType: "checkout_failed",
+        userId,
+        cartId: cartId || (cookieCartId || null),
+        email: customerEmail,
+        metadata: errMeta("no_active_cart", "No active cart (missing/invalid cartId)"),
+      },
+      req,
+    );
+    return NextResponse.json({ error: "No active cart" }, { status: 400 });
+  }
+
+  try {
+    const stripe = getStripe();
+    const SITE_URL = getSiteUrl();
 
     // 1.1) validate cart exists + open, and is not someone else’s cart (if signed in)
     const cartCheck = await db.execute<CartRow>(sql`
@@ -141,15 +186,35 @@ export async function POST(req: Request) {
 
     const cartRow = cartCheck.rows?.[0];
     if (!cartRow?.id) {
+      await logCheckoutEvent(
+        {
+          eventType: "checkout_failed",
+          userId,
+          cartId,
+          email: customerEmail,
+          metadata: errMeta("cart_not_found", "Cart not found or not open"),
+        },
+        req,
+      );
       return NextResponse.json({ error: "Cart is empty" }, { status: 400 });
     }
 
     const cartOwner = s(cartRow.user_id);
     if (userId && cartOwner && cartOwner !== userId) {
+      await logCheckoutEvent(
+        {
+          eventType: "checkout_failed",
+          userId,
+          cartId,
+          email: customerEmail,
+          metadata: errMeta("forbidden_cart", "Signed-in user does not own this cart"),
+        },
+        req,
+      );
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    // 2) purchasable lines (cookie cart)
+    // 2) purchasable lines
     const linesRes = await db.execute<LineRow>(sql`
       select
         p.id as "productId",
@@ -172,6 +237,16 @@ export async function POST(req: Request) {
 
     const rows = linesRes.rows ?? [];
     if (!rows.length) {
+      await logCheckoutEvent(
+        {
+          eventType: "checkout_failed",
+          userId,
+          cartId,
+          email: customerEmail,
+          metadata: errMeta("no_purchasable_items", "No purchasable items in cart"),
+        },
+        req,
+      );
       return NextResponse.json(
         { error: "No purchasable items in cart" },
         { status: 400 },
@@ -277,14 +352,10 @@ export async function POST(req: Request) {
       mode: "payment",
       line_items,
 
-      // Guest-safe + signed-in safe:
-      // Checkout will collect email if not provided; passing customer_email helps.
       ...(customerEmail ? { customer_email: customerEmail } : {}),
 
-      // Collect address
       shipping_address_collection: { allowed_countries },
 
-      // Stripe Tax
       billing_address_collection: "required",
       automatic_tax: { enabled: true },
 
@@ -309,11 +380,48 @@ export async function POST(req: Request) {
 
     const url = session.url;
     if (!url) {
+      await logCheckoutEvent(
+        {
+          eventType: "checkout_failed",
+          userId,
+          cartId,
+          email: customerEmail,
+          subtotalCents,
+          shippingCents: Math.floor(baseShippingCents + insuranceCents),
+          totalCents: Math.floor(subtotalCents + baseShippingCents + insuranceCents),
+          metadata: errMeta("stripe_missing_url", "Checkout failed: missing Stripe URL"),
+        },
+        req,
+      );
+
       return NextResponse.json(
         { error: "Checkout failed: missing Stripe URL" },
         { status: 500 },
       );
     }
+
+    // ✅ checkout_redirected
+    await logCheckoutEvent(
+      {
+        eventType: "checkout_redirected",
+        userId,
+        cartId,
+        email: customerEmail,
+        subtotalCents,
+        shippingCents: Math.floor(baseShippingCents + insuranceCents),
+        taxCents: null,
+        totalCents: null,
+        metadata: {
+          msFromStart: Date.now() - startedAt,
+          stripeSessionId: String(session.id || ""),
+          weightLbs: Number(totalWeight.toFixed(2)),
+          freeShipping: Boolean(freeShipping),
+          baseShippingCents: Math.floor(baseShippingCents),
+          insuranceCents: Math.floor(insuranceCents),
+        },
+      },
+      req,
+    );
 
     const accept = (req.headers.get("accept") || "").toLowerCase();
     const wantsHtml = accept.includes("text/html");
@@ -324,10 +432,23 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ url }, { status: 200 });
   } catch (err: any) {
-    console.error("[api/checkout/sessions] error", err);
-    return NextResponse.json(
-      { error: s(err?.message || err) || "Internal Server Error" },
-      { status: 500 },
+    const msg = s(err?.message || err) || "Internal Server Error";
+
+    await logCheckoutEvent(
+      {
+        eventType: "checkout_failed",
+        userId,
+        cartId: cartId || null,
+        email: customerEmail,
+        metadata: errMeta("exception", msg, {
+          name: s(err?.name),
+          stack: s(err?.stack)?.slice(0, 2000) || null,
+        }),
+      },
+      req,
     );
+
+    console.error("[api/checkout/sessions] error", err);
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

@@ -12,8 +12,9 @@ import { site } from "@/config/site";
 import { cfUrl } from "@/lib/cf";
 import { ClerkProvider } from "@clerk/nextjs";
 import { getClerkFrontendConfig } from "@/lib/clerk/config";
-import GoogleStoreWidget from "@/app/checkout/success/_components/GoogleStoreWidget";
 
+import GoogleStoreWidget from "@/app/checkout/success/_components/GoogleStoreWidget";
+import GoogleCustomerReviewsBadge from "@/components/google/GoogleCustomerReviewsBadge";
 
 // Fonts
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
@@ -27,6 +28,9 @@ const GA_ID = "G-X503QBJDZ7";
 // Optional: search console verifications (set in env, keep blank if not used)
 const GOOGLE_SITE_VERIFICATION = process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION || "";
 const BING_SITE_VERIFICATION = process.env.NEXT_PUBLIC_BING_SITE_VERIFICATION || "";
+
+// Google Customer Reviews merchant id
+const GCR_MERCHANT_ID = Number(process.env.GCR_MERCHANT_ID || 0);
 
 // ----- Metadata base -----
 let metadataBase: URL | undefined;
@@ -47,8 +51,6 @@ export const metadata: Metadata = {
   title: { default: defaultTitle, template },
   description: site?.description ?? "",
 
-  // ✅ Site-wide robots policy: allow indexing
-  // Private pages should override to noindex via generateMetadata().
   robots: {
     index: true,
     follow: true,
@@ -61,9 +63,7 @@ export const metadata: Metadata = {
     },
   },
 
-  // ✅ Good defaults; DON'T set canonical here
   alternates: {
-    // canonical intentionally omitted (per-page only)
     languages: {
       "en-US": "/",
     },
@@ -100,7 +100,6 @@ export const metadata: Metadata = {
     apple: [{ url: "/apple-touch-icon.png", sizes: "180x180" }],
   },
 
-  // ✅ Helps SERP context (don’t overstuff; keep it tight)
   keywords: [
     "Legendary Collectibles",
     "Pokemon cards",
@@ -116,7 +115,6 @@ export const metadata: Metadata = {
   category: "ecommerce",
   applicationName: site?.name ?? undefined,
 
-  // ✅ Verification tags (only included if env vars set)
   verification:
     GOOGLE_SITE_VERIFICATION || BING_SITE_VERIFICATION
       ? {
@@ -128,21 +126,17 @@ export const metadata: Metadata = {
       : undefined,
 };
 
-// ✅ Viewport defaults (minor but correct)
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   themeColor: "#0a0a0a",
 };
 
-// ----- Layout -----
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   const clerk = getClerkFrontendConfig();
 
-  // JSON-LD structured data (Organization + WebSite)
-  // Keep it conservative and valid.
   const ldOrg = {
     "@context": "https://schema.org",
     "@type": "Organization",
@@ -176,8 +170,6 @@ export default function RootLayout({
     },
   };
 
-  // Optional: Store schema (only if you have business info)
-  // Safe even if you don’t have ratings/reviews yet.
   const ldStore = {
     "@context": "https://schema.org",
     "@type": "Store",
@@ -201,18 +193,13 @@ export default function RootLayout({
   const bgSrc = cfUrl(HERO_BG_CF_ID, "hero") ?? undefined;
 
   return (
-    <ClerkProvider
-      publishableKey={clerk.publishableKey}
-      proxyUrl={clerk.proxyUrl}
-    >
+    <ClerkProvider publishableKey={clerk.publishableKey} proxyUrl={clerk.proxyUrl}>
       <html lang="en" className={inter.variable} suppressHydrationWarning>
         <head>
-          {/* Perf: preconnect */}
           <link rel="preconnect" href="https://www.googletagmanager.com" />
           <link rel="preconnect" href="https://cdn.jsdelivr.net" />
           <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
 
-          {/* Remix Icons CDN */}
           <link
             href="https://cdn.jsdelivr.net/npm/remixicon/fonts/remixicon.css"
             rel="stylesheet"
@@ -220,7 +207,7 @@ export default function RootLayout({
         </head>
 
         <body className="min-h-screen bg-neutral-50 text-neutral-900 antialiased">
-          {/* Google Analytics (App Router friendly) */}
+          {/* Google Analytics */}
           <Script
             src={`https://www.googletagmanager.com/gtag/js?id=${GA_ID}`}
             strategy="afterInteractive"
@@ -234,10 +221,19 @@ export default function RootLayout({
             `}
           </Script>
 
-          {/* Google Store Widget (Customer Reviews badge replacement) */}
-            <GoogleStoreWidget position="RIGHT_BOTTOM" />
+          {/* ✅ Google Customer Reviews Badge (site-wide) */}
+          {GCR_MERCHANT_ID > 0 ? (
+            <GoogleCustomerReviewsBadge
+              merchantId={GCR_MERCHANT_ID}
+              position="RIGHT_BOTTOM"
+              region="US"
+            />
+          ) : null}
 
-          {/* Background image + overlays */}
+          {/* Your existing widget */}
+          <GoogleStoreWidget position="RIGHT_BOTTOM" />
+
+          {/* Background */}
           <div className="pointer-events-none fixed inset-0 -z-10">
             {bgSrc ? (
               <>
