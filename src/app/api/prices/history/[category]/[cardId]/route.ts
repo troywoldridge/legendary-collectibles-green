@@ -46,18 +46,57 @@ export async function GET(
       return NextResponse.json({ error: `Unknown category: ${category}` }, { status: 400 });
     }
 
-    const canonicalSource = canonicalSourceForGame(game);
-    if (!canonicalSource) {
-      return NextResponse.json({ error: `No canonical source mapping for category: ${category}` }, { status: 400 });
-    }
-
     const url = new URL(req.url);
     const currency = (url.searchParams.get("currency") || "USD").toUpperCase();
 
     const daysRaw = url.searchParams.get("days") || "90";
     const days = Math.max(1, Math.min(3650, parseInt(daysRaw, 10) || 90)); // cap 10 years
 
-    // 1) Resolve market_item_id (use the real uniqueness key)
+    // ✅ Pokemon history comes from tcgdex_price_snapshots_daily (true daily snapshots)
+    if (game === "pokemon") {
+      const snapRes = await pool.query(
+        `
+        SELECT
+          as_of_date,
+          currency,
+          market_price_cents,
+          raw_json
+        FROM public.tcgdex_price_snapshots_daily
+        WHERE card_id = $1
+          AND currency = $2
+          AND as_of_date >= (CURRENT_DATE - $3::int)
+        ORDER BY as_of_date ASC
+        `,
+        [cardId, currency, days]
+      );
+
+      return NextResponse.json({
+        ok: true,
+        game,
+        canonical_id: cardId,
+        canonical_source: "tcgdex",
+        market_item_id: null,
+        currency,
+        days,
+        points: snapRes.rows.map((r) => ({
+          as_of_date: r.as_of_date,
+          value_cents: r.market_price_cents,
+          value_usd: Number(r.market_price_cents) / 100,
+          confidence: null,
+          method: "tcgdex_snapshot",
+          sources_used: r.raw_json ?? null,
+        })),
+        ms: Date.now() - startedAt,
+      });
+    }
+
+    // Otherwise keep your existing market_items based history for MTG/YGO
+    const canonicalSource = canonicalSourceForGame(game);
+    if (!canonicalSource) {
+      return NextResponse.json({ error: `No canonical source mapping for category: ${category}` }, { status: 400 });
+    }
+
+    // 1) Resolve market_item_id
     const miRes = await pool.query(
       `
       SELECT id
@@ -80,7 +119,6 @@ export async function GET(
     const market_item_id = miRes.rows[0].id as string;
 
     // 2) Pull daily series (already blended by script 03)
-    // NOTE: date - int is clean and index-friendly (as_of_date is DATE)
     const histRes = await pool.query(
       `
       SELECT

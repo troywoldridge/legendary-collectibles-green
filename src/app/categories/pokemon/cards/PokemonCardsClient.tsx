@@ -16,7 +16,7 @@ type Card = {
   cardId: string;
   name: string;
   setName: string | null;
-  number?: string | null; // ✅ add
+  number?: string | null;
   imageUrl: string | null;
   variants?: PokemonVariants;
 };
@@ -192,7 +192,7 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
             className="rounded-xl border border-white/10 bg-white/5 transition hover:border-white/20 hover:bg-white/10"
           >
             <Link className="group block" href={`${basePath}/${encodeURIComponent(c.cardId)}`}>
-              <div className="relative mx-auto w-full" style={{ aspectRatio: "3 / 4" }}>
+              <div className="relative mx-auto w-full aspect-3/4">
                 {c.imageUrl ? (
                   <Image
                     src={c.imageUrl}
@@ -216,7 +216,6 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
               <div className="p-3 pb-2">
                 <div className="line-clamp-2 text-sm font-medium text-white">{c.name}</div>
 
-                {/* ✅ Pretty subheader: set_name • #number */}
                 <div className="mt-1 line-clamp-1 text-xs text-white/70">
                   {c.setName ? c.setName : "Unknown set"}
                   {c.number ? ` • #${c.number}` : ""}

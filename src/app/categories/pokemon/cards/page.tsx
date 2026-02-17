@@ -113,9 +113,9 @@ function tcgdexImageUrl(base?: string | null, quality: "low" | "high" = "high") 
 export async function generateMetadata({
   searchParams,
 }: {
-  searchParams: Promise<SearchParams>;
+  searchParams: SearchParams;
 }): Promise<Metadata> {
-  const sp = await searchParams;
+  const sp = searchParams;
 
   const q = (sp?.q ?? "").trim();
   const lang = parseLang(sp?.lang);
@@ -124,24 +124,24 @@ export async function generateMetadata({
   const basePath = "/categories/pokemon/cards";
   const canonical = absUrl(basePath);
 
-  const titleBase =
-    lang === "ja"
-      ? "Japanese Pokémon Cards"
-      : "Pokémon Cards";
+  const titleBase = lang === "ja" ? "Japanese Pokémon Cards" : "Pokémon Cards";
 
-  const title =
-    q
-      ? `${titleBase} matching “${q}” | ${site.name}`
-      : page > 1
-        ? `${titleBase} (Page ${page}) | ${site.name}`
-        : `${titleBase} | ${site.name}`;
+  const title = q
+    ? `${titleBase} matching “${q}” | ${site.name}`
+    : page > 1
+      ? `${titleBase} (Page ${page}) | ${site.name}`
+      : `${titleBase} | ${site.name}`;
 
   const description =
     lang === "ja"
       ? "Browse authentic Japanese Pokémon cards including modern sets, vintage releases, and promo cards. Track prices, manage your collection, and discover rare Japanese exclusives."
       : "Browse Pokémon cards across modern and classic sets. Track prices, view variants, and manage your personal collection on Legendary Collectibles.";
 
-  const og = site?.ogImage ? (site.ogImage.startsWith("http") ? site.ogImage : absUrl(site.ogImage)) : absUrl("/og-image.png");
+  const og = site?.ogImage
+    ? site.ogImage.startsWith("http")
+      ? site.ogImage
+      : absUrl(site.ogImage)
+    : absUrl("/og-image.png");
 
   return {
     title,
@@ -168,9 +168,9 @@ export async function generateMetadata({
 export default async function PokemonCardsIndex({
   searchParams,
 }: {
-  searchParams: Promise<SearchParams>;
+  searchParams: SearchParams;
 }) {
-  const sp = await searchParams;
+  const sp = searchParams;
   const baseHref = "/categories/pokemon/cards";
 
   const q: string | null = (sp?.q ?? "").trim() || null;

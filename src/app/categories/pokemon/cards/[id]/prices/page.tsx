@@ -1,4 +1,3 @@
-// src/app/categories/pokemon/cards/[id]/prices/page.tsx
 import "server-only";
 
 import Link from "next/link";
@@ -6,45 +5,44 @@ import Script from "next/script";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 
-import MarketPrices from "@/components/MarketPrices";
-import { type DisplayCurrency, convert, formatMoney, getFx } from "@/lib/pricing";
 import type { Metadata } from "next";
 import { site } from "@/config/site";
+import { type DisplayCurrency, convert, formatMoney, getFx } from "@/lib/pricing";
+
+import PriceHistoryChart from "@/components/charts/PriceHistoryChart";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
 type CardCore = {
   id: string;
-  name: string | null;
-  small_image: string | null;
-  large_image: string | null;
+  raw_json: any;
 };
 
-type TcgHist = {
-  captured_at: string;
-  currency: string | null;
-  normal: string | null;
-  holofoil: string | null;
-  reverse_holofoil: string | null;
-};
-
-type CmHist = {
-  captured_at: string;
-  trend_price: string | null;
-  average_sell_price: string | null;
-  low_price: string | null;
-  suggested_price: string | null;
+type SnapshotRow = {
+  as_of_date: string;
+  currency: string;
+  market_price_cents: number;
 };
 
 function absBase() {
-  return (site?.url ?? "https://legendary-collectibles.com").replace(/\/+$/, "");
+  return (
+    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
+    process.env.SITE_URL?.replace(/\/+$/, "") ||
+    site?.url?.replace(/\/+$/, "") ||
+    "https://legendary-collectibles.com"
+  );
 }
 function absUrl(path: string) {
   const base = absBase();
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function s(v: unknown) {
+  return String(v ?? "").trim();
 }
 
 function readDisplay(sp: SearchParams): DisplayCurrency {
@@ -60,89 +58,57 @@ function withParam(baseHref: string, key: string, val: string) {
   return u.pathname + (u.search ? u.search : "");
 }
 
-function asNum(v: string | null | undefined): number | null {
-  if (!v) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
+/**
+ * tcgdex card images are stored as base like:
+ *   https://assets.tcgdex.net/en/swsh/swsh3/136
+ * You add /{quality}.{extension}
+ * Example:
+ *   https://assets.tcgdex.net/en/swsh/swsh3/136/high.webp
+ */
+function tcgdexCardImage(base: string | null | undefined, quality: "high" | "low", ext: "webp" | "png" | "jpg") {
+  const b = s(base);
+  if (!b) return null;
+  return `${b.replace(/\/+$/, "")}/${quality}.${ext}`;
 }
 
-function pickAtOrAfter<T extends { captured_at: string }>(rows: T[], sinceMs: number) {
-  const cutoff = Date.now() - sinceMs;
-  for (const row of rows) {
-    const t = Date.parse(row.captured_at);
-    if (Number.isFinite(t) && t >= cutoff) return row;
-  }
-  return null;
-}
-
-function pctChange(from: number | null, to: number | null): string | null {
-  if (from == null || to == null || from === 0) return null;
-  const p = ((to - from) / from) * 100;
-  return `${p >= 0 ? "+" : ""}${p.toFixed(1)}%`;
-}
-
-async function resolveCardId(param: string): Promise<string | null> {
-  const like = `%${param.replace(/-/g, " ").trim()}%`;
-
-  const row =
-    (
-      await db.execute<{ id: string }>(sql`
-        SELECT id
-        FROM public.tcg_cards
-        WHERE id = ${param}
-           OR lower(id) = lower(${param})
-           OR name ILIKE ${like}
-        ORDER BY
-          CASE
-            WHEN id = ${param} THEN 0
-            WHEN lower(id) = lower(${param}) THEN 1
-            ELSE 2
-          END,
-          id ASC
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null;
-
-  return row?.id ?? null;
-}
-
-async function loadCore(cardId: string): Promise<CardCore | null> {
+async function loadCardCore(cardId: string): Promise<CardCore | null> {
   return (
     (
       await db.execute<CardCore>(sql`
-        SELECT id, name, small_image, large_image
-        FROM public.tcg_cards
-        WHERE id = ${cardId}
+        SELECT id::text AS id, raw_json
+        FROM public.tcgdex_cards
+        WHERE id::text = ${cardId}::text
         LIMIT 1
       `)
     ).rows?.[0] ?? null
   );
 }
 
-async function loadHistory(cardId: string, days = 90) {
-  const tcg =
-    (
-      await db.execute<TcgHist>(sql`
-        SELECT captured_at, currency, normal, holofoil, reverse_holofoil
-        FROM public.tcg_card_prices_tcgplayer_history
-        WHERE card_id = ${cardId}
-          AND captured_at >= now() - (${days} * INTERVAL '1 day')
-        ORDER BY captured_at ASC
-      `)
-    ).rows ?? [];
+async function loadHistory(cardId: string, currency: string, days = 90): Promise<SnapshotRow[]> {
+  const cur = s(currency).toUpperCase() || "USD";
+  const d = Math.max(1, Math.min(3650, Number(days) || 90));
 
-  const cm =
+  return (
     (
-      await db.execute<CmHist>(sql`
-        SELECT captured_at, trend_price, average_sell_price, low_price, suggested_price
-        FROM public.tcg_card_prices_cardmarket_history
-        WHERE card_id = ${cardId}
-          AND captured_at >= now() - (${days} * INTERVAL '1 day')
-        ORDER BY captured_at ASC
+      await db.execute<SnapshotRow>(sql`
+        SELECT
+          as_of_date::text AS as_of_date,
+          currency::text AS currency,
+          market_price_cents::int AS market_price_cents
+        FROM public.tcgdex_price_snapshots_daily
+        WHERE card_id::text = ${cardId}::text
+          AND currency::text = ${cur}::text
+          AND as_of_date >= (CURRENT_DATE - (${d}::int))
+        ORDER BY as_of_date ASC
       `)
-    ).rows ?? [];
+    ).rows ?? []
+  );
+}
 
-  return { tcg, cm };
+function pctChange(from: number | null, to: number | null): string | null {
+  if (from == null || to == null || from === 0) return null;
+  const p = ((to - from) / from) * 100;
+  return `${p >= 0 ? "+" : ""}${p.toFixed(1)}%`;
 }
 
 export async function generateMetadata({
@@ -152,10 +118,9 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const p = await params;
   const raw = decodeURIComponent(p.id ?? "").trim();
-  const cardId = (await resolveCardId(raw)) ?? raw;
-  const core = await loadCore(cardId);
+  const core = await loadCardCore(raw);
 
-  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(cardId)}/prices`);
+  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(raw)}/prices`);
 
   if (!core) {
     return {
@@ -166,9 +131,12 @@ export async function generateMetadata({
     };
   }
 
-  const name = core.name ?? core.id;
+  const name = s(core.raw_json?.name) || core.id;
   const title = `Prices: ${name} — Pokémon Card Value & Trends | ${site.name}`;
-  const desc = `View recent market prices and trends for ${name}. See TCGplayer and Cardmarket price history, and switch display currency.`;
+  const desc = `View recent market prices and trends for ${name}. Daily snapshot history pulled from tcgdex pricing.`;
+
+  const imgBase = s(core.raw_json?.image) || "";
+  const og = tcgdexCardImage(imgBase, "high", "webp") || site.ogImage || absUrl("/og-image.png");
 
   return {
     title,
@@ -181,12 +149,13 @@ export async function generateMetadata({
       title,
       description: desc,
       siteName: site.name,
-      images: core.large_image || core.small_image ? [{ url: (core.large_image || core.small_image) as string }] : [],
+      images: og ? [{ url: og }] : [],
     },
     twitter: {
       card: "summary_large_image",
       title,
       description: desc,
+      images: og ? [og] : [],
     },
   };
 }
@@ -203,10 +172,8 @@ export default async function PokemonCardPricesPage({
 
   const display = readDisplay(sp);
 
-  const cardParam = decodeURIComponent(rawId ?? "").trim();
-  const cardId = (await resolveCardId(cardParam)) ?? cardParam;
-
-  const [core, hist] = await Promise.all([loadCore(cardId), loadHistory(cardId)]);
+  const cardId = decodeURIComponent(rawId ?? "").trim();
+  const core = await loadCardCore(cardId);
 
   if (!core) {
     return (
@@ -214,7 +181,7 @@ export default async function PokemonCardPricesPage({
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
           <h1 className="text-2xl font-bold text-white">Card not found</h1>
           <p className="mt-2 break-all text-sm text-white/70">
-            Looked up: <code>{cardParam}</code>
+            Looked up: <code>{cardId}</code>
           </p>
           <Link href="/categories/pokemon/cards" className="mt-4 inline-block text-sky-300 hover:underline">
             ← Back to cards
@@ -224,79 +191,47 @@ export default async function PokemonCardPricesPage({
     );
   }
 
+  const name = s(core.raw_json?.name) || core.id;
+
   const baseDetail = `/categories/pokemon/cards/${encodeURIComponent(core.id)}`;
   const baseHref = `${baseDetail}/prices`;
   const canonical = absUrl(baseHref);
 
+  // Determine "native" currency from tcgdex raw_json pricing if present
+  const rawPricing = core.raw_json?.pricing ?? null;
+  const tcgUnit = s(rawPricing?.tcgplayer?.unit).toUpperCase();
+  const cmUnit = s(rawPricing?.cardmarket?.unit).toUpperCase();
+
+  // Prefer tcgplayer unit if present; else cardmarket; else USD
+  const nativeCurrency = (tcgUnit === "EUR" || tcgUnit === "USD") ? tcgUnit : (cmUnit === "EUR" ? "EUR" : "USD");
+
+  // We store snapshots per currency. For now: use nativeCurrency points.
+  const hist = await loadHistory(core.id, nativeCurrency, 180);
+
   const fx = getFx();
 
-  const tcgLatest = hist.tcg.at(-1) ?? null;
-  const tcg7 = pickAtOrAfter(hist.tcg, 7 * 86400000);
-  const tcg30 = pickAtOrAfter(hist.tcg, 30 * 86400000);
+  const points = hist.map((r) => ({
+    as_of_date: r.as_of_date,
+    value: Number(r.market_price_cents || 0) / 100,
+  }));
 
-  const tcgCur: "USD" | "EUR" =
-    tcgLatest?.currency?.toUpperCase() === "EUR" ? "EUR" : "USD";
+  const latest = points.length ? points[points.length - 1].value : null;
+  const p7 = points.length >= 8 ? points[points.length - 8].value : null;
+  const p30 = points.length >= 31 ? points[points.length - 31].value : null;
 
-  function convPrice(n: number | null, src: "USD" | "EUR") {
-    if (n == null) return null;
-    if (display === "NATIVE") return n;
-    const out = convert(n, src, display);
-    return out ?? n;
+  // Display conversions for the metric strip (chart stays native)
+  function showMoney(v: number | null) {
+    if (v == null) return "—";
+    if (display === "NATIVE") return formatMoney(v, nativeCurrency as any);
+    const out = convert(v, nativeCurrency as any, display) ?? v;
+    return formatMoney(out, display);
   }
-
-  const metrics: Array<{ label: string; latest: string | null; d7: string | null; d30: string | null }> = [];
-
-  function addTcgMetric(label: string, key: keyof TcgHist) {
-    const L = asNum(tcgLatest?.[key] ?? null);
-    const A7 = asNum(tcg7?.[key] ?? null);
-    const A30 = asNum(tcg30?.[key] ?? null);
-
-    const Lc = convPrice(L, tcgCur);
-    const C7 = convPrice(A7, tcgCur);
-    const C30 = convPrice(A30, tcgCur);
-
-    metrics.push({
-      label: `TCGplayer ${label}`,
-      latest: Lc == null ? null : formatMoney(Lc, display === "NATIVE" ? tcgCur : display),
-      d7: pctChange(C7, Lc),
-      d30: pctChange(C30, Lc),
-    });
-  }
-
-  addTcgMetric("Normal", "normal");
-  addTcgMetric("Holofoil", "holofoil");
-  addTcgMetric("Reverse Holofoil", "reverse_holofoil");
-
-  const cmLatest = hist.cm.at(-1) ?? null;
-  const cm7 = pickAtOrAfter(hist.cm, 7 * 86400000);
-  const cm30 = pickAtOrAfter(hist.cm, 30 * 86400000);
-
-  function addCmMetric(label: string, key: keyof CmHist) {
-    const L = asNum(cmLatest?.[key] ?? null);
-    const A7 = asNum(cm7?.[key] ?? null);
-    const A30 = asNum(cm30?.[key] ?? null);
-
-    const Lc = convPrice(L, "EUR");
-    const C7 = convPrice(A7, "EUR");
-    const C30 = convPrice(A30, "EUR");
-
-    metrics.push({
-      label: `Cardmarket ${label}`,
-      latest: Lc == null ? null : formatMoney(Lc, display === "NATIVE" ? "EUR" : display),
-      d7: pctChange(C7, Lc),
-      d30: pctChange(C30, Lc),
-    });
-  }
-
-  addCmMetric("Trend", "trend_price");
-  addCmMetric("Average", "average_sell_price");
-
-  const noHistory = metrics.length === 0 || metrics.every((m) => !m.latest);
 
   // -----------------------
-  // JSON-LD
+  // JSON-LD (prices page can be Product, but keep it minimal)
   // -----------------------
-  const cover = (core.large_image || core.small_image || null) as string | null;
+  const imgBase = s(core.raw_json?.image);
+  const cover = tcgdexCardImage(imgBase, "high", "webp") || tcgdexCardImage(imgBase, "high", "png") || null;
 
   const breadcrumbLd = {
     "@context": "https://schema.org",
@@ -306,25 +241,18 @@ export default async function PokemonCardPricesPage({
       { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
       { "@type": "ListItem", position: 3, name: "Pokémon", item: absUrl("/categories/pokemon/sets") },
       { "@type": "ListItem", position: 4, name: "Pokémon Cards", item: absUrl("/categories/pokemon/cards") },
-      { "@type": "ListItem", position: 5, name: core.name ?? core.id, item: absUrl(baseDetail) },
+      { "@type": "ListItem", position: 5, name: name, item: absUrl(baseDetail) },
       { "@type": "ListItem", position: 6, name: "Prices", item: canonical },
     ],
   };
 
-  // pick a representative price for Offer (latest available)
-  const priceCandidate =
-    asNum(tcgLatest?.normal) ??
-    asNum(tcgLatest?.holofoil) ??
-    asNum(tcgLatest?.reverse_holofoil) ??
-    null;
-
   const offer =
-    priceCandidate != null && priceCandidate > 0
+    latest != null && latest > 0
       ? {
           "@type": "Offer",
           url: canonical,
-          priceCurrency: (tcgCur ?? "USD").toUpperCase(),
-          price: priceCandidate.toFixed(2),
+          priceCurrency: (nativeCurrency || "USD").toUpperCase(),
+          price: latest.toFixed(2),
           availability: "https://schema.org/InStock",
           itemCondition: "https://schema.org/UsedCondition",
           seller: {
@@ -339,14 +267,13 @@ export default async function PokemonCardPricesPage({
     "@context": "https://schema.org",
     "@type": "Product",
     "@id": `${absUrl(baseDetail)}#product`,
-    name: (core.name ?? core.id).trim(),
+    name: name,
     sku: core.id,
     url: absUrl(baseDetail),
     image: cover ? [cover] : undefined,
     category: "Pokémon Trading Card",
     brand: { "@type": "Brand", name: "Pokémon" },
     ...(offer ? { offers: offer } : {}),
-    // AggregateRating intentionally omitted until you have real ratings.
   };
 
   const webPageJsonLd = {
@@ -354,7 +281,7 @@ export default async function PokemonCardPricesPage({
     "@type": "WebPage",
     "@id": `${canonical}#webpage`,
     url: canonical,
-    name: `Prices: ${core.name ?? core.id}`,
+    name: `Prices: ${name}`,
     isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: absBase() },
     mainEntity: { "@id": `${absUrl(baseDetail)}#product` },
   };
@@ -376,17 +303,20 @@ export default async function PokemonCardPricesPage({
           <span className="text-white/40">/</span>
           <Link href="/categories/pokemon/cards" className="hover:underline">Cards</Link>
           <span className="text-white/40">/</span>
-          <Link href={baseDetail} className="hover:underline">{core.name ?? core.id}</Link>
+          <Link href={baseDetail} className="hover:underline">{name}</Link>
           <span className="text-white/40">/</span>
           <span className="text-white/90">Prices</span>
         </div>
       </nav>
 
+      {/* Header + display toggles */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-white">Prices: {core.name ?? core.id}</h1>
-            <div className="mt-1 text-sm text-white/70">Market snapshot + trends.</div>
+            <h1 className="text-2xl font-bold text-white">Prices: {name}</h1>
+            <div className="mt-1 text-sm text-white/70">
+              Daily snapshot history • Native {nativeCurrency} • Display {display === "NATIVE" ? "Native" : display}
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -422,47 +352,48 @@ export default async function PokemonCardPricesPage({
         </div>
       </div>
 
-      <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-        <MarketPrices category="pokemon" cardId={core.id} display={display} />
-      </div>
-
+      {/* Metrics strip */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold">Recent Trends</h2>
-          <div className="text-xs text-white/60">
-            {display === "NATIVE"
-              ? "Native market currencies"
-              : `Converted to ${display}${fx.usdToEur || fx.eurToUsd ? "" : " (no FX set; fallback used)"}`}
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+            <div className="text-xs text-white/60">Latest</div>
+            <div className="mt-1 text-lg font-semibold">{showMoney(latest)}</div>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+            <div className="text-xs text-white/60">7d change</div>
+            <div className="mt-1 text-lg font-semibold">{pctChange(p7, latest) ?? "—"}</div>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+            <div className="text-xs text-white/60">30d change</div>
+            <div className="mt-1 text-lg font-semibold">{pctChange(p30, latest) ?? "—"}</div>
           </div>
         </div>
 
-        {noHistory ? (
-          <div className="text-sm text-white/70">Not enough historical data yet.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-white/70">
-                  <th className="py-2 pr-4 text-left">Metric</th>
-                  <th className="py-2 pr-4 text-left">Latest</th>
-                  <th className="py-2 pr-4 text-left">7d</th>
-                  <th className="py-2 pr-4 text-left">30d</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/10">
-                {metrics.map((m) => (
-                  <tr key={m.label}>
-                    <td className="py-2 pr-4">{m.label}</td>
-                    <td className="py-2 pr-4">{m.latest ?? "—"}</td>
-                    <td className="py-2 pr-4">{m.d7 ?? "—"}</td>
-                    <td className="py-2 pr-4">{m.d30 ?? "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <div className="mt-3 text-xs text-white/60">
+          {display === "NATIVE"
+            ? "Native market currency."
+            : `Converted to ${display}${fx.usdToEur || fx.eurToUsd ? "" : " (no FX set; fallback used)"}`}
+
+          <span className="text-white/40"> • </span>
+          Chart is shown in native ({nativeCurrency}) for accuracy.
+        </div>
       </div>
+
+      {/* REAL chart */}
+      <PriceHistoryChart
+        title="Price History (Daily Snapshots)"
+        points={points}
+        currency={nativeCurrency}
+      />
+
+      {/* Fallback if no data */}
+      {!points.length ? (
+        <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+          <div className="text-sm text-white/70">
+            Not enough history yet. Once the daily snapshot cron runs, you’ll see the chart populate.
+          </div>
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap gap-4 text-sm">
         <Link href="/categories/pokemon/cards" className="text-sky-300 hover:underline">

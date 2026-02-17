@@ -1,5 +1,3 @@
- 
- 
 import "server-only";
 
 import type { Metadata } from "next";
@@ -31,55 +29,18 @@ export const revalidate = 0;
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
-type CardRow = {
+type CardMetaRow = {
   id: string;
   name: string | null;
-
-  supertype: string | null;
-  subtypes: string | null;
-
-  level: string | null;
-  hp: string | null;
-  types: string | null;
-
-  evolves_from: string | null;
-  evolves_to: string | null;
-
-  rules: string | null;
-
-  ancient_trait_name: string | null;
-  ancient_trait_text: string | null;
-
-  converted_retreat_cost: string | null;
-  retreat_cost: string | null;
-
   set_id: string | null;
   set_name: string | null;
-  series: string | null;
-  printed_total: string | null;
-  total: string | null;
-  ptcgo_code: string | null;
-  release_date: string | null;
-
-  symbol_url: string | null;
-  logo_url: string | null;
-
-  regulation_mark: string | null;
-
-  artist: string | null;
   rarity: string | null;
-  flavor_text: string | null;
-  national_pokedex_numbers: string | null;
+  image_base: string | null; // e.g. https://assets.tcgdex.net/en/bw/bw1/103
+};
 
-  extra: string | null;
-
-  small_image: string | null;
-  large_image: string | null;
-
-  tcgplayer_url: string | null;
-  tcgplayer_updated_at: string | null;
-  cardmarket_url: string | null;
-  cardmarket_updated_at: string | null;
+type CardRow = {
+  id: string;
+  raw_json: any; // tcgdex JSON blob
 };
 
 type MarketItemRow = {
@@ -88,19 +49,8 @@ type MarketItemRow = {
 };
 
 /* ------------------------------------------------
-   SEO helpers (absolute URLs) + lightweight meta query
+   SEO helpers (absolute URLs)
 ------------------------------------------------- */
-
-type CardMetaRow = {
-  id: string;
-  name: string | null;
-  rarity: string | null;
-  set_name: string | null;
-  series: string | null;
-  release_date: string | null;
-  small_image: string | null;
-  large_image: string | null;
-};
 
 function absBase() {
   return (
@@ -122,27 +72,297 @@ function absMaybe(urlOrPath: string | null | undefined) {
   return absUrl(urlOrPath);
 }
 
+/* ------------------------------------------------
+   TCGdex image helpers
+
+   TCGdex card "image" field is a base like:
+   https://assets.tcgdex.net/en/swsh/swsh3/136
+
+   Build final URL:
+   {base}/{quality}.{extension}
+   - quality: high | low
+   - extension: webp (recommended), png, jpg
+------------------------------------------------- */
+
+type ImgQuality = "high" | "low";
+type ImgExt = "webp" | "png" | "jpg";
+
+function tcgdexCardImageUrl(imageBase: string, quality: ImgQuality = "high", ext: ImgExt = "webp") {
+  const base = String(imageBase ?? "").trim().replace(/\/+$/, "");
+  if (!base) return null;
+  return `${base}/${quality}.${ext}`;
+}
+
+function bestImageFromRaw(raw: any): string | null {
+  const imageBase = String(raw?.image ?? "").trim();
+  if (!imageBase) return null;
+  // main attraction on detail page => high.webp
+  return tcgdexCardImageUrl(imageBase, "high", "webp");
+}
+
+function thumbImageFromRaw(raw: any): string | null {
+  const imageBase = String(raw?.image ?? "").trim();
+  if (!imageBase) return null;
+  // list/preview => low.webp
+  return tcgdexCardImageUrl(imageBase, "low", "webp");
+}
+
+/* ------------------------------------------------
+   DB reads (tcgdex_cards + tcgdex_sets)
+------------------------------------------------- */
+
 async function getCardMeta(cardId: string): Promise<CardMetaRow | null> {
   noStore();
-  return (
+
+  // We only pluck what we need for SEO quickly using jsonb operators
+  const row =
     (
       await db.execute<CardMetaRow>(sql`
         SELECT
-          id,
-          name,
-          rarity,
-          set_name,
-          series,
-          release_date,
-          small_image,
-          large_image
-        FROM public.tcg_cards
-        WHERE id = ${cardId}
+          c.id::text AS id,
+          NULLIF(c.raw_json->>'name','') AS name,
+          NULLIF(c.raw_json#>>'{set,id}','') AS set_id,
+          NULLIF(c.raw_json#>>'{set,name}','') AS set_name,
+          NULLIF(c.raw_json->>'rarity','') AS rarity,
+          NULLIF(c.raw_json->>'image','') AS image_base
+        FROM public.tcgdex_cards c
+        WHERE c.id::text = ${cardId}::text
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null;
+
+  return row ?? null;
+}
+
+async function getCardById(cardId: string): Promise<CardRow | null> {
+  noStore();
+  return (
+    (
+      await db.execute<CardRow>(sql`
+        SELECT id::text AS id, raw_json
+        FROM public.tcgdex_cards
+        WHERE id::text = ${cardId}::text
         LIMIT 1
       `)
     ).rows?.[0] ?? null
   );
 }
+
+async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | null> {
+  noStore();
+  return (
+    (
+      await db.execute<MarketItemRow>(sql`
+        SELECT id, display_name
+        FROM public.market_items
+        WHERE game = 'pokemon'
+          AND canonical_id::text = ${cardId}::text
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null
+  );
+}
+
+/* ------------------------------------------------
+   Variants + owned counts
+------------------------------------------------- */
+
+async function getVariantsByCardId(cardId: string): Promise<PokemonVariants> {
+  // Variants are inside tcgdex_cards.raw_json.variants
+  const row = await getCardById(cardId);
+  const v = row?.raw_json?.variants ?? null;
+
+  if (!v || typeof v !== "object") return null;
+
+  return {
+    normal: v.normal === true,
+    reverse: v.reverse === true,
+    holo: v.holo === true,
+    first_edition: v.firstEdition === true,
+    w_promo: v.wPromo === true,
+  };
+}
+
+async function getOwnedVariantCounts(userId: string | null, cardId: string) {
+  if (!userId) return {};
+
+  noStore();
+  const res = await db.execute<{ variant_type: string | null; qty: number }>(sql`
+    SELECT variant_type, COALESCE(SUM(quantity),0)::int AS qty
+    FROM public.user_collection_items
+    WHERE user_id = ${userId}
+      AND game = 'pokemon'
+      AND card_id = ${cardId}
+    GROUP BY variant_type
+  `);
+
+  const out: Record<string, number> = {};
+  for (const r of res.rows ?? []) {
+    const key = String(r.variant_type ?? "normal").trim() || "normal";
+    out[key] = Number(r.qty) || 0;
+  }
+  return out;
+}
+
+/* ------------------------------------------------
+   Pricing helper from tcgdex raw_json.pricing.tcgplayer
+------------------------------------------------- */
+
+function toNum(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function parseIsoDate(s: unknown): string | null {
+  const v = String(s ?? "").trim();
+  if (!v) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : null;
+}
+
+type OfferPick = {
+  price: number | null;
+  currency: string;
+  url: string | null;
+  updatedAtIso: string | null;
+  variantType: string | null;
+};
+
+function pickBestTcgplayerOfferFromTcgdex(raw: any): OfferPick {
+  // tcgdex example:
+  // pricing.tcgplayer.unit = "USD"
+  // pricing.tcgplayer.updated = "..."
+  // pricing.tcgplayer.normal.marketPrice = 0.18
+  // pricing.tcgplayer["reverse-holofoil"].marketPrice = 0.60
+  const tp = raw?.pricing?.tcgplayer ?? null;
+
+  if (!tp || typeof tp !== "object") {
+    return { price: null, currency: "USD", url: null, updatedAtIso: null, variantType: null };
+  }
+
+  const currency = String(tp.unit ?? "USD").trim().toUpperCase() || "USD";
+  const updatedAtIso = parseIsoDate(tp.updated);
+
+  // Candidates in priority order
+  const candidates: Array<{ key: string; obj: any }> = [];
+
+  if (tp.normal) candidates.push({ key: "normal", obj: tp.normal });
+  if (tp["reverse-holofoil"]) candidates.push({ key: "reverse-holofoil", obj: tp["reverse-holofoil"] });
+  if (tp.holofoil) candidates.push({ key: "holofoil", obj: tp.holofoil });
+
+  // Some cards might only have one odd key; scan all keys too.
+  for (const k of Object.keys(tp)) {
+    if (k === "unit" || k === "updated") continue;
+    const obj = (tp as any)[k];
+    if (obj && typeof obj === "object" && !candidates.find((c) => c.key === k)) {
+      candidates.push({ key: k, obj });
+    }
+  }
+
+  for (const c of candidates) {
+    const price =
+      toNum(c.obj?.marketPrice) ??
+      toNum(c.obj?.midPrice) ??
+      toNum(c.obj?.lowPrice) ??
+      toNum(c.obj?.highPrice) ??
+      null;
+
+    if (price != null && price > 0) {
+      return { price, currency, url: null, updatedAtIso, variantType: c.key };
+    }
+  }
+
+  return { price: null, currency, url: null, updatedAtIso, variantType: null };
+}
+
+/* ------------------------------------------------
+   UI helpers
+------------------------------------------------- */
+
+function readDisplay(sp: SearchParams): DisplayCurrency {
+  const a = (Array.isArray(sp?.display) ? sp.display[0] : sp?.display) ?? "";
+  const b = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency) ?? "";
+  const v = (a || b).toUpperCase();
+  return v === "USD" || v === "EUR" ? (v as DisplayCurrency) : "NATIVE";
+}
+
+function parseTextList(v: unknown): string[] {
+  if (v == null) return [];
+  if (Array.isArray(v)) return v.map(String).map((x) => x.trim()).filter(Boolean);
+
+  const s = String(v).trim();
+  if (!s) return [];
+
+  // handle legacy string forms if any
+  if (s.startsWith("[") && s.endsWith("]")) {
+    try {
+      const arr = JSON.parse(s);
+      if (Array.isArray(arr)) return arr.map(String).filter(Boolean);
+    } catch {}
+  }
+
+  if (s.startsWith("{") && s.endsWith("}")) {
+    const inner = s.slice(1, -1).trim();
+    if (!inner) return [];
+    return inner
+      .split(",")
+      .map((x) => x.replace(/^"+|"+$/g, "").trim())
+      .filter(Boolean);
+  }
+
+  if (s.includes(",")) {
+    return s
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
+
+  return [s];
+}
+
+function Field({ label, value }: { label: string; value: string | null }) {
+  if (!value) return null;
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+      <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
+      <div className="mt-1 wrap-break-word text-sm font-medium text-white">{value}</div>
+    </div>
+  );
+}
+
+function Chips({ label, values }: { label: string; values: string[] }) {
+  if (!values.length) return null;
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
+      <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {values.map((v) => (
+          <span key={v} className="rounded-full border border-white/15 bg-white/10 px-2 py-1 text-xs text-white">
+            {v}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TextBlock({ title, text }: { title: string; text: string | null }) {
+  if (!text) return null;
+  return (
+    <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+      <div className="mb-2 text-sm font-semibold">{title}</div>
+      <div className="whitespace-pre-wrap text-sm text-white/80">{text}</div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------
+   Metadata
+------------------------------------------------- */
 
 export async function generateMetadata({
   params,
@@ -189,7 +409,8 @@ export async function generateMetadata({
     .join(", ")
     .concat(".");
 
-  const ogImage = absMaybe(card.large_image || card.small_image || site.ogImage || "/og-image.png");
+  const ogBase = card.image_base ? tcgdexCardImageUrl(card.image_base, "high", "webp") : null;
+  const ogImage = absMaybe(ogBase || site.ogImage || "/og-image.png");
 
   return {
     title,
@@ -214,299 +435,9 @@ export async function generateMetadata({
 }
 
 /* ------------------------------------------------
-   Helpers
-------------------------------------------------- */
-function readDisplay(sp: SearchParams): DisplayCurrency {
-  const a = (Array.isArray(sp?.display) ? sp.display[0] : sp?.display) ?? "";
-  const b = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency) ?? "";
-  const v = (a || b).toUpperCase();
-  return v === "USD" || v === "EUR" ? (v as DisplayCurrency) : "NATIVE";
-}
-
-function bestImage(card: CardRow): string | null {
-  return card.large_image || card.small_image || null;
-}
-
-function parseTextList(v: string | null): string[] {
-  if (!v) return [];
-  const s = v.trim();
-  if (!s) return [];
-
-  if (s.startsWith("[") && s.endsWith("]")) {
-    try {
-      const arr = JSON.parse(s);
-      if (Array.isArray(arr)) return arr.map(String).filter(Boolean);
-    } catch {}
-  }
-
-  if (s.startsWith("{") && s.endsWith("}")) {
-    const inner = s.slice(1, -1).trim();
-    if (!inner) return [];
-    return inner
-      .split(",")
-      .map((x) => x.replace(/^"+|"+$/g, "").trim())
-      .filter(Boolean);
-  }
-
-  if (s.includes(",")) {
-    return s
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-  }
-
-  return [s];
-}
-
-function toNum(v: unknown): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string" && v.trim() !== "") {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
-function normalizeCurrency(cur?: string | null): "USD" | "EUR" | string {
-  const c = (cur ?? "").trim().toUpperCase();
-  return c || "USD";
-}
-
-function parseUpdatedAtToIso(updatedAt?: string | null): string | null {
-  const s = (updatedAt ?? "").trim();
-  if (!s) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replaceAll("/", "-");
-  return null;
-}
-
-type OfferRow = {
-  url: string | null;
-  updated_at: string | null;
-  currency: string | null;
-  variant_type: string | null;
-  low_price: unknown;
-  mid_price: unknown;
-  high_price: unknown;
-  market_price: unknown;
-};
-
-function pickBestOffer(rows: OfferRow[]): {
-  price: number | null;
-  currency: string;
-  url: string | null;
-  updatedAtIso: string | null;
-  variantType: string | null;
-} {
-  if (!rows.length) {
-    return { price: null, currency: "USD", url: null, updatedAtIso: null, variantType: null };
-  }
-
-  const withNum = rows.map((r) => {
-    const market = toNum(r.market_price);
-    const mid = toNum(r.mid_price);
-    const low = toNum(r.low_price);
-    const high = toNum(r.high_price);
-    const price = market ?? mid ?? low ?? high ?? null;
-    return { r, price };
-  });
-
-  const normal = withNum.find(
-    (x) => (x.r.variant_type ?? "").toLowerCase() === "normal" && x.price != null && x.price > 0
-  );
-  const any = withNum.find((x) => x.price != null && x.price > 0) ?? null;
-
-  const chosen = (normal ?? any)?.r ?? rows[0];
-  const chosenPrice = (normal ?? any)?.price ?? null;
-
-  return {
-    price: chosenPrice,
-    currency: normalizeCurrency(chosen.currency),
-    url: chosen.url ?? null,
-    updatedAtIso: parseUpdatedAtToIso(chosen.updated_at),
-    variantType: chosen.variant_type ?? null,
-  };
-}
-
-async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | null> {
-  noStore();
-  return (
-    (
-      await db.execute<MarketItemRow>(sql`
-        SELECT id, display_name
-        FROM public.market_items
-        WHERE game = 'pokemon'
-          AND canonical_id::text = ${cardId}::text
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null
-  );
-}
-
-async function getSchemaOfferFromTcgplayer(cardId: string) {
-  noStore();
-  const rows =
-    (
-      await db.execute<OfferRow>(sql`
-        SELECT
-          p.url,
-          p.updated_at,
-          p.currency,
-          p.variant_type,
-          p.low_price,
-          p.mid_price,
-          p.high_price,
-          p.market_price
-        FROM public.tcg_card_prices_tcgplayer p
-        WHERE p.card_id = ${cardId}
-        ORDER BY
-          CASE WHEN LOWER(p.variant_type) = 'normal' THEN 0 ELSE 1 END,
-          p.market_price DESC NULLS LAST,
-          p.mid_price DESC NULLS LAST
-      `)
-    ).rows ?? [];
-
-  return pickBestOffer(rows);
-}
-
-async function getCardById(cardId: string): Promise<CardRow | null> {
-  noStore();
-  return (
-    (
-      await db.execute<CardRow>(sql`
-        SELECT
-          id,
-          name,
-          supertype,
-          subtypes,
-          level,
-          hp,
-          types,
-          evolves_from,
-          evolves_to,
-          rules,
-          ancient_trait_name,
-          ancient_trait_text,
-          converted_retreat_cost,
-          retreat_cost,
-          set_id,
-          set_name,
-          series,
-          printed_total,
-          total,
-          ptcgo_code,
-          release_date,
-          symbol_url,
-          logo_url,
-          regulation_mark,
-          artist,
-          rarity,
-          flavor_text,
-          national_pokedex_numbers,
-          extra,
-          small_image,
-          large_image,
-          tcgplayer_url,
-          tcgplayer_updated_at,
-          cardmarket_url,
-          cardmarket_updated_at
-        FROM public.tcg_cards
-        WHERE id = ${cardId}
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null
-  );
-}
-
-async function getVariantsByCardId(cardId: string): Promise<PokemonVariants> {
-  noStore();
-  const row =
-    (
-      await db.execute<{
-        normal: boolean | null;
-        reverse: boolean | null;
-        holo: boolean | null;
-        first_edition: boolean | null;
-        w_promo: boolean | null;
-      }>(sql`
-        SELECT normal, reverse, holo, first_edition, w_promo
-        FROM public.tcg_card_variants
-        WHERE card_id = ${cardId}
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null;
-
-  return row
-    ? {
-        normal: row.normal === true,
-        reverse: row.reverse === true,
-        holo: row.holo === true,
-        first_edition: row.first_edition === true,
-        w_promo: row.w_promo === true,
-      }
-    : null;
-}
-
-async function getOwnedVariantCounts(userId: string | null, cardId: string) {
-  if (!userId) return {};
-
-  noStore();
-  const res = await db.execute<{ variant_type: string | null; qty: number }>(sql`
-    SELECT variant_type, COALESCE(SUM(quantity),0)::int AS qty
-    FROM public.user_collection_items
-    WHERE user_id = ${userId}
-      AND game = 'pokemon'
-      AND card_id = ${cardId}
-    GROUP BY variant_type
-  `);
-
-  const out: Record<string, number> = {};
-  for (const r of res.rows ?? []) {
-    const key = String(r.variant_type ?? "normal").trim() || "normal";
-    out[key] = Number(r.qty) || 0;
-  }
-  return out;
-}
-
-function Field({ label, value }: { label: string; value: string | null }) {
-  if (!value) return null;
-  return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-      <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
-      <div className="mt-1 wrap-break-word text-sm font-medium text-white">{value}</div>
-    </div>
-  );
-}
-
-function Chips({ label, values }: { label: string; values: string[] }) {
-  if (!values.length) return null;
-  return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-      <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {values.map((v) => (
-          <span key={v} className="rounded-full border border-white/15 bg-white/10 px-2 py-1 text-xs text-white">
-            {v}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function TextBlock({ title, text }: { title: string; text: string | null }) {
-  if (!text) return null;
-  return (
-    <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
-      <div className="mb-2 text-sm font-semibold">{title}</div>
-      <div className="whitespace-pre-wrap text-sm text-white/80">{text}</div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------
    Page
 ------------------------------------------------- */
+
 export default async function PokemonCardDetailPage({
   params,
   searchParams,
@@ -531,13 +462,9 @@ export default async function PokemonCardDetailPage({
 
   const display = readDisplay(sp);
 
-  const [card, variants, offer] = await Promise.all([
-    getCardById(rawId),
-    getVariantsByCardId(rawId),
-    getSchemaOfferFromTcgplayer(rawId),
-  ]);
+  const [row, variants] = await Promise.all([getCardById(rawId), getVariantsByCardId(rawId)]);
 
-  if (!card) {
+  if (!row) {
     return (
       <section className="space-y-6">
         <Script
@@ -565,24 +492,44 @@ export default async function PokemonCardDetailPage({
     );
   }
 
-  const cardName = (card.name ?? card.id).trim();
-  const canonicalCard = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card.id)}`);
-  const cover = bestImage(card);
+  const raw = row.raw_json ?? {};
+  const cardId = String(raw?.id ?? row.id).trim() || row.id;
+
+  const cardName = String(raw?.name ?? cardId).trim() || cardId;
+
+  const setId = String(raw?.set?.id ?? "").trim() || null;
+  const setName = String(raw?.set?.name ?? "").trim() || null;
+
+  const rarity = String(raw?.rarity ?? "").trim() || null;
+  const illustrator = String(raw?.illustrator ?? "").trim() || null;
+
+  const hp = raw?.hp != null ? String(raw.hp) : null;
+  const level = raw?.level != null ? String(raw.level) : null;
+
+  const supertype = raw?.category != null ? String(raw.category) : null; // ex: "Trainer"
+  const trainerType = raw?.trainerType != null ? String(raw.trainerType) : null; // ex: "Item"
+  const stage = raw?.stage != null ? String(raw.stage) : null; // evolution stage-ish
+  const regulation = raw?.regulationMark != null ? String(raw.regulationMark) : null;
+
+  const evolvesFrom = raw?.evolveFrom != null ? String(raw.evolveFrom) : null;
+
+  const types = parseTextList(raw?.types);
+  const subtypes = parseTextList(raw?.suffix ? [raw.suffix] : []); // tcgdex "suffix" sometimes; keep harmless
+
+  const retreat = raw?.retreat != null ? parseTextList(raw.retreat) : [];
+
+  const effect = raw?.effect != null ? String(raw.effect) : null;
+  const desc = raw?.description != null ? String(raw.description) : null;
+
+  const cover = bestImageFromRaw(raw);
   const coverAbs = cover ? absMaybe(cover) : null;
 
-  const pricesHref = `/categories/pokemon/cards/${encodeURIComponent(card.id)}/prices`;
+  const pricesHref = `/categories/pokemon/cards/${encodeURIComponent(cardId)}/prices`;
+  const setHref = setId ? `/categories/pokemon/sets/${encodeURIComponent(setId)}` : null;
 
-  const setSlug = (card.set_id ?? "").trim() || (card.set_name ?? "").trim();
-  const setHref = setSlug ? `/categories/pokemon/sets/${encodeURIComponent(setSlug)}` : null;
+  const ownedCounts = await getOwnedVariantCounts(userId ?? null, cardId);
 
-  const ownedCounts = await getOwnedVariantCounts(userId ?? null, card.id);
-
-  const types = parseTextList(card.types);
-  const subtypes = parseTextList(card.subtypes);
-  const retreat = parseTextList(card.retreat_cost);
-  const pokedexNums = parseTextList(card.national_pokedex_numbers);
-
-  // ---- Plan + alerts (single fetch) ----
+  // Plan + alerts (single fetch)
   let planTier: "free" | "collector" | "pro" = "free";
   let canUseAlerts = false;
   let marketItemId: string | null = null;
@@ -593,18 +540,17 @@ export default async function PokemonCardDetailPage({
     canUseAlerts = canUsePriceAlerts(plan);
 
     if (canUseAlerts) {
-      const marketItem = await getMarketItemForPokemon(card.id);
+      const marketItem = await getMarketItemForPokemon(cardId);
       marketItemId = marketItem?.id ?? null;
     }
   }
 
-  const marketUsd = offer.price != null && Number.isFinite(offer.price) && offer.price > 0 ? offer.price : null;
+  // tcgdex pricing snapshot (best offer for header line + bell "currentUsd")
+  const offer = pickBestTcgplayerOfferFromTcgdex(raw);
+  const marketUsd = offer.currency === "USD" && offer.price != null && offer.price > 0 ? offer.price : null;
 
-  // ---------------------------
   // JSON-LD: Breadcrumbs + WebPage + Card entity (NOT Product)
-  // ---------------------------
-  const productName = cardName;
-  const sku = card.id;
+  const canonicalCard = absUrl(`/categories/pokemon/cards/${encodeURIComponent(cardId)}`);
 
   const breadcrumbsJsonLd = {
     "@context": "https://schema.org",
@@ -614,41 +560,39 @@ export default async function PokemonCardDetailPage({
       { "@type": "ListItem", position: 2, name: "Categories", item: absUrl("/categories") },
       { "@type": "ListItem", position: 3, name: "Pokémon", item: absUrl("/categories/pokemon/sets") },
       { "@type": "ListItem", position: 4, name: "Pokémon Cards", item: absUrl("/categories/pokemon/cards") },
-      { "@type": "ListItem", position: 5, name: productName, item: canonicalCard },
+      { "@type": "ListItem", position: 5, name: cardName, item: canonicalCard },
     ],
   };
 
-  // ✅ IMPORTANT: This page is informational/collection oriented, not a store offer page.
-  // Using Product without offers triggers Google "Either offers/review/aggregateRating required".
   const cardEntityId = `${canonicalCard}#card`;
 
   const productJsonLd: any = {
     "@context": "https://schema.org",
     "@type": "Thing",
     "@id": cardEntityId,
-    name: productName,
-    // keep sku-like identifier as a property (fine for Thing)
-    identifier: sku,
+    name: cardName,
+    identifier: cardId,
     url: canonicalCard,
     image: coverAbs ? [coverAbs] : undefined,
     description: [
-      card.rarity ? `Rarity: ${card.rarity}` : null,
-      card.set_name ? `Set: ${card.set_name}` : null,
-      card.series ? `Series: ${card.series}` : null,
-      card.release_date ? `Release date: ${card.release_date}` : null,
+      rarity ? `Rarity: ${rarity}` : null,
+      setName ? `Set: ${setName}` : null,
+      illustrator ? `Illustrator: ${illustrator}` : null,
     ]
       .filter(Boolean)
       .join(" • "),
     additionalProperty: [
-      card.rarity ? { "@type": "PropertyValue", name: "Rarity", value: card.rarity } : null,
-      card.set_name ? { "@type": "PropertyValue", name: "Set", value: card.set_name } : null,
-      card.series ? { "@type": "PropertyValue", name: "Series", value: card.series } : null,
-      card.artist ? { "@type": "PropertyValue", name: "Artist", value: card.artist } : null,
-      card.hp ? { "@type": "PropertyValue", name: "HP", value: card.hp } : null,
-      card.supertype ? { "@type": "PropertyValue", name: "Supertype", value: card.supertype } : null,
+      rarity ? { "@type": "PropertyValue", name: "Rarity", value: rarity } : null,
+      setName ? { "@type": "PropertyValue", name: "Set", value: setName } : null,
+      setId ? { "@type": "PropertyValue", name: "Set ID", value: setId } : null,
+      illustrator ? { "@type": "PropertyValue", name: "Illustrator", value: illustrator } : null,
+      hp ? { "@type": "PropertyValue", name: "HP", value: hp } : null,
+      supertype ? { "@type": "PropertyValue", name: "Category", value: supertype } : null,
+      trainerType ? { "@type": "PropertyValue", name: "Trainer Type", value: trainerType } : null,
+      stage ? { "@type": "PropertyValue", name: "Stage", value: stage } : null,
+      evolvesFrom ? { "@type": "PropertyValue", name: "Evolve From", value: evolvesFrom } : null,
+      regulation ? { "@type": "PropertyValue", name: "Regulation Mark", value: regulation } : null,
       types.length ? { "@type": "PropertyValue", name: "Types", value: types.join(", ") } : null,
-      subtypes.length ? { "@type": "PropertyValue", name: "Subtypes", value: subtypes.join(", ") } : null,
-      card.regulation_mark ? { "@type": "PropertyValue", name: "Regulation Mark", value: card.regulation_mark } : null,
       offer.variantType ? { "@type": "PropertyValue", name: "Variant Type (priced)", value: offer.variantType } : null,
     ].filter(Boolean),
   };
@@ -658,7 +602,7 @@ export default async function PokemonCardDetailPage({
     "@type": "WebPage",
     "@id": `${canonicalCard}#webpage`,
     url: canonicalCard,
-    name: `${productName} — Pokémon Card`,
+    name: `${cardName} — Pokémon Card`,
     isPartOf: { "@type": "WebSite", name: site.name ?? "Legendary Collectibles", url: absBase() },
     primaryImageOfPage: coverAbs ? { "@type": "ImageObject", url: coverAbs } : undefined,
     mainEntity: { "@id": cardEntityId },
@@ -702,7 +646,7 @@ export default async function PokemonCardDetailPage({
             Cards
           </Link>
           <span className="text-white/40">/</span>
-          <span className="text-white/90">{productName}</span>
+          <span className="text-white/90">{cardName}</span>
         </div>
       </nav>
 
@@ -713,7 +657,7 @@ export default async function PokemonCardDetailPage({
               {cover ? (
                 <Image
                   src={cover}
-                  alt={card.name ?? card.id}
+                  alt={cardName}
                   fill
                   unoptimized
                   className="object-contain"
@@ -726,13 +670,28 @@ export default async function PokemonCardDetailPage({
             </div>
 
             <div className="mt-3 flex flex-wrap gap-3 text-xs">
-              {card.tcgplayer_url ? (
-                <a className="text-sky-300 hover:underline" href={card.tcgplayer_url} target="_blank" rel="noreferrer">
+              {raw?.pricing?.tcgplayer ? (
+                <a
+                  className="text-sky-300 hover:underline"
+                  href={`https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&q=${encodeURIComponent(
+                    cardName
+                  )}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
                   TCGplayer →
                 </a>
               ) : null}
-              {card.cardmarket_url ? (
-                <a className="text-sky-300 hover:underline" href={card.cardmarket_url} target="_blank" rel="noreferrer">
+
+              {raw?.pricing?.cardmarket ? (
+                <a
+                  className="text-sky-300 hover:underline"
+                  href={`https://www.cardmarket.com/en/Pokemon/Products/Search?searchString=${encodeURIComponent(
+                    cardName
+                  )}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
                   Cardmarket →
                 </a>
               ) : null}
@@ -742,10 +701,10 @@ export default async function PokemonCardDetailPage({
               variants={variants}
               ownedCounts={ownedCounts}
               canSave={canSave}
-              cardId={card.id}
-              cardName={card.name ?? card.id}
-              setName={card.set_name ?? null}
-              imageUrl={cover ?? null}
+              cardId={cardId}
+              cardName={cardName}
+              setName={setName ?? null}
+              imageUrl={cover ?? thumbImageFromRaw(raw) ?? null}
             />
           </div>
         </div>
@@ -754,32 +713,31 @@ export default async function PokemonCardDetailPage({
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h1 className="text-2xl font-bold text-white">{card.name ?? card.id}</h1>
+                <h1 className="text-2xl font-bold text-white">{cardName}</h1>
 
                 <div className="mt-1 text-sm text-white/80">
                   <span className="mr-3 text-white/60">ID:</span>
-                  <span className="mr-4">{card.id}</span>
+                  <span className="mr-4">{cardId}</span>
 
-                  {card.rarity ? (
+                  {rarity ? (
                     <>
                       <span className="mr-3 text-white/60">Rarity:</span>
-                      <span className="mr-4">{card.rarity}</span>
+                      <span className="mr-4">{rarity}</span>
                     </>
                   ) : null}
 
-                  {card.artist ? (
+                  {illustrator ? (
                     <>
-                      <span className="mr-3 text-white/60">Artist:</span>
-                      <span>{card.artist}</span>
+                      <span className="mr-3 text-white/60">Illustrator:</span>
+                      <span>{illustrator}</span>
                     </>
                   ) : null}
                 </div>
 
                 <div className="mt-2 text-xs text-white/60">
-                  {card.set_name ? <span className="mr-3">Set: {card.set_name}</span> : null}
-                  {card.series ? <span className="mr-3">Series: {card.series}</span> : null}
-                  {card.release_date ? <span className="mr-3">Release: {card.release_date}</span> : null}
-                  {card.regulation_mark ? <span>Reg: {card.regulation_mark}</span> : null}
+                  {setName ? <span className="mr-3">Set: {setName}</span> : null}
+                  {setId ? <span className="mr-3">Set ID: {setId}</span> : null}
+                  {regulation ? <span>Reg: {regulation}</span> : null}
                 </div>
 
                 {setHref ? (
@@ -794,11 +752,14 @@ export default async function PokemonCardDetailPage({
                   <div className="mt-3 text-sm text-white/80">
                     <span className="text-white/60">TCGplayer market:</span>{" "}
                     <span className="font-semibold text-white">
-                      {offer.currency.toUpperCase() === "USD" ? "$" : ""}
+                      {offer.currency === "USD" ? "$" : ""}
                       {offer.price.toFixed(2)}{" "}
-                      {offer.currency && offer.currency.toUpperCase() !== "USD" ? offer.currency.toUpperCase() : ""}
+                      {offer.currency && offer.currency !== "USD" ? offer.currency : ""}
                     </span>
                     {offer.updatedAtIso ? <span className="text-white/50"> • updated {offer.updatedAtIso}</span> : null}
+                    {offer.variantType ? (
+                      <span className="text-white/50"> • {String(offer.variantType)}</span>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -807,9 +768,9 @@ export default async function PokemonCardDetailPage({
                 <CardActions
                   canSave={canSave}
                   game="pokemon"
-                  cardId={card.id}
+                  cardId={cardId}
                   cardName={cardName}
-                  setName={card.set_name ?? undefined}
+                  setName={setName ?? undefined}
                   imageUrl={cover ?? undefined}
                 />
 
@@ -854,11 +815,12 @@ export default async function PokemonCardDetailPage({
             </div>
           </div>
 
-          <MarketPrices category="pokemon" cardId={card.id} display={display} />
+          {/* Your market system stays as-is (market_items + market_prices_current etc.) */}
+          <MarketPrices category="pokemon" cardId={cardId} display={display} />
 
           <MarketValuePanel
             game="pokemon"
-            canonicalId={card.id}
+            canonicalId={cardId}
             title="Market Value"
             showDisclaimer
             canSeeRanges={planTier === "collector" || planTier === "pro"}
@@ -871,39 +833,32 @@ export default async function PokemonCardDetailPage({
         <h2 className="mb-3 text-lg font-semibold text-white">Card Details</h2>
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <Field label="Supertype" value={card.supertype} />
-          <Field label="HP" value={card.hp} />
-          <Field label="Level" value={card.level} />
+          <Field label="Category" value={supertype} />
+          <Field label="Trainer Type" value={trainerType} />
+          <Field label="Stage" value={stage} />
 
-          <Field label="Evolves From" value={card.evolves_from} />
-          <Field label="Evolves To" value={card.evolves_to} />
-          <Field label="Converted Retreat" value={card.converted_retreat_cost} />
+          <Field label="HP" value={hp} />
+          <Field label="Level" value={level} />
+          <Field label="Evolve From" value={evolvesFrom} />
 
-          <Field label="Set ID" value={card.set_id} />
-          <Field label="Printed Total" value={card.printed_total} />
-          <Field label="Total" value={card.total} />
-
-          <Field label="PTCGO Code" value={card.ptcgo_code} />
+          <Field label="Set" value={setName} />
+          <Field label="Set ID" value={setId} />
+          <Field label="Regulation Mark" value={regulation} />
 
           <Chips label="Types" values={types} />
           <Chips label="Subtypes" values={subtypes} />
-          <Chips label="Retreat Cost" values={retreat} />
-          <Chips label="National Pokédex #" values={pokedexNums} />
+          <Chips label="Retreat" values={retreat} />
         </div>
       </div>
 
-      <TextBlock
-        title={card.ancient_trait_name ? `Ancient Trait: ${card.ancient_trait_name}` : "Ancient Trait"}
-        text={card.ancient_trait_text}
-      />
-      <TextBlock title="Rules" text={card.rules} />
-      <TextBlock title="Flavor Text" text={card.flavor_text} />
+      <TextBlock title="Effect" text={effect} />
+      <TextBlock title="Description" text={desc} />
 
-      {card.extra ? (
+      {raw ? (
         <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
-          <div className="mb-2 text-sm font-semibold">Extra</div>
+          <div className="mb-2 text-sm font-semibold">Raw (TCGdex)</div>
           <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/80">
-            {card.extra}
+            {JSON.stringify(raw, null, 2)}
           </pre>
         </div>
       ) : null}

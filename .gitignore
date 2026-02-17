@@ -89,3 +89,8 @@ legendary_neon.sql
 
 # local build artifacts
 Build/
+
+# --- local/php artifacts (do not commit) ---
+/vendor/
+/composer.lock
+/populateDatabase.php

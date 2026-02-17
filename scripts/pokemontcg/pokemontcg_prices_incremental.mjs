@@ -3,18 +3,10 @@
 /**
  * scripts/pokemontcg/pokemontcg_prices_incremental.mjs
  *
- * Incremental price refresher for PokemonTCG API:
- * - Queries cards updated on a date (tcgplayer.updatedAt / cardmarket.updatedAt)
- * - Upserts current price tables
- * - Inserts history snapshots (best-effort dedupe by card_id + source_updated_at)
+ * Incremental price refresher using TCGdex v2 API (embedded pricing).
  *
- * Usage:
- *   node scripts/pokemontcg/pokemontcg_prices_incremental.mjs
- *   node scripts/pokemontcg/pokemontcg_prices_incremental.mjs --date 2025/12/28
- *
- * Env:
- *   POKEMON_TCG_API_KEY (optional but recommended)
- *   DATABASE_URL (required for DB)
+ * NOTE: tcg_card_prices_tcgplayer has UNIQUE (card_id, variant_type)
+ * so upserts MUST use ON CONFLICT (card_id, variant_type).
  */
 
 import "dotenv/config";
@@ -22,46 +14,79 @@ import pg from "pg";
 
 const { Client } = pg;
 
-const API_BASE = "https://api.pokemontcg.io/v2";
-const API_KEY = process.env.POKEMON_TCG_API_KEY || "";
-const DATABASE_URL = process.env.DATABASE_URL || "";
-
-if (!DATABASE_URL) {
-  console.error("Missing DATABASE_URL in env");
-  process.exit(1);
-}
+const API_BASE = "https://api.tcgdex.net/v2/en";
 
 function parseArgs(argv) {
   const args = { _: [] };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
-    if (a.startsWith("--")) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (!next || next.startsWith("--")) args[key] = true;
-      else {
-        args[key] = next;
-        i++;
-      }
-    } else args._.push(a);
+    if (!a.startsWith("--")) {
+      args._.push(a);
+      continue;
+    }
+    const key = a.slice(2);
+    const next = argv[i + 1];
+    if (!next || next.startsWith("--")) args[key] = true;
+    else {
+      args[key] = next;
+      i++;
+    }
   }
   return args;
 }
 
+function usage() {
+  console.log(
+    `
+TCGdex incremental price sync (tcgplayer focused)
+
+Usage:
+  node scripts/pokemontcg/pokemontcg_prices_incremental.mjs [options]
+
+Options:
+  --date YYYY/MM/DD|YYYY-MM-DD     UTC day to include (default: today UTC)
+  --provider tcgplayer|cardmarket|both   default: both
+  --variant-type <string>          value to store in tcg_card_prices_tcgplayer.variant_type (default: default)
+  --page-size <1..250>             list page size (default: 250)
+  --max-pages <n>                  optional safety limit
+  --concurrency <1..32>            detail fetch concurrency (default: 8)
+  --timeout-ms <ms>                request timeout (default: 120000)
+  --batch <n>                      DB flush batch (default: 2000)
+  --dry-run                        fetch/transform only, no DB writes
+  --help                           show help
+`.trim(),
+  );
+}
+
 function isoUtcDateToYmdSlash(d = new Date()) {
-  // UTC date -> YYYY/MM/DD
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   const day = String(d.getUTCDate()).padStart(2, "0");
   return `${y}/${m}/${day}`;
 }
 
-function ymdSlashToTimestamptz(ymd) {
-  // "YYYY/MM/DD" -> timestamptz at midnight UTC
-  // store as ISO string; pg will cast correctly
-  const iso = ymd.replaceAll("/", "-") + "T00:00:00.000Z";
+function normalizeDateInput(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return null;
+  const m = value.match(/^(\d{4})[-/](\d{2})[-/](\d{2})$/);
+  if (!m) return null;
+
+  const [, y, mo, d] = m;
+  const iso = `${y}-${mo}-${d}T00:00:00.000Z`;
   const dt = new Date(iso);
-  return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+  if (Number.isNaN(dt.getTime())) return null;
+  if (dt.toISOString().slice(0, 10) !== `${y}-${mo}-${d}`) return null;
+
+  return `${y}/${mo}/${d}`;
+}
+
+function daySlashToIsoStart(ymdSlash) {
+  return ymdSlash.replaceAll("/", "-") + "T00:00:00.000Z";
+}
+
+function dayStartEpochMs(ymdSlash) {
+  const dt = new Date(daySlashToIsoStart(ymdSlash));
+  return dt.getTime();
 }
 
 function numOrNull(v) {
@@ -74,23 +99,34 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchJson(url, { maxRetries = 8, label = "" } = {}) {
+class HttpError extends Error {
+  constructor(status, statusText, bodySnippet, url) {
+    super(`HTTP ${status} ${statusText}: ${bodySnippet}`);
+    this.name = "HttpError";
+    this.status = status;
+    this.statusText = statusText;
+    this.bodySnippet = bodySnippet;
+    this.url = url;
+  }
+}
+
+async function fetchJson(url, { maxRetries = 6, label = "", timeoutMs = 120_000 } = {}) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+
     try {
       const res = await fetch(url, {
-        headers: {
-          Accept: "application/json",
-          ...(API_KEY ? { "X-Api-Key": API_KEY } : {}),
-        },
+        signal: ctrl.signal,
+        headers: { Accept: "application/json" },
       });
 
       if (res.status === 429 || res.status >= 500) {
         const txt = await res.text().catch(() => "");
-        if (attempt === maxRetries) {
-          throw new Error(`HTTP ${res.status} after retries (${label}): ${txt.slice(0, 300)}`);
-        }
+        if (attempt === maxRetries) throw new HttpError(res.status, res.statusText, txt.slice(0, 300), url);
         const ra = Number(res.headers.get("retry-after") || "");
-        const wait = Number.isFinite(ra) ? ra * 1000 : Math.min(30000, 500 * (attempt + 1) ** 2);
+        const wait =
+          Number.isFinite(ra) && ra > 0 ? ra * 1000 : Math.min(30_000, 500 * (attempt + 1) ** 2);
         console.warn(`[retry] ${label} -> HTTP ${res.status}. waiting ${wait}ms`);
         await sleep(wait);
         continue;
@@ -98,74 +134,121 @@ async function fetchJson(url, { maxRetries = 8, label = "" } = {}) {
 
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status} ${res.statusText} (${label}): ${txt.slice(0, 300)}`);
+        throw new HttpError(res.status, res.statusText, txt.slice(0, 300), url);
       }
 
       return await res.json();
     } catch (e) {
+      const name = String(e?.name || "");
+      const msg = String(e?.message || e);
+      const aborted = name === "AbortError" || msg.toLowerCase().includes("aborted");
+
+      if (e?.name === "HttpError" && typeof e.status === "number") {
+        const s = e.status;
+        if (s >= 400 && s < 500 && s !== 429) throw e;
+      }
+
       if (attempt === maxRetries) throw e;
-      const wait = Math.min(30000, 500 * (attempt + 1) ** 2);
-      console.warn(`[retry] ${label} error: ${e?.message || e}. waiting ${wait}ms`);
+
+      const wait = aborted ? Math.min(45_000, 1500 * (attempt + 1)) : Math.min(30_000, 500 * (attempt + 1) ** 2);
+      console.warn(`[retry] ${label} error: ${msg}. waiting ${wait}ms`);
       await sleep(wait);
+    } finally {
+      clearTimeout(timer);
     }
   }
+
   throw new Error("unreachable");
 }
 
-function buildCardsUrl({ q, page, pageSize }) {
-  // Keep payload small; we only need pricing blobs + id
-  const select = [
-    "id",
-    "name",
-    "set.id",
-    "tcgplayer",
-    "cardmarket",
-  ].join(",");
+/* ------------------------ TCGdex endpoints ------------------------ */
 
-  return (
-    `${API_BASE}/cards?` +
-    new URLSearchParams({
-      q,
-      page: String(page),
-      pageSize: String(pageSize),
-      select,
-    }).toString()
-  );
+function buildCardsListUrl({ page, pageSize }) {
+  const qs = new URLSearchParams();
+  qs.set("pagination:page", String(page));
+  qs.set("pagination:itemsPerPage", String(pageSize));
+  return `${API_BASE}/cards?${qs.toString()}`;
 }
 
-async function* fetchAllCardsByQuery({ q, pageSize = 250 }) {
+function buildCardDetailUrl(cardId) {
+  return `${API_BASE}/cards/${encodeURIComponent(cardId)}`;
+}
+
+function isLikelyValidCardId(id) {
+  if (typeof id !== "string") return false;
+  const s = id.trim();
+  if (!s) return false;
+  if (s.length > 80) return false;
+  return /^[a-z0-9._-]+$/i.test(s);
+}
+
+async function* fetchAllCardIds({ pageSize, maxPages, timeoutMs }) {
   let page = 1;
   while (true) {
-    const url = buildCardsUrl({ q, page, pageSize });
-    const json = await fetchJson(url, { label: `cards q=${q} page=${page}` });
+    if (maxPages && page > maxPages) return;
 
-    const data = Array.isArray(json?.data) ? json.data : [];
-    const count = Number(json?.count ?? data.length);
-    const totalCount = Number(json?.totalCount ?? 0);
+    const url = buildCardsListUrl({ page, pageSize });
+    const json = await fetchJson(url, { label: `cards list page=${page}`, timeoutMs });
 
-    yield { page, count, totalCount, data };
+    const arr = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : [];
+    const ids = arr.map((x) => x?.id).filter(Boolean);
 
-    if (!count || data.length === 0) return;
-    // if we got fewer than pageSize, assume end
-    if (data.length < pageSize) return;
+    yield { page, count: ids.length, ids };
+
+    if (!ids.length) return;
+    if (ids.length < pageSize) return;
 
     page++;
   }
 }
 
-/* ---------------- DB Upserts ---------------- */
+async function fetchCardDetail(cardId, timeoutMs) {
+  const url = buildCardDetailUrl(cardId);
+  return await fetchJson(url, { label: `card ${cardId}`, timeoutMs });
+}
+
+/* ------------------------ pricing accessors ------------------------ */
+
+function getPricing(card) {
+  const pricing = card?.pricing || {};
+  const cardmarket = pricing.cardmarket ?? pricing.cardMarket ?? null;
+  const tcgplayer = pricing.tcgplayer ?? null;
+  return { cardmarket, tcgplayer };
+}
+
+function updatedMsFromProvider(card, provider) {
+  const { cardmarket, tcgplayer } = getPricing(card);
+  const p = provider === "tcgplayer" ? tcgplayer : cardmarket;
+  if (!p) return null;
+
+  const u = p.updated;
+  if (typeof u === "number" && Number.isFinite(u)) return u > 10_000_000_000 ? u : u * 1000;
+  const dt = new Date(String(u));
+  const ms = dt.getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function updatedIsoFromProvider(card, provider) {
+  const ms = updatedMsFromProvider(card, provider);
+  if (ms == null) return null;
+  const dt = new Date(ms);
+  return Number.isNaN(dt.getTime()) ? null : dt.toISOString();
+}
+
+/* ------------------------ DB write helpers ------------------------ */
 
 async function upsertTcgplayerNow(client, rows) {
-  // rows: {card_id, url, updated_at, normal, holofoil, reverse_holofoil, first_edition_holofoil, first_edition_normal, currency}
   if (!rows.length) return 0;
 
-  const cols = 9;
+  // IMPORTANT: now table unique is (card_id, variant_type)
+  const cols = 10;
   const params = [];
   const values = rows
     .map((r, idx) => {
       const b = idx * cols;
       params.push(
         r.card_id,
+        r.variant_type,
         r.url,
         r.updated_at,
         r.normal,
@@ -173,18 +256,18 @@ async function upsertTcgplayerNow(client, rows) {
         r.reverse_holofoil,
         r.first_edition_holofoil,
         r.first_edition_normal,
-        r.currency
+        r.currency,
       );
-      return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9})`;
+      return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10})`;
     })
     .join(",");
 
   await client.query(
     `
     INSERT INTO tcg_card_prices_tcgplayer
-      (card_id, url, updated_at, normal, holofoil, reverse_holofoil, first_edition_holofoil, first_edition_normal, currency)
+      (card_id, variant_type, url, updated_at, normal, holofoil, reverse_holofoil, first_edition_holofoil, first_edition_normal, currency)
     VALUES ${values}
-    ON CONFLICT (card_id) DO UPDATE SET
+    ON CONFLICT (card_id, variant_type) DO UPDATE SET
       url = EXCLUDED.url,
       updated_at = EXCLUDED.updated_at,
       normal = EXCLUDED.normal,
@@ -194,71 +277,7 @@ async function upsertTcgplayerNow(client, rows) {
       first_edition_normal = EXCLUDED.first_edition_normal,
       currency = EXCLUDED.currency
     `,
-    params
-  );
-
-  return rows.length;
-}
-
-async function upsertCardmarketNow(client, rows) {
-  if (!rows.length) return 0;
-
-  const cols = 18;
-  const params = [];
-  const values = rows
-    .map((r, idx) => {
-      const b = idx * cols;
-      params.push(
-        r.card_id,
-        r.url,
-        r.updated_at,
-        r.average_sell_price,
-        r.low_price,
-        r.trend_price,
-        r.german_pro_low,
-        r.suggested_price,
-        r.reverse_holo_sell,
-        r.reverse_holo_low,
-        r.reverse_holo_trend,
-        r.low_price_ex_plus,
-        r.avg1,
-        r.avg7,
-        r.avg30,
-        r.reverse_holo_avg1,
-        r.reverse_holo_avg7,
-        r.reverse_holo_avg30
-      );
-      return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10},$${b + 11},$${b + 12},$${b + 13},$${b + 14},$${b + 15},$${b + 16},$${b + 17},$${b + 18})`;
-    })
-    .join(",");
-
-  await client.query(
-    `
-    INSERT INTO tcg_card_prices_cardmarket
-      (card_id, url, updated_at, average_sell_price, low_price, trend_price, german_pro_low, suggested_price,
-       reverse_holo_sell, reverse_holo_low, reverse_holo_trend, low_price_ex_plus,
-       avg1, avg7, avg30, reverse_holo_avg1, reverse_holo_avg7, reverse_holo_avg30)
-    VALUES ${values}
-    ON CONFLICT (card_id) DO UPDATE SET
-      url = EXCLUDED.url,
-      updated_at = EXCLUDED.updated_at,
-      average_sell_price = EXCLUDED.average_sell_price,
-      low_price = EXCLUDED.low_price,
-      trend_price = EXCLUDED.trend_price,
-      german_pro_low = EXCLUDED.german_pro_low,
-      suggested_price = EXCLUDED.suggested_price,
-      reverse_holo_sell = EXCLUDED.reverse_holo_sell,
-      reverse_holo_low = EXCLUDED.reverse_holo_low,
-      reverse_holo_trend = EXCLUDED.reverse_holo_trend,
-      low_price_ex_plus = EXCLUDED.low_price_ex_plus,
-      avg1 = EXCLUDED.avg1,
-      avg7 = EXCLUDED.avg7,
-      avg30 = EXCLUDED.avg30,
-      reverse_holo_avg1 = EXCLUDED.reverse_holo_avg1,
-      reverse_holo_avg7 = EXCLUDED.reverse_holo_avg7,
-      reverse_holo_avg30 = EXCLUDED.reverse_holo_avg30
-    `,
-    params
+    params,
   );
 
   return rows.length;
@@ -267,7 +286,6 @@ async function upsertCardmarketNow(client, rows) {
 async function insertTcgplayerHistory(client, rows) {
   if (!rows.length) return 0;
 
-  // Filter bad rows (no timestamp)
   const clean = rows.filter((r) => r.card_id && r.source_updated_at);
   if (!clean.length) return 0;
 
@@ -284,7 +302,7 @@ async function insertTcgplayerHistory(client, rows) {
         r.holofoil,
         r.reverse_holofoil,
         r.first_edition_holofoil,
-        r.first_edition_normal
+        r.first_edition_normal,
       );
       return `($${b + 1},$${b + 2}::timestamptz,$${b + 3},$${b + 4}::numeric,$${b + 5}::numeric,$${b + 6}::numeric,$${b + 7}::numeric,$${b + 8}::numeric)`;
     })
@@ -297,275 +315,228 @@ async function insertTcgplayerHistory(client, rows) {
     VALUES ${values}
     ON CONFLICT (card_id, source_updated_at) DO NOTHING
     `,
-    params
+    params,
   );
 
   return res.rowCount || 0;
 }
 
+/* ------------------------ extraction / mapping ------------------------ */
 
-async function insertCardmarketHistory(client, rows) {
-  if (!rows.length) return 0;
-
-  const clean = rows.filter((r) => r.card_id && r.source_updated_at);
-  if (!clean.length) return 0;
-
-  const cols = 17;
-  const params = [];
-  const values = clean
-    .map((r, idx) => {
-      const b = idx * cols;
-      params.push(
-        r.card_id,
-        r.source_updated_at,
-        r.average_sell_price,
-        r.low_price,
-        r.trend_price,
-        r.german_pro_low,
-        r.suggested_price,
-        r.reverse_holo_sell,
-        r.reverse_holo_low,
-        r.reverse_holo_trend,
-        r.low_price_ex_plus,
-        r.avg1,
-        r.avg7,
-        r.avg30,
-        r.reverse_holo_avg1,
-        r.reverse_holo_avg7,
-        r.reverse_holo_avg30
-      );
-      return `($${b + 1},$${b + 2}::timestamptz,$${b + 3}::numeric,$${b + 4}::numeric,$${b + 5}::numeric,$${b + 6}::numeric,$${b + 7}::numeric,$${b + 8}::numeric,$${b + 9}::numeric,$${b + 10}::numeric,$${b + 11}::numeric,$${b + 12}::numeric,$${b + 13}::numeric,$${b + 14}::numeric,$${b + 15}::numeric,$${b + 16}::numeric,$${b + 17}::numeric)`;
-    })
-    .join(",");
-
-  const res = await client.query(
-    `
-    INSERT INTO public.tcg_card_prices_cardmarket_history
-      (card_id, source_updated_at,
-       average_sell_price, low_price, trend_price, german_pro_low, suggested_price,
-       reverse_holo_sell, reverse_holo_low, reverse_holo_trend, low_price_ex_plus,
-       avg1, avg7, avg30, reverse_holo_avg1, reverse_holo_avg7, reverse_holo_avg30)
-    VALUES ${values}
-    ON CONFLICT (card_id, source_updated_at) DO NOTHING
-    `,
-    params
-  );
-
-  return res.rowCount || 0;
+function pickTcgdxTcgplayerVariant(v) {
+  if (!v) return null;
+  return v.marketPrice ?? v.midPrice ?? v.lowPrice ?? null;
 }
 
+function extractTcgplayerRow(card, variantType) {
+  const { tcgplayer } = getPricing(card);
+  if (!tcgplayer) return null;
 
-/* ---------------- Transform helpers ---------------- */
-
-function extractTcgplayerRow(card) {
-  const t = card?.tcgplayer;
-  if (!t) return null;
-
-  const prices = t.prices || {};
-  const pickMarket = (k) => {
-    const obj = prices?.[k];
-    if (!obj) return null;
-    const m = obj.market ?? obj.mid ?? obj.low ?? null;
-    return m == null ? null : String(m);
-  };
+  const normal = pickTcgdxTcgplayerVariant(tcgplayer.normal);
+  const holofoil = pickTcgdxTcgplayerVariant(tcgplayer.holofoil);
+  const reverse = pickTcgdxTcgplayerVariant(tcgplayer["reverse-holofoil"]);
+  const firstNormal = pickTcgdxTcgplayerVariant(tcgplayer["1st-edition"]);
+  const firstHolo = pickTcgdxTcgplayerVariant(tcgplayer["1st-edition-holofoil"]);
 
   return {
     card_id: card.id,
-    url: t.url ?? null,
-    updated_at: t.updatedAt ?? null, // stored as TEXT in your table
-    normal: pickMarket("normal"),
-    holofoil: pickMarket("holofoil"),
-    reverse_holofoil: pickMarket("reverseHolofoil"),
-    first_edition_holofoil: pickMarket("1stEditionHolofoil"),
-    first_edition_normal: pickMarket("1stEditionNormal"),
-    currency: "USD",
+    variant_type: variantType,
+    url: null,
+    updated_at: updatedIsoFromProvider(card, "tcgplayer"),
+    normal: normal == null ? null : String(normal),
+    holofoil: holofoil == null ? null : String(holofoil),
+    reverse_holofoil: reverse == null ? null : String(reverse),
+    first_edition_holofoil: firstHolo == null ? null : String(firstHolo),
+    first_edition_normal: firstNormal == null ? null : String(firstNormal),
+    currency: String(tcgplayer.unit || "USD"),
   };
 }
 
 function extractTcgplayerHistRow(card) {
-  const t = card?.tcgplayer;
-  if (!t) return null;
-
-  const prices = t.prices || {};
-  const pickMarketNum = (k) => {
-    const obj = prices?.[k];
-    if (!obj) return null;
-    const m = obj.market ?? obj.mid ?? obj.low ?? null;
-    return numOrNull(m);
-  };
-
-  const ymd = t.updatedAt || null; // "YYYY/MM/DD"
-  const source_updated_at = ymd ? ymdSlashToTimestamptz(ymd) : null;
+  const row = extractTcgplayerRow(card, "default");
+  if (!row?.updated_at) return null;
 
   return {
-    card_id: card.id,
-    source_updated_at,
-    currency: "USD",
-    normal: pickMarketNum("normal"),
-    holofoil: pickMarketNum("holofoil"),
-    reverse_holofoil: pickMarketNum("reverseHolofoil"),
-    first_edition_holofoil: pickMarketNum("1stEditionHolofoil"),
-    first_edition_normal: pickMarketNum("1stEditionNormal"),
+    card_id: row.card_id,
+    source_updated_at: row.updated_at,
+    currency: row.currency,
+    normal: numOrNull(row.normal),
+    holofoil: numOrNull(row.holofoil),
+    reverse_holofoil: numOrNull(row.reverse_holofoil),
+    first_edition_holofoil: numOrNull(row.first_edition_holofoil),
+    first_edition_normal: numOrNull(row.first_edition_normal),
   };
 }
 
-function extractCardmarketRow(card) {
-  const c = card?.cardmarket;
-  if (!c) return null;
+/* ------------------------ concurrency helper ------------------------ */
 
-  const p = c.prices || {};
-  const s = (v) => (v == null ? null : String(v));
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let i = 0;
 
-  return {
-    card_id: card.id,
-    url: c.url ?? null,
-    updated_at: c.updatedAt ?? null, // TEXT in your table
-    average_sell_price: s(p.averageSellPrice),
-    low_price: s(p.lowPrice),
-    trend_price: s(p.trendPrice),
-    german_pro_low: s(p.germanProLow),
-    suggested_price: s(p.suggestedPrice),
-    reverse_holo_sell: s(p.reverseHoloSell),
-    reverse_holo_low: s(p.reverseHoloLow),
-    reverse_holo_trend: s(p.reverseHoloTrend),
-    low_price_ex_plus: s(p.lowPriceExPlus),
-    avg1: s(p.avg1),
-    avg7: s(p.avg7),
-    avg30: s(p.avg30),
-    reverse_holo_avg1: s(p.reverseHoloAvg1),
-    reverse_holo_avg7: s(p.reverseHoloAvg7),
-    reverse_holo_avg30: s(p.reverseHoloAvg30),
-  };
+  async function worker() {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) return;
+      out[idx] = await fn(items[idx], idx);
+    }
+  }
+
+  const n = Math.max(1, limit);
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return out;
 }
 
-function extractCardmarketHistRow(card) {
-  const c = card?.cardmarket;
-  if (!c) return null;
+/* ------------------------ runner ------------------------ */
 
-  const p = c.prices || {};
-  const ymd = c.updatedAt || null;
-  const source_updated_at = ymd ? ymdSlashToTimestamptz(ymd) : null;
+async function runAll({ client, providerMode, daySlash, pageSize, maxPages, dryRun, concurrency, timeoutMs, batchSize, variantType }) {
+  const dayStart = dayStartEpochMs(daySlash);
 
-  return {
-    card_id: card.id,
-    source_updated_at,
-    average_sell_price: numOrNull(p.averageSellPrice),
-    low_price: numOrNull(p.lowPrice),
-    trend_price: numOrNull(p.trendPrice),
-    german_pro_low: numOrNull(p.germanProLow),
-    suggested_price: numOrNull(p.suggestedPrice),
-    reverse_holo_sell: numOrNull(p.reverseHoloSell),
-    reverse_holo_low: numOrNull(p.reverseHoloLow),
-    reverse_holo_trend: numOrNull(p.reverseHoloTrend),
-    low_price_ex_plus: numOrNull(p.lowPriceExPlus),
-    avg1: numOrNull(p.avg1),
-    avg7: numOrNull(p.avg7),
-    avg30: numOrNull(p.avg30),
-    reverse_holo_avg1: numOrNull(p.reverseHoloAvg1),
-    reverse_holo_avg7: numOrNull(p.reverseHoloAvg7),
-    reverse_holo_avg30: numOrNull(p.reverseHoloAvg30),
-  };
-}
+  let fetched = 0;
+  let upserts = 0;
+  let skipped = 0;
+  let notFound = 0;
+  let badId = 0;
+  let errors = 0;
 
-/* ---------------- Main run ---------------- */
+  const tcgNow = [];
+  const tcgHist = [];
 
-async function runForQuery({ client, q, label }) {
-  const seen = new Set(); // card ids
-  let totalFetched = 0;
-
-  // batch upserts to keep it fast
-  const NOW_BATCH = 5000;
-
-  let tcgNow = [];
-  let cmNow = [];
-  let tcgHist = [];
-  let cmHist = [];
+  const wantsTcg = providerMode === "tcgplayer" || providerMode === "both";
+  if (!wantsTcg) throw new Error("This script run expects tcgplayer for now (use --provider tcgplayer)");
 
   const flush = async () => {
-    if (!tcgNow.length && !cmNow.length && !tcgHist.length && !cmHist.length) return;
+    if (dryRun) {
+      console.log(`[dry-run] flush now: tcg_now=${tcgNow.length} tcg_hist=${tcgHist.length}`);
+      tcgNow.length = 0;
+      tcgHist.length = 0;
+      return;
+    }
+
+    if (!tcgNow.length && !tcgHist.length) return;
 
     await client.query("BEGIN");
     try {
-      const upT = await upsertTcgplayerNow(client, tcgNow);
-      const upC = await upsertCardmarketNow(client, cmNow);
-
-      const insTH = await insertTcgplayerHistory(client, tcgHist);
-      const insCH = await insertCardmarketHistory(client, cmHist);
-
+      const a = tcgNow.length ? await upsertTcgplayerNow(client, tcgNow) : 0;
+      const b = tcgHist.length ? await insertTcgplayerHistory(client, tcgHist) : 0;
       await client.query("COMMIT");
-
-      console.log(
-        `[db] ${label} flush: tcg_now=${upT} cm_now=${upC} tcg_hist+${insTH} cm_hist+${insCH}`
-      );
+      upserts += a;
+      console.log(`[db] flush: tcg_now=${a} tcg_hist+${b}`);
     } catch (e) {
       await client.query("ROLLBACK");
       throw e;
+    } finally {
+      tcgNow.length = 0;
+      tcgHist.length = 0;
     }
-
-    tcgNow = [];
-    cmNow = [];
-    tcgHist = [];
-    cmHist = [];
   };
 
-  for await (const page of fetchAllCardsByQuery({ q, pageSize: 250 })) {
-    totalFetched += page.data.length;
+  const idBuffer = [];
 
-    for (const card of page.data) {
+  const processIdBatch = async (ids) => {
+    const results = await mapLimit(ids, concurrency, async (id) => {
+      if (!isLikelyValidCardId(id)) {
+        badId++;
+        return { ok: false, kind: "badId", id };
+      }
+
+      try {
+        const card = await fetchCardDetail(id, timeoutMs);
+        return { ok: true, id, card };
+      } catch (e) {
+        if (e?.name === "HttpError" && e.status === 404) {
+          notFound++;
+          return { ok: false, kind: "notFound", id };
+        }
+        errors++;
+        console.warn(`[err] card=${id}: ${e?.message || e}`);
+        return { ok: false, kind: "error", id };
+      }
+    });
+
+    for (const r of results) {
+      if (!r?.ok) continue;
+
+      const card = r.card;
       if (!card?.id) continue;
-      if (seen.has(card.id)) continue;
-      seen.add(card.id);
 
-      const tNow = extractTcgplayerRow(card);
-      const cNow = extractCardmarketRow(card);
-      if (tNow) tcgNow.push(tNow);
-      if (cNow) cmNow.push(cNow);
+      fetched++;
 
-      const tH = extractTcgplayerHistRow(card);
-      const cH = extractCardmarketHistRow(card);
-      // only keep history rows with a real source_updated_at
-      if (tH?.source_updated_at) tcgHist.push(tH);
-      if (cH?.source_updated_at) cmHist.push(cH);
+      let included = false;
 
-      if (tcgNow.length + cmNow.length >= NOW_BATCH) {
+      const ms = updatedMsFromProvider(card, "tcgplayer");
+      if (ms != null && ms >= dayStart) {
+        const row = extractTcgplayerRow(card, variantType);
+        const h = extractTcgplayerHistRow(card);
+        if (row) tcgNow.push(row);
+        if (h) tcgHist.push(h);
+        included = true;
+      }
+
+      if (!included) skipped++;
+
+      if (tcgNow.length >= batchSize) {
         await flush();
       }
     }
+  };
 
-    console.log(
-      `[fetch] ${label} page ${page.page}: got ${page.data.length} (running total ${totalFetched})`
-    );
+  for await (const page of fetchAllCardIds({ pageSize, maxPages, timeoutMs })) {
+    console.log(`[list] page ${page.page}: ids=${page.count}`);
+    idBuffer.push(...page.ids);
+
+    while (idBuffer.length >= batchSize) {
+      const ids = idBuffer.splice(0, batchSize);
+      await processIdBatch(ids);
+      console.log(`[progress] fetched=${fetched} upserts=${upserts} skipped=${skipped} notFound=${notFound} badId=${badId} errors=${errors}`);
+    }
+  }
+
+  while (idBuffer.length) {
+    const ids = idBuffer.splice(0, batchSize);
+    await processIdBatch(ids);
+    console.log(`[progress] fetched=${fetched} upserts=${upserts} skipped=${skipped} notFound=${notFound} badId=${badId} errors=${errors}`);
   }
 
   await flush();
 
-  return { totalFetched, unique: seen.size };
+  console.log(`[done] fetched=${fetched} upserts=${upserts} skipped=${skipped} notFound=${notFound} badId=${badId} errors=${errors}`);
 }
 
 async function main() {
   const args = parseArgs(process.argv);
-  const date = String(args.date || "").trim() || isoUtcDateToYmdSlash(new Date());
+  if (args.help) {
+    usage();
+    return;
+  }
 
-  // Option C: both
-  const qTcg = `tcgplayer.updatedAt:"${date}*"`;
-  const qCm = `cardmarket.updatedAt:"${date}*"`;
+  const daySlash = normalizeDateInput(args.date || "") || isoUtcDateToYmdSlash(new Date());
+  const pageSize = Math.max(1, Math.min(250, Number(args["page-size"] || 250) || 250));
+  const maxPages = args["max-pages"] ? Math.max(1, Number(args["max-pages"]) || 1) : null;
+  const concurrency = Math.max(1, Math.min(32, Number(args.concurrency || 8) || 8));
+  const timeoutMs = Math.max(5_000, Number(args["timeout-ms"] || 120_000) || 120_000);
+  const batchSize = Math.max(100, Math.min(10_000, Number(args.batch || 2000) || 2000));
+  const dryRun = Boolean(args["dry-run"]);
 
-  console.log(`[prices] date=${date} (TCGplayer primary; syncing both)`);
-  console.log(`[prices] q1=${qTcg}`);
-  console.log(`[prices] q2=${qCm}`);
+  const providerRaw = String(args.provider || "both").toLowerCase().trim();
+  const providerMode = providerRaw === "tcgplayer" || providerRaw === "cardmarket" ? providerRaw : "both";
 
-  const client = new Client({ connectionString: DATABASE_URL });
-  await client.connect();
+  const variantType = String(args["variant-type"] || "default").trim() || "default";
+
+  const DATABASE_URL = process.env.DATABASE_URL || "";
+  if (!DATABASE_URL && !dryRun) throw new Error("Missing DATABASE_URL in env (or use --dry-run)");
+
+  console.log(
+    `[prices] provider=tcgdex day=${daySlash} providerMode=${providerMode} pageSize=${pageSize} dryRun=${dryRun} concurrency=${concurrency} timeoutMs=${timeoutMs} batch=${batchSize} variantType=${variantType}`,
+  );
+
+  const client = dryRun ? null : new Client({ connectionString: DATABASE_URL });
+  if (client) await client.connect();
 
   try {
-    const r1 = await runForQuery({ client, q: qTcg, label: "tcgplayer.updatedAt" });
-    const r2 = await runForQuery({ client, q: qCm, label: "cardmarket.updatedAt" });
-
-    console.log(
-      `[done] fetched: tcg=${r1.totalFetched} (${r1.unique} unique), cm=${r2.totalFetched} (${r2.unique} unique)`
-    );
+    await runAll({ client, providerMode, daySlash, pageSize, maxPages, dryRun, concurrency, timeoutMs, batchSize, variantType });
   } finally {
-    await client.end();
+    if (client) await client.end();
   }
 }
 
