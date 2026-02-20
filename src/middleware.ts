@@ -72,11 +72,7 @@ function shouldBypassMiddleware(pathname: string) {
 }
 
 function getAdminToken(req: NextRequest) {
-  return (
-    req.headers.get("x-admin-token") ||
-    req.headers.get("X-Admin-Token") ||
-    ""
-  ).trim();
+  return (req.headers.get("x-admin-token") || req.headers.get("X-Admin-Token") || "").trim();
 }
 
 function hasValidAdminToken(req: NextRequest) {
@@ -93,7 +89,6 @@ function isNoisyHealthCheck(req: NextRequest) {
   // Cloudflare Traffic Manager / health checks
   if (p === "/api/health" && ua.includes("cloudflare-traffic-manager")) return true;
 
-  // You can add more patterns here if needed
   return false;
 }
 
@@ -102,6 +97,10 @@ export default clerkMiddleware(async (auth, req: NextRequest) => {
 
   // ✅ Hard bypass for internals/assets
   if (shouldBypassMiddleware(p)) return NextResponse.next();
+
+  // ✅ CRON BYPASS: cron routes do their own auth (x-cron-secret) inside the route handler.
+  // This prevents Clerk middleware from interfering with /api/cron/*.
+  if (p.startsWith("/api/cron/")) return NextResponse.next();
 
   // ✅ Absolute allowlist: never gate these, never redirect these
   if (isAlwaysPublicRoute(req)) return NextResponse.next();

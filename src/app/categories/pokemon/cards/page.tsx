@@ -4,6 +4,7 @@ import "server-only";
 import Link from "next/link";
 import Script from "next/script";
 import type { Metadata } from "next";
+import { unstable_noStore as noStore } from "next/cache";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import PokemonCardsClient from "./PokemonCardsClient";
@@ -113,9 +114,9 @@ function tcgdexImageUrl(base?: string | null, quality: "low" | "high" = "high") 
 export async function generateMetadata({
   searchParams,
 }: {
-  searchParams: SearchParams;
+  searchParams: Promise<SearchParams>;
 }): Promise<Metadata> {
-  const sp = searchParams;
+  const sp = (await searchParams) ?? {};
 
   const q = (sp?.q ?? "").trim();
   const lang = parseLang(sp?.lang);
@@ -168,9 +169,11 @@ export async function generateMetadata({
 export default async function PokemonCardsIndex({
   searchParams,
 }: {
-  searchParams: SearchParams;
+  searchParams: Promise<SearchParams>;
 }) {
-  const sp = searchParams;
+  noStore();
+
+  const sp = (await searchParams) ?? {};
   const baseHref = "/categories/pokemon/cards";
 
   const q: string | null = (sp?.q ?? "").trim() || null;

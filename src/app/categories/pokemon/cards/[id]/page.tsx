@@ -1,5 +1,6 @@
 import "server-only";
 
+import type React from "react";
 import type { Metadata } from "next";
 import Script from "next/script";
 import Image from "next/image";
@@ -23,30 +24,13 @@ import { getUserPlan, canUsePriceAlerts } from "@/lib/plans";
 
 import MarketValuePanel from "@/components/market/MarketValuePanel";
 
+import StickyQuickActionsClient from "@/components/pokemon/StickyQuickActionsClient";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 type SearchParams = Record<string, string | string[] | undefined>;
-
-type CardMetaRow = {
-  id: string;
-  name: string | null;
-  set_id: string | null;
-  set_name: string | null;
-  rarity: string | null;
-  image_base: string | null; // e.g. https://assets.tcgdex.net/en/bw/bw1/103
-};
-
-type CardRow = {
-  id: string;
-  raw_json: any; // tcgdex JSON blob
-};
-
-type MarketItemRow = {
-  id: string; // uuid
-  display_name: string | null;
-};
 
 /* ------------------------------------------------
    SEO helpers (absolute URLs)
@@ -68,20 +52,14 @@ function absUrl(path: string) {
 
 function absMaybe(urlOrPath: string | null | undefined) {
   if (!urlOrPath) return absUrl("/og-image.png");
-  if (/^https?:\/\//i.test(urlOrPath)) return urlOrPath;
-  return absUrl(urlOrPath);
+  const s = String(urlOrPath).trim();
+  if (!s) return absUrl("/og-image.png");
+  if (/^https?:\/\//i.test(s)) return s;
+  return absUrl(s);
 }
 
 /* ------------------------------------------------
    TCGdex image helpers
-
-   TCGdex card "image" field is a base like:
-   https://assets.tcgdex.net/en/swsh/swsh3/136
-
-   Build final URL:
-   {base}/{quality}.{extension}
-   - quality: high | low
-   - extension: webp (recommended), png, jpg
 ------------------------------------------------- */
 
 type ImgQuality = "high" | "low";
@@ -93,52 +71,99 @@ function tcgdexCardImageUrl(imageBase: string, quality: ImgQuality = "high", ext
   return `${base}/${quality}.${ext}`;
 }
 
-function bestImageFromRaw(raw: any): string | null {
+function bestImageFromTcgdexRaw(raw: any): string | null {
   const imageBase = String(raw?.image ?? "").trim();
   if (!imageBase) return null;
-  // main attraction on detail page => high.webp
   return tcgdexCardImageUrl(imageBase, "high", "webp");
 }
 
-function thumbImageFromRaw(raw: any): string | null {
+function thumbImageFromTcgdexRaw(raw: any): string | null {
   const imageBase = String(raw?.image ?? "").trim();
   if (!imageBase) return null;
-  // list/preview => low.webp
   return tcgdexCardImageUrl(imageBase, "low", "webp");
 }
 
 /* ------------------------------------------------
-   DB reads (tcgdex_cards + tcgdex_sets)
+   TCGdex set asset helpers (logo/symbol)
 ------------------------------------------------- */
 
-async function getCardMeta(cardId: string): Promise<CardMetaRow | null> {
-  noStore();
+function withExtIfMissing(u: string, ext: ImgExt = "png") {
+  const s = String(u ?? "").trim();
+  if (!s) return null;
 
-  // We only pluck what we need for SEO quickly using jsonb operators
-  const row =
-    (
-      await db.execute<CardMetaRow>(sql`
-        SELECT
-          c.id::text AS id,
-          NULLIF(c.raw_json->>'name','') AS name,
-          NULLIF(c.raw_json#>>'{set,id}','') AS set_id,
-          NULLIF(c.raw_json#>>'{set,name}','') AS set_name,
-          NULLIF(c.raw_json->>'rarity','') AS rarity,
-          NULLIF(c.raw_json->>'image','') AS image_base
-        FROM public.tcgdex_cards c
-        WHERE c.id::text = ${cardId}::text
-        LIMIT 1
-      `)
-    ).rows?.[0] ?? null;
+  if (/\.(png|webp|jpg|jpeg)$/i.test(s)) return s;
+  if (/\/(logo|symbol)$/i.test(s)) return `${s}.${ext}`;
 
-  return row ?? null;
+  return s;
 }
 
-async function getCardById(cardId: string): Promise<CardRow | null> {
+function extractTcgdexSetAssets(rawSet: any): { logo: string | null; symbol: string | null } {
+  const logoBase = rawSet?.logo ? String(rawSet.logo).trim() : "";
+  const symbolBase = rawSet?.symbol ? String(rawSet.symbol).trim() : "";
+  return {
+    logo: logoBase ? withExtIfMissing(logoBase, "png") : null,
+    symbol: symbolBase ? withExtIfMissing(symbolBase, "png") : null,
+  };
+}
+
+/* ------------------------------------------------
+   DB rows
+------------------------------------------------- */
+
+type TcgdexRow = {
+  id: string;
+  raw_json: any;
+};
+
+type TcgdexSetRow = {
+  id: string;
+  raw_json: any;
+};
+
+type LegacyRow = {
+  id: string;
+  name: string | null;
+  set_id: string | null;
+  set_name: string | null;
+  rarity: string | null;
+  number: string | null;
+  small_image: string | null;
+  large_image: string | null;
+};
+
+type VariantRow = {
+  normal: boolean | null;
+  reverse: boolean | null;
+  holo: boolean | null;
+  first_edition: boolean | null;
+  w_promo: boolean | null;
+};
+
+type MarketItemRow = {
+  id: string; // uuid
+  display_name: string | null;
+};
+
+type CardSource = "tcgdex" | "legacy";
+
+type CardResolved = {
+  source: CardSource;
+  id: string;
+  name: string;
+  setId: string | null;
+  setName: string | null;
+  rarity: string | null;
+  number: string | null;
+  cover: string | null;
+  thumb: string | null;
+  raw: any | null;
+};
+
+async function getTcgdexCard(cardId: string): Promise<TcgdexRow | null> {
   noStore();
   return (
     (
-      await db.execute<CardRow>(sql`
+      await db.execute<TcgdexRow>(sql`
         SELECT id::text AS id, raw_json
         FROM public.tcgdex_cards
         WHERE id::text = ${cardId}::text
@@ -146,6 +171,131 @@ async function getCardById(cardId: string): Promise<CardRow | null> {
       `)
     ).rows?.[0] ?? null
   );
+}
+
+async function getTcgdexSet(setId: string): Promise<TcgdexSetRow | null> {
+  if (!setId) return null;
+  noStore();
+  return (
+    (
+      await db.execute<TcgdexSetRow>(sql`
+        SELECT id::text AS id, raw_json
+        FROM public.tcgdex_sets
+        WHERE id::text = ${setId}::text
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null
+  );
+}
+
+async function getLegacyCard(cardId: string): Promise<LegacyRow | null> {
+  noStore();
+  return (
+    (
+      await db.execute<LegacyRow>(sql`
+        SELECT
+          c.id::text AS id,
+          NULLIF(c.name,'') AS name,
+          NULLIF(c.set_id,'') AS set_id,
+          NULLIF(s.name,'') AS set_name,
+          NULLIF(c.rarity,'') AS rarity,
+          NULLIF(c.number,'') AS number,
+          NULLIF(c.small_image,'') AS small_image,
+          NULLIF(c.large_image,'') AS large_image
+        FROM public.tcg_cards c
+        LEFT JOIN public.tcg_sets s
+          ON s.id = c.set_id
+        WHERE c.id::text = ${cardId}::text
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null
+  );
+}
+
+async function getLegacyVariants(cardId: string): Promise<VariantRow | null> {
+  noStore();
+  return (
+    (
+      await db.execute<VariantRow>(sql`
+        SELECT
+          v.normal AS normal,
+          v.reverse AS reverse,
+          v.holo AS holo,
+          v.first_edition AS first_edition,
+          v.w_promo AS w_promo
+        FROM public.tcg_card_variants v
+        WHERE v.card_id::text = ${cardId}::text
+        LIMIT 1
+      `)
+    ).rows?.[0] ?? null
+  );
+}
+
+async function resolveCard(cardIdRaw: string): Promise<CardResolved | null> {
+  noStore();
+
+  const cardId = decodeURIComponent(String(cardIdRaw ?? "")).trim();
+  if (!cardId) return null;
+
+  const tcgdex = await getTcgdexCard(cardId);
+  if (tcgdex) {
+    const raw = tcgdex.raw_json ?? {};
+    const id = String(raw?.id ?? tcgdex.id).trim() || tcgdex.id;
+    const name = String(raw?.name ?? id).trim() || id;
+    const setId = String(raw?.set?.id ?? "").trim() || null;
+    const setName = String(raw?.set?.name ?? "").trim() || null;
+    const rarity = String(raw?.rarity ?? "").trim() || null;
+    const number = raw?.localId != null ? String(raw.localId) : null;
+
+    const cover = bestImageFromTcgdexRaw(raw);
+    const thumb = thumbImageFromTcgdexRaw(raw) ?? cover;
+
+    return {
+      source: "tcgdex",
+      id,
+      name,
+      setId,
+      setName,
+      rarity,
+      number,
+      cover,
+      thumb,
+      raw,
+    };
+  }
+
+  const legacy = await getLegacyCard(cardId);
+  if (!legacy) return null;
+
+// sourcery skip: use-object-destructuring
+  const id = legacy.id;
+  const name = String(legacy.name ?? id).trim() || id;
+
+  const cover = legacy.large_image || legacy.small_image || null;
+  const thumb = legacy.small_image || legacy.large_image || null;
+
+  const raw = {
+    id,
+    name,
+    rarity: legacy.rarity ?? undefined,
+    number: legacy.number ?? undefined,
+    set: legacy.set_id ? { id: legacy.set_id, name: legacy.set_name ?? undefined } : undefined,
+    image: undefined,
+    pricing: undefined,
+  };
+
+  return {
+    source: "legacy",
+    id,
+    name,
+    setId: legacy.set_id,
+    setName: legacy.set_name,
+    rarity: legacy.rarity,
+    number: legacy.number,
+    cover,
+    thumb,
+    raw,
+  };
 }
 
 async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | null> {
@@ -167,19 +317,29 @@ async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | 
    Variants + owned counts
 ------------------------------------------------- */
 
-async function getVariantsByCardId(cardId: string): Promise<PokemonVariants> {
-  // Variants are inside tcgdex_cards.raw_json.variants
-  const row = await getCardById(cardId);
-  const v = row?.raw_json?.variants ?? null;
+async function getVariantsByResolvedCard(resolved: CardResolved): Promise<PokemonVariants> {
+  if (resolved.source === "tcgdex") {
+    const v = resolved.raw?.variants ?? null;
+    if (!v || typeof v !== "object") return null;
 
-  if (!v || typeof v !== "object") return null;
+    return {
+      normal: v.normal === true,
+      reverse: v.reverse === true,
+      holo: v.holo === true,
+      first_edition: v.firstEdition === true,
+      w_promo: v.wPromo === true,
+    };
+  }
+
+  const row = await getLegacyVariants(resolved.id);
+  if (!row) return null;
 
   return {
-    normal: v.normal === true,
-    reverse: v.reverse === true,
-    holo: v.holo === true,
-    first_edition: v.firstEdition === true,
-    w_promo: v.wPromo === true,
+    normal: row.normal === true,
+    reverse: row.reverse === true,
+    holo: row.holo === true,
+    first_edition: row.first_edition === true,
+    w_promo: row.w_promo === true,
   };
 }
 
@@ -233,11 +393,6 @@ type OfferPick = {
 };
 
 function pickBestTcgplayerOfferFromTcgdex(raw: any): OfferPick {
-  // tcgdex example:
-  // pricing.tcgplayer.unit = "USD"
-  // pricing.tcgplayer.updated = "..."
-  // pricing.tcgplayer.normal.marketPrice = 0.18
-  // pricing.tcgplayer["reverse-holofoil"].marketPrice = 0.60
   const tp = raw?.pricing?.tcgplayer ?? null;
 
   if (!tp || typeof tp !== "object") {
@@ -247,14 +402,12 @@ function pickBestTcgplayerOfferFromTcgdex(raw: any): OfferPick {
   const currency = String(tp.unit ?? "USD").trim().toUpperCase() || "USD";
   const updatedAtIso = parseIsoDate(tp.updated);
 
-  // Candidates in priority order
   const candidates: Array<{ key: string; obj: any }> = [];
 
   if (tp.normal) candidates.push({ key: "normal", obj: tp.normal });
   if (tp["reverse-holofoil"]) candidates.push({ key: "reverse-holofoil", obj: tp["reverse-holofoil"] });
   if (tp.holofoil) candidates.push({ key: "holofoil", obj: tp.holofoil });
 
-  // Some cards might only have one odd key; scan all keys too.
   for (const k of Object.keys(tp)) {
     if (k === "unit" || k === "updated") continue;
     const obj = (tp as any)[k];
@@ -284,9 +437,9 @@ function pickBestTcgplayerOfferFromTcgdex(raw: any): OfferPick {
 ------------------------------------------------- */
 
 function readDisplay(sp: SearchParams): DisplayCurrency {
-  const a = (Array.isArray(sp?.display) ? sp.display[0] : sp?.display) ?? "";
-  const b = (Array.isArray(sp?.currency) ? sp.currency[0] : sp?.currency) ?? "";
-  const v = (a || b).toUpperCase();
+  const a = (Array.isArray((sp as any)?.display) ? (sp as any).display[0] : (sp as any)?.display) ?? "";
+  const b = (Array.isArray((sp as any)?.currency) ? (sp as any).currency[0] : (sp as any)?.currency) ?? "";
+  const v = String(a || b).toUpperCase();
   return v === "USD" || v === "EUR" ? (v as DisplayCurrency) : "NATIVE";
 }
 
@@ -297,7 +450,6 @@ function parseTextList(v: unknown): string[] {
   const s = String(v).trim();
   if (!s) return [];
 
-  // handle legacy string forms if any
   if (s.startsWith("[") && s.endsWith("]")) {
     try {
       const arr = JSON.parse(s);
@@ -360,15 +512,56 @@ function TextBlock({ title, text }: { title: string; text: string | null }) {
   );
 }
 
+function ProfilePill({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs text-white">
+      <span className="text-white/60">{label}</span>
+      <span className="font-semibold text-white">{value}</span>
+    </span>
+  );
+}
+
+function ProfileStrip({
+  hp,
+  stage,
+  rarity,
+  setName,
+  number,
+  regulation,
+  trainerType,
+}: {
+  hp: string | null;
+  stage: string | null;
+  rarity: string | null;
+  setName: string | null;
+  number: string | null;
+  regulation: string | null;
+  trainerType: string | null;
+}) {
+  const items: React.ReactNode[] = [];
+
+  if (hp) items.push(<ProfilePill key="hp" label="HP" value={hp} />);
+  if (stage) items.push(<ProfilePill key="stage" label="Stage" value={stage} />);
+  if (rarity) items.push(<ProfilePill key="rarity" label="Rarity" value={rarity} />);
+  if (trainerType) items.push(<ProfilePill key="trainer" label="Trainer" value={trainerType} />);
+  if (setName) items.push(<ProfilePill key="set" label="Set" value={setName} />);
+  if (number) items.push(<ProfilePill key="num" label="No." value={number} />);
+  if (regulation) items.push(<ProfilePill key="reg" label="Reg" value={regulation} />);
+
+  if (!items.length) return null;
+
+  return (
+    <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+      <div className="flex flex-wrap items-center gap-2">{items}</div>
+    </div>
+  );
+}
+
 /* ------------------------------------------------
    Metadata
 ------------------------------------------------- */
 
-export async function generateMetadata({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
   const p = await params;
   const raw = decodeURIComponent(String(p?.id ?? "")).trim();
 
@@ -381,11 +574,10 @@ export async function generateMetadata({
     };
   }
 
-  const card = await getCardMeta(raw);
+  const resolved = await resolveCard(raw);
+  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(resolved?.id ?? raw)}`);
 
-  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(card?.id ?? raw)}`);
-
-  if (!card) {
+  if (!resolved) {
     return {
       title: `Pokémon Card Not Found | ${site.name}`,
       description: `We couldn’t find that Pokémon card. Browse cards and try again.`,
@@ -394,14 +586,15 @@ export async function generateMetadata({
     };
   }
 
-  const name = card.name ?? card.id;
-  const setPart = card.set_name ? ` (${card.set_name})` : "";
+// sourcery skip: use-object-destructuring
+  const name = resolved.name;
+  const setPart = resolved.setName ? ` (${resolved.setName})` : "";
   const title = `${name}${setPart} — Price, Details & Collection | ${site.name}`;
 
   const description = [
     `View ${name} Pokémon card details`,
-    card.rarity ? `rarity: ${card.rarity}` : null,
-    card.set_name ? `set: ${card.set_name}` : null,
+    resolved.rarity ? `rarity: ${resolved.rarity}` : null,
+    resolved.setName ? `set: ${resolved.setName}` : null,
     "market prices and trends",
     "add to your collection",
   ]
@@ -409,8 +602,7 @@ export async function generateMetadata({
     .join(", ")
     .concat(".");
 
-  const ogBase = card.image_base ? tcgdexCardImageUrl(card.image_base, "high", "webp") : null;
-  const ogImage = absMaybe(ogBase || site.ogImage || "/og-image.png");
+  const ogImage = absMaybe(resolved.cover || site.ogImage || "/og-image.png");
 
   return {
     title,
@@ -452,19 +644,17 @@ export default async function PokemonCardDetailPage({
   const { userId } = await auth();
   const canSave = !!userId;
 
-  // ✅ Canonical ignores display/currency -> redirect if present
-  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(rawId)}`);
-  const hasUiCurrencyParams = sp?.display !== undefined || sp?.currency !== undefined;
-
+  const hasUiCurrencyParams = (sp as any)?.display !== undefined || (sp as any)?.currency !== undefined;
   if (hasUiCurrencyParams) {
     redirect(`/categories/pokemon/cards/${encodeURIComponent(rawId)}`);
   }
 
   const display = readDisplay(sp);
 
-  const [row, variants] = await Promise.all([getCardById(rawId), getVariantsByCardId(rawId)]);
+  const resolved = await resolveCard(rawId);
+  const canonical = absUrl(`/categories/pokemon/cards/${encodeURIComponent(resolved?.id ?? rawId)}`);
 
-  if (!row) {
+  if (!resolved) {
     return (
       <section className="space-y-6">
         <Script
@@ -492,44 +682,49 @@ export default async function PokemonCardDetailPage({
     );
   }
 
-  const raw = row.raw_json ?? {};
-  const cardId = String(raw?.id ?? row.id).trim() || row.id;
+  const cardId = resolved.id;
+  const raw = resolved.raw ?? {};
+  const cardName = resolved.name;
 
-  const cardName = String(raw?.name ?? cardId).trim() || cardId;
+  const setId = resolved.setId;
+  const setName = resolved.setName;
 
-  const setId = String(raw?.set?.id ?? "").trim() || null;
-  const setName = String(raw?.set?.name ?? "").trim() || null;
+  const rarity = resolved.rarity;
+  const number = resolved.number;
 
-  const rarity = String(raw?.rarity ?? "").trim() || null;
-  const illustrator = String(raw?.illustrator ?? "").trim() || null;
-
+  const illustrator = raw?.illustrator != null ? String(raw.illustrator) : null;
   const hp = raw?.hp != null ? String(raw.hp) : null;
   const level = raw?.level != null ? String(raw.level) : null;
-
-  const supertype = raw?.category != null ? String(raw.category) : null; // ex: "Trainer"
-  const trainerType = raw?.trainerType != null ? String(raw.trainerType) : null; // ex: "Item"
-  const stage = raw?.stage != null ? String(raw.stage) : null; // evolution stage-ish
+  const supertype = raw?.category != null ? String(raw.category) : null;
+  const trainerType = raw?.trainerType != null ? String(raw.trainerType) : null;
+  const stage = raw?.stage != null ? String(raw.stage) : null;
   const regulation = raw?.regulationMark != null ? String(raw.regulationMark) : null;
-
   const evolvesFrom = raw?.evolveFrom != null ? String(raw.evolveFrom) : null;
 
   const types = parseTextList(raw?.types);
-  const subtypes = parseTextList(raw?.suffix ? [raw.suffix] : []); // tcgdex "suffix" sometimes; keep harmless
-
+  const subtypes = parseTextList(raw?.suffix ? [raw.suffix] : []);
   const retreat = raw?.retreat != null ? parseTextList(raw.retreat) : [];
 
   const effect = raw?.effect != null ? String(raw.effect) : null;
   const desc = raw?.description != null ? String(raw.description) : null;
 
-  const cover = bestImageFromRaw(raw);
+  const cover = resolved.cover;
   const coverAbs = cover ? absMaybe(cover) : null;
 
   const pricesHref = `/categories/pokemon/cards/${encodeURIComponent(cardId)}/prices`;
   const setHref = setId ? `/categories/pokemon/sets/${encodeURIComponent(setId)}` : null;
 
-  const ownedCounts = await getOwnedVariantCounts(userId ?? null, cardId);
+  const [variants, ownedCounts, tcgdexSetRow] = await Promise.all([
+    getVariantsByResolvedCard(resolved),
+    getOwnedVariantCounts(userId ?? null, cardId),
+    resolved.source === "tcgdex" && setId ? getTcgdexSet(setId) : Promise.resolve(null),
+  ]);
 
-  // Plan + alerts (single fetch)
+  const tcgdexSetRaw = tcgdexSetRow?.raw_json ?? null;
+  const setAssets = tcgdexSetRaw ? extractTcgdexSetAssets(tcgdexSetRaw) : { logo: null, symbol: null };
+  const setLogoUrl = setAssets.logo;
+  const setSymbolUrl = setAssets.symbol;
+
   let planTier: "free" | "collector" | "pro" = "free";
   let canUseAlerts = false;
   let marketItemId: string | null = null;
@@ -545,11 +740,9 @@ export default async function PokemonCardDetailPage({
     }
   }
 
-  // tcgdex pricing snapshot (best offer for header line + bell "currentUsd")
-  const offer = pickBestTcgplayerOfferFromTcgdex(raw);
-  const marketUsd = offer.currency === "USD" && offer.price != null && offer.price > 0 ? offer.price : null;
+  const offer = resolved.source === "tcgdex" ? pickBestTcgplayerOfferFromTcgdex(raw) : null;
+  const marketUsd = offer && offer.currency === "USD" && offer.price != null && offer.price > 0 ? offer.price : null;
 
-  // JSON-LD: Breadcrumbs + WebPage + Card entity (NOT Product)
   const canonicalCard = absUrl(`/categories/pokemon/cards/${encodeURIComponent(cardId)}`);
 
   const breadcrumbsJsonLd = {
@@ -578,23 +771,11 @@ export default async function PokemonCardDetailPage({
       rarity ? `Rarity: ${rarity}` : null,
       setName ? `Set: ${setName}` : null,
       illustrator ? `Illustrator: ${illustrator}` : null,
+      number ? `Number: ${number}` : null,
+      resolved.source === "legacy" ? "Source: legacy catalog" : "Source: tcgdex",
     ]
       .filter(Boolean)
       .join(" • "),
-    additionalProperty: [
-      rarity ? { "@type": "PropertyValue", name: "Rarity", value: rarity } : null,
-      setName ? { "@type": "PropertyValue", name: "Set", value: setName } : null,
-      setId ? { "@type": "PropertyValue", name: "Set ID", value: setId } : null,
-      illustrator ? { "@type": "PropertyValue", name: "Illustrator", value: illustrator } : null,
-      hp ? { "@type": "PropertyValue", name: "HP", value: hp } : null,
-      supertype ? { "@type": "PropertyValue", name: "Category", value: supertype } : null,
-      trainerType ? { "@type": "PropertyValue", name: "Trainer Type", value: trainerType } : null,
-      stage ? { "@type": "PropertyValue", name: "Stage", value: stage } : null,
-      evolvesFrom ? { "@type": "PropertyValue", name: "Evolve From", value: evolvesFrom } : null,
-      regulation ? { "@type": "PropertyValue", name: "Regulation Mark", value: regulation } : null,
-      types.length ? { "@type": "PropertyValue", name: "Types", value: types.join(", ") } : null,
-      offer.variantType ? { "@type": "PropertyValue", name: "Variant Type (priced)", value: offer.variantType } : null,
-    ].filter(Boolean),
   };
 
   const webPageJsonLd = {
@@ -608,9 +789,10 @@ export default async function PokemonCardDetailPage({
     mainEntity: { "@id": cardEntityId },
   };
 
+  const pickerImage = cover ?? (resolved.source === "tcgdex" ? thumbImageFromTcgdexRaw(raw) : resolved.thumb) ?? null;
+
   return (
     <section className="space-y-8">
-      {/* JSON-LD */}
       <Script
         id="pokemon-card-webpage-jsonld"
         type="application/ld+json"
@@ -627,7 +809,57 @@ export default async function PokemonCardDetailPage({
         dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
       />
 
-      {/* Visible breadcrumbs */}
+      <StickyQuickActionsClient
+        title={cardName}
+        subtitle={setName ? `${setName}${number ? ` • No. ${number}` : ""}` : number ? `No. ${number}` : null}
+        jumps={[
+          { href: "#prices", label: "Prices" },
+          { href: "#market-value", label: "Market Value" },
+          { href: "#attacks", label: "Attacks" },
+          { href: "#details", label: "Details" },
+        ]}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <CardActions
+              canSave={canSave}
+              game="pokemon"
+              cardId={cardId}
+              cardName={cardName}
+              setName={setName ?? undefined}
+              imageUrl={cover ?? undefined}
+            />
+
+            {userId ? (
+              canUseAlerts ? (
+                marketItemId ? (
+                  <PriceAlertBell game="pokemon" marketItemId={marketItemId} label={cardName} currentUsd={marketUsd} />
+                ) : (
+                  <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
+                    🔔 Alerts unavailable
+                  </span>
+                )
+              ) : (
+                <Link
+                  href="/pricing"
+                  className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                  prefetch={false}
+                >
+                  🔔 Price alerts (Pro)
+                </Link>
+              )
+            ) : (
+              <Link
+                href="/sign-in"
+                className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                prefetch={false}
+              >
+                🔔 Sign in for alerts
+              </Link>
+            )}
+          </div>
+        }
+      />
+
       <nav className="text-xs text-white/70">
         <div className="flex flex-wrap items-center gap-2">
           <Link href="/" className="hover:underline">
@@ -653,6 +885,43 @@ export default async function PokemonCardDetailPage({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+            {setLogoUrl || setSymbolUrl || setName || number ? (
+              <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 p-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  {setSymbolUrl ? (
+                    <div className="relative h-10 w-10 overflow-hidden rounded-xl border border-white/15 bg-black/30">
+                      <Image
+                        src={setSymbolUrl}
+                        alt={`${setName ?? "Set"} symbol`}
+                        fill
+                        unoptimized
+                        className="object-contain p-1"
+                        sizes="40px"
+                      />
+                    </div>
+                  ) : null}
+
+                  {setLogoUrl ? (
+                    <div className="relative h-10 w-[180px] max-w-full overflow-hidden rounded-xl border border-white/15 bg-black/30">
+                      <Image
+                        src={setLogoUrl}
+                        alt={`${setName ?? "Set"} logo`}
+                        fill
+                        unoptimized
+                        className="object-contain p-1"
+                        sizes="180px"
+                      />
+                    </div>
+                  ) : null}
+
+                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                    {setName ? <ProfilePill label="Set" value={setName} /> : null}
+                    {number ? <ProfilePill label="No." value={number} /> : null}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
             <div className="relative mx-auto aspect-3/4 w-full max-w-md">
               {cover ? (
                 <Image
@@ -669,34 +938,6 @@ export default async function PokemonCardDetailPage({
               )}
             </div>
 
-            <div className="mt-3 flex flex-wrap gap-3 text-xs">
-              {raw?.pricing?.tcgplayer ? (
-                <a
-                  className="text-sky-300 hover:underline"
-                  href={`https://www.tcgplayer.com/search/pokemon/product?productLineName=pokemon&q=${encodeURIComponent(
-                    cardName
-                  )}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  TCGplayer →
-                </a>
-              ) : null}
-
-              {raw?.pricing?.cardmarket ? (
-                <a
-                  className="text-sky-300 hover:underline"
-                  href={`https://www.cardmarket.com/en/Pokemon/Products/Search?searchString=${encodeURIComponent(
-                    cardName
-                  )}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Cardmarket →
-                </a>
-              ) : null}
-            </div>
-
             <VariantPickerAdd
               variants={variants}
               ownedCounts={ownedCounts}
@@ -704,7 +945,7 @@ export default async function PokemonCardDetailPage({
               cardId={cardId}
               cardName={cardName}
               setName={setName ?? null}
-              imageUrl={cover ?? thumbImageFromRaw(raw) ?? null}
+              imageUrl={pickerImage}
             />
           </div>
         </div>
@@ -715,16 +956,19 @@ export default async function PokemonCardDetailPage({
               <div>
                 <h1 className="text-2xl font-bold text-white">{cardName}</h1>
 
-                <div className="mt-1 text-sm text-white/80">
-                  <span className="mr-3 text-white/60">ID:</span>
-                  <span className="mr-4">{cardId}</span>
+                <ProfileStrip
+                  hp={hp}
+                  stage={stage}
+                  rarity={rarity}
+                  setName={setName}
+                  number={number}
+                  regulation={regulation}
+                  trainerType={trainerType}
+                />
 
-                  {rarity ? (
-                    <>
-                      <span className="mr-3 text-white/60">Rarity:</span>
-                      <span className="mr-4">{rarity}</span>
-                    </>
-                  ) : null}
+                <div className="mt-3 text-sm text-white/80">
+                  <span className="mr-3 text-white/60">ID:</span>
+                  <span className="mr-4 break-all">{cardId}</span>
 
                   {illustrator ? (
                     <>
@@ -732,12 +976,6 @@ export default async function PokemonCardDetailPage({
                       <span>{illustrator}</span>
                     </>
                   ) : null}
-                </div>
-
-                <div className="mt-2 text-xs text-white/60">
-                  {setName ? <span className="mr-3">Set: {setName}</span> : null}
-                  {setId ? <span className="mr-3">Set ID: {setId}</span> : null}
-                  {regulation ? <span>Reg: {regulation}</span> : null}
                 </div>
 
                 {setHref ? (
@@ -748,66 +986,20 @@ export default async function PokemonCardDetailPage({
                   </div>
                 ) : null}
 
-                {offer.price != null && offer.price > 0 ? (
+                {offer && offer.price != null && offer.price > 0 ? (
                   <div className="mt-3 text-sm text-white/80">
                     <span className="text-white/60">TCGplayer market:</span>{" "}
                     <span className="font-semibold text-white">
                       {offer.currency === "USD" ? "$" : ""}
-                      {offer.price.toFixed(2)}{" "}
-                      {offer.currency && offer.currency !== "USD" ? offer.currency : ""}
+                      {offer.price.toFixed(2)} {offer.currency && offer.currency !== "USD" ? offer.currency : ""}
                     </span>
                     {offer.updatedAtIso ? <span className="text-white/50"> • updated {offer.updatedAtIso}</span> : null}
-                    {offer.variantType ? (
-                      <span className="text-white/50"> • {String(offer.variantType)}</span>
-                    ) : null}
+                    {offer.variantType ? <span className="text-white/50"> • {String(offer.variantType)}</span> : null}
                   </div>
                 ) : null}
               </div>
 
               <div className="flex flex-wrap items-center gap-3 text-sm">
-                <CardActions
-                  canSave={canSave}
-                  game="pokemon"
-                  cardId={cardId}
-                  cardName={cardName}
-                  setName={setName ?? undefined}
-                  imageUrl={cover ?? undefined}
-                />
-
-                {/* ✅ Pro-gated alerts */}
-                {userId ? (
-                  canUseAlerts ? (
-                    marketItemId ? (
-                      <PriceAlertBell
-                        game="pokemon"
-                        marketItemId={marketItemId}
-                        label={cardName}
-                        currentUsd={marketUsd}
-                      />
-                    ) : (
-                      <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
-                        🔔 Alerts unavailable
-                      </span>
-                    )
-                  ) : (
-                    <Link
-                      href="/pricing"
-                      className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
-                      prefetch={false}
-                    >
-                      🔔 Price alerts (Pro)
-                    </Link>
-                  )
-                ) : (
-                  <Link
-                    href="/sign-in"
-                    className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
-                    prefetch={false}
-                  >
-                    🔔 Sign in for alerts
-                  </Link>
-                )}
-
                 <Link href={pricesHref} className="text-sky-300 hover:underline">
                   View prices →
                 </Link>
@@ -815,21 +1007,24 @@ export default async function PokemonCardDetailPage({
             </div>
           </div>
 
-          {/* Your market system stays as-is (market_items + market_prices_current etc.) */}
-          <MarketPrices category="pokemon" cardId={cardId} display={display} />
+          <div id="prices" className="scroll-mt-28">
+            <MarketPrices category="pokemon" cardId={cardId} display={display} />
+          </div>
 
-          <MarketValuePanel
-            game="pokemon"
-            canonicalId={cardId}
-            title="Market Value"
-            showDisclaimer
-            canSeeRanges={planTier === "collector" || planTier === "pro"}
-            canSeeConfidence={planTier === "pro"}
-          />
+          <div id="market-value" className="scroll-mt-28">
+            <MarketValuePanel
+              game="pokemon"
+              canonicalId={cardId}
+              title="Market Value"
+              showDisclaimer
+              canSeeRanges={planTier === "collector" || planTier === "pro"}
+              canSeeConfidence={planTier === "pro"}
+            />
+          </div>
         </div>
       </div>
 
-      <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
+      <div id="details" className="scroll-mt-28 rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
         <h2 className="mb-3 text-lg font-semibold text-white">Card Details</h2>
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -854,14 +1049,7 @@ export default async function PokemonCardDetailPage({
       <TextBlock title="Effect" text={effect} />
       <TextBlock title="Description" text={desc} />
 
-      {raw ? (
-        <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
-          <div className="mb-2 text-sm font-semibold">Raw (TCGdex)</div>
-          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/80">
-            {JSON.stringify(raw, null, 2)}
-          </pre>
-        </div>
-      ) : null}
+      <div id="attacks" className="scroll-mt-28" />
 
       <div className="flex flex-wrap gap-4 text-sm">
         <Link href="/categories/pokemon/cards" className="text-sky-300 hover:underline">

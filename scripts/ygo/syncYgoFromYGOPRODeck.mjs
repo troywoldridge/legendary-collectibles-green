@@ -1,4 +1,4 @@
-// scripts/ygoUpsertAll.mjs
+// scripts/ygo/syncYgoFromYGOPRODeck.mjs
 /* eslint-disable no-console */
 // Node 20+ (global fetch available)
 import pg from "pg";
@@ -23,8 +23,24 @@ const chunk = (arr, size) => {
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 };
+
 const toNumOrNull = (v) =>
   Number.isFinite(v) ? v : (v != null && v !== "" && Number.isFinite(Number(v)) ? Number(v) : null);
+
+function norm(v) {
+  return String(v ?? "").trim();
+}
+
+function asTextOrNull(v) {
+  const s = norm(v);
+  return s ? s : null;
+}
+
+// Best-effort: many YGOPRODeck payloads don't include a canonical updated timestamp for prices.
+// If you later discover a reliable field, set it here.
+function pickSourceUpdatedAtISO(_card) {
+  return null; // keep null unless you have a real upstream timestamp
+}
 
 // ---------- SQL (all UPSERTs) ----------
 const upsertCardSQL = `
@@ -55,11 +71,52 @@ INSERT INTO ygo_card_prices
 VALUES
   ($1,$2,$3,$4,$5,$6)
 ON CONFLICT (card_id) DO UPDATE SET
-  tcgplayer_price   = EXCLUDED.tcgplayer_price,
-  cardmarket_price  = EXCLUDED.cardmarket_price,
-  ebay_price        = EXCLUDED.ebay_price,
-  amazon_price      = EXCLUDED.amazon_price,
-  coolstuffinc_price= EXCLUDED.coolstuffinc_price
+  tcgplayer_price    = EXCLUDED.tcgplayer_price,
+  cardmarket_price   = EXCLUDED.cardmarket_price,
+  ebay_price         = EXCLUDED.ebay_price,
+  amazon_price       = EXCLUDED.amazon_price,
+  coolstuffinc_price = EXCLUDED.coolstuffinc_price
+`;
+
+/**
+ * History insert with de-dupe:
+ * Insert a new history row ONLY if it differs from the latest history row for this card_id.
+ *
+ * captured_at defaults to now() in the table definition.
+ */
+const insertPriceHistoryDedupSQL = `
+WITH last AS (
+  SELECT
+    tcgplayer_price,
+    cardmarket_price,
+    ebay_price,
+    amazon_price,
+    coolstuffinc_price
+  FROM public.ygo_card_prices_history
+  WHERE card_id = $1
+  ORDER BY captured_at DESC
+  LIMIT 1
+)
+INSERT INTO public.ygo_card_prices_history
+  (card_id, source_updated_at, tcgplayer_price, cardmarket_price, ebay_price, amazon_price, coolstuffinc_price)
+SELECT
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM last
+  WHERE
+    COALESCE(last.tcgplayer_price,    -1) = COALESCE($3, -1) AND
+    COALESCE(last.cardmarket_price,   -1) = COALESCE($4, -1) AND
+    COALESCE(last.ebay_price,         -1) = COALESCE($5, -1) AND
+    COALESCE(last.amazon_price,       -1) = COALESCE($6, -1) AND
+    COALESCE(last.coolstuffinc_price, -1) = COALESCE($7, -1)
+)
 `;
 
 const upsertBanSQL = `
@@ -110,11 +167,14 @@ async function main() {
     console.error("YGOPRODeck error", res.status, await res.text());
     process.exit(1);
   }
+
   const payload = await res.json();
   const cards = payload?.data ?? [];
   console.log(`Got ${cards.length} cards`);
 
   let processed = 0;
+  let historyInserts = 0;
+
   const batches = chunk(cards, 400);
   const t0 = Date.now();
 
@@ -126,38 +186,60 @@ async function main() {
       await client.query("BEGIN");
 
       for (const c of batch) {
-        const cardId = String(c.id);
+        const cardId = norm(c.id);
+        if (!cardId) continue;
+
         const linkmarkers = Array.isArray(c.linkmarkers) ? c.linkmarkers : null;
 
         // 1) cards (UPSERT)
         await client.query(upsertCardSQL, [
           cardId,
-          c.name ?? null,
-          c.type ?? null,
-          c.desc ?? null,
+          asTextOrNull(c.name),
+          asTextOrNull(c.type),
+          asTextOrNull(c.desc),
           toNumOrNull(c.atk),
           toNumOrNull(c.def),
           toNumOrNull(c.level),
-          c.race ?? null,
-          c.attribute ?? null,
-          c.archetype ?? null,
+          asTextOrNull(c.race),
+          asTextOrNull(c.attribute),
+          asTextOrNull(c.archetype),
           `https://db.ygoprodeck.com/card/?search=${encodeURIComponent(c.name ?? cardId)}`,
           toNumOrNull(c.linkval),
           toNumOrNull(c.scale),
           linkmarkers, // expect text[] in schema
         ]);
 
-        // 2) prices (UPSERT if present)
+        // 2) prices (UPSERT + HISTORY SNAPSHOT)
         const price = Array.isArray(c.card_prices) && c.card_prices[0] ? c.card_prices[0] : null;
+
         if (price) {
+          const tcgplayer = toNumOrNull(price.tcgplayer_price);
+          const cardmarket = toNumOrNull(price.cardmarket_price);
+          const ebay = toNumOrNull(price.ebay_price);
+          const amazon = toNumOrNull(price.amazon_price);
+          const coolstuffinc = toNumOrNull(price.coolstuffinc_price);
+
           await client.query(upsertPriceSQL, [
             cardId,
-            toNumOrNull(price.tcgplayer_price),
-            toNumOrNull(price.cardmarket_price),
-            toNumOrNull(price.ebay_price),
-            toNumOrNull(price.amazon_price),
-            toNumOrNull(price.coolstuffinc_price),
+            tcgplayer,
+            cardmarket,
+            ebay,
+            amazon,
+            coolstuffinc,
           ]);
+
+          // History: only insert if different from latest snapshot
+          const sourceUpdatedAt = pickSourceUpdatedAtISO(c);
+          const hist = await client.query(insertPriceHistoryDedupSQL, [
+            cardId,
+            sourceUpdatedAt, // timestamptz or null
+            tcgplayer,
+            cardmarket,
+            ebay,
+            amazon,
+            coolstuffinc,
+          ]);
+          if ((hist?.rowCount ?? 0) > 0) historyInserts += hist.rowCount ?? 0;
         }
 
         // 3) banlist (UPSERT if present)
@@ -165,9 +247,9 @@ async function main() {
         if (ban) {
           await client.query(upsertBanSQL, [
             cardId,
-            ban?.ban_tcg ?? null,
-            ban?.ban_ocg ?? null,
-            ban?.ban_goat ?? null,
+            asTextOrNull(ban?.ban_tcg),
+            asTextOrNull(ban?.ban_ocg),
+            asTextOrNull(ban?.ban_goat),
           ]);
         }
 
@@ -175,15 +257,15 @@ async function main() {
         const sets = Array.isArray(c.card_sets) ? c.card_sets : [];
         const seenCodes = new Set();
         for (const s of sets) {
-          const code = (s.set_code ?? "").trim();
+          const code = norm(s.set_code);
           if (!code || seenCodes.has(code)) continue;
           seenCodes.add(code);
 
           await client.query(upsertSetSQL, [
             cardId,
-            s.set_name ?? null,
+            asTextOrNull(s.set_name),
             code,
-            s.set_rarity ?? null,
+            asTextOrNull(s.set_rarity),
             s.set_price != null && s.set_price !== "" ? String(s.set_price) : null,
           ]);
         }
@@ -192,15 +274,15 @@ async function main() {
         const imgs = Array.isArray(c.card_images) ? c.card_images : [];
         const seenImg = new Set();
         for (const img of imgs) {
-          const small = img.image_url_small ?? "";
-          const large = img.image_url ?? "";
+          const small = norm(img.image_url_small);
+          const large = norm(img.image_url);
           const key = `${small}::${large}`;
           if (seenImg.has(key)) continue;
           seenImg.add(key);
           if (!small && !large) continue;
 
           const upd = await client.query(updateImageSQL, [cardId, large || null, small || null]);
-          if (upd.rowCount === 0) {
+          if ((upd?.rowCount ?? 0) === 0) {
             await client.query(insertImageSQL, [cardId, large || null, small || null]);
           }
         }
@@ -212,17 +294,17 @@ async function main() {
       processed += batch.length;
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       console.log(
-        `Upserted batch ${bi + 1}/${batches.length} — ${batch.length} cards (total ${processed}/${cards.length}) in ${elapsed}s`
+        `Upserted batch ${bi + 1}/${batches.length} — ${batch.length} cards (total ${processed}/${cards.length}) in ${elapsed}s — history inserts so far: ${historyInserts}`
       );
     } catch (err) {
-      try { await pool.query("ROLLBACK"); } catch {}
+      try { await client.query("ROLLBACK"); } catch {}
       client.release();
       console.error("Batch failed:", err);
       process.exit(1);
     }
   }
 
-  console.log("All done.");
+  console.log(`All done. History rows inserted this run: ${historyInserts}`);
   await pool.end();
 }
 

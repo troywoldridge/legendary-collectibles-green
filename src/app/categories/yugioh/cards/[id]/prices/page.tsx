@@ -34,12 +34,12 @@ export const dynamic = "force-dynamic";
 type SearchParams = Record<string, string | string[] | undefined>;
 
 type CardCore = {
-  id: string;
+  id: string; // ygo_cards.card_id
   name: string | null;
 };
 
 type YgoHist = {
-  captured_at: string;
+  captured_at: string; // day bucket (text)
   tcgplayer_price: string | null;
   cardmarket_price: string | null;
   ebay_price: string | null;
@@ -69,6 +69,9 @@ function asNum(v: string | null | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * For a series in ascending time order, return the first row with captured_at >= now - sinceMs.
+ */
 function pickAtOrAfter<T extends { captured_at: string }>(rows: T[], sinceMs: number) {
   const t0 = Date.now() - sinceMs;
   for (const r of rows) {
@@ -88,7 +91,10 @@ function pctChange(from: number | null, to: number | null): string | null {
    YGO-specific loaders
 ------------------------------------------------ */
 
-// Search in YGO cards
+/**
+ * Resolve an input param (id or name-ish slug) to a canonical ygo_cards.card_id.
+ * NOTE: schema uses ygo_cards.card_id (not "id").
+ */
 async function resolveCardId(param: string): Promise<string | null> {
   const trimmed = param.trim();
   if (!trimmed) return null;
@@ -98,18 +104,18 @@ async function resolveCardId(param: string): Promise<string | null> {
   const row =
     (
       await db.execute<{ id: string }>(sql`
-        SELECT id
-        FROM ygo_cards
-        WHERE id = ${trimmed}
-           OR lower(id) = lower(${trimmed})
+        SELECT card_id::text AS id
+        FROM public.ygo_cards
+        WHERE card_id::text = ${trimmed}
+           OR lower(card_id::text) = lower(${trimmed})
            OR name ILIKE ${like}
         ORDER BY
           CASE
-            WHEN id = ${trimmed} THEN 0
-            WHEN lower(id) = lower(${trimmed}) THEN 1
+            WHEN card_id::text = ${trimmed} THEN 0
+            WHEN lower(card_id::text) = lower(${trimmed}) THEN 1
             ELSE 2
           END,
-          id ASC
+          card_id::text ASC
         LIMIT 1
       `)
     ).rows?.[0] ?? null;
@@ -121,29 +127,50 @@ async function loadCore(cardId: string): Promise<CardCore | null> {
   return (
     (
       await db.execute<CardCore>(sql`
-        SELECT id, name
-        FROM ygo_cards
-        WHERE id = ${cardId}
+        SELECT card_id::text AS id, name
+        FROM public.ygo_cards
+        WHERE card_id::text = ${cardId}
         LIMIT 1
       `)
     ).rows?.[0] ?? null
   );
 }
 
-// 90-day per-source price history for Yu-Gi-Oh!
-async function loadHistory(cardId: string, days = 90): Promise<YgoHist[]> {
+/**
+ * 90-day per-source price history for Yu-Gi-Oh! — DOWNSAMPLED to daily buckets.
+ *
+ * Why this pattern:
+ * - If your sync runs multiple times/day, raw history can get huge.
+ * - This returns at most N rows (N=days), perfect for charts + trend metrics.
+ *
+ * Query:
+ * - Build a per-day bucket (date_trunc('day', captured_at))
+ * - Take the latest snapshot within each day (ORDER BY day, captured_at DESC)
+ * - DISTINCT ON (day) returns 1 row/day
+ */
+async function loadHistoryDaily(cardId: string, days = 90): Promise<YgoHist[]> {
   const { rows } = await db.execute<YgoHist>(sql`
-    SELECT
-      captured_at,
+    SELECT DISTINCT ON (day_bucket)
+      (day_bucket AT TIME ZONE 'UTC')::timestamptz::text AS captured_at,
       tcgplayer_price::text,
       cardmarket_price::text,
       ebay_price::text,
       amazon_price::text,
       coolstuffinc_price::text
-    FROM ygo_card_prices_history
-    WHERE card_id = ${cardId}
-      AND captured_at >= now() - (${days} * INTERVAL '1 day')
-    ORDER BY captured_at ASC
+    FROM (
+      SELECT
+        date_trunc('day', captured_at) AS day_bucket,
+        captured_at,
+        tcgplayer_price,
+        cardmarket_price,
+        ebay_price,
+        amazon_price,
+        coolstuffinc_price
+      FROM public.ygo_card_prices_history
+      WHERE card_id = ${cardId}
+        AND captured_at >= now() - (${days} * INTERVAL '1 day')
+    ) t
+    ORDER BY day_bucket ASC, captured_at DESC
   `);
 
   return rows ?? [];
@@ -249,7 +276,10 @@ export default async function YugiohCardPricesPage({
     );
   }
 
-  const [core, hist] = await Promise.all([loadCore(resolvedId), loadHistory(resolvedId, 90)]);
+  const [core, hist] = await Promise.all([
+    loadCore(resolvedId),
+    loadHistoryDaily(resolvedId, 90),
+  ]);
 
   if (!core) {
     return (
@@ -281,8 +311,7 @@ export default async function YugiohCardPricesPage({
     cardIds: [core.id],
   });
 
-  const pcSnapshotsById = pcSnapshots ?? {};
-  const pc = pcSnapshotsById[core.id] ?? null;
+  const pc = (pcSnapshots ?? {})[core.id] ?? null;
 
   const pcTop = await getTopPricechartingCardPrices({
     category: "yugioh",
@@ -296,11 +325,12 @@ export default async function YugiohCardPricesPage({
   const fx = getFx();
   const dayMs = 24 * 3600 * 1000;
 
+  // hist is daily, ascending day order
   const latest = hist.at(-1) ?? null;
   const h7 = pickAtOrAfter(hist, 7 * dayMs);
   const h30 = pickAtOrAfter(hist, 30 * dayMs);
 
-  // All YGO history is in USD; we optionally convert to EUR
+  // Your YGO history is effectively in USD; we optionally convert to EUR
   function conv(n: number | null, src: "USD" | "EUR"): number | null {
     if (n == null) return null;
     if (display === "NATIVE") return n;
@@ -548,15 +578,13 @@ export default async function YugiohCardPricesPage({
             <div className="text-xs text-white/60">
               {display === "NATIVE"
                 ? "Native market currencies"
-                : `Converted to ${display}${
-                    fx.usdToEur || fx.eurToUsd ? "" : " (no FX set; fallback used)"
-                  }`}
+                : `Converted to ${display}${fx.usdToEur || fx.eurToUsd ? "" : " (no FX set; fallback used)"}`}
             </div>
           </div>
 
           {noHistoryOrValues ? (
             <div className="rounded-md border border-white/10 bg-white/5 p-3 text-sm text-white/80">
-              Not enough history yet. Snapshots will populate after your daily Yu-Gi-Oh! pricing run and history snapshot.
+              Not enough history yet. 
             </div>
           ) : (
             <div className="overflow-x-auto">

@@ -20,6 +20,11 @@ function toInt(v: unknown, fallback: number, min = 1, max = 5000) {
   return Math.min(m, max);
 }
 
+function toBool(v: unknown): boolean {
+  const s = norm(v).toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "y";
+}
+
 function toNum(v: unknown): number | null {
   if (v == null) return null;
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
@@ -28,48 +33,122 @@ function toNum(v: unknown): number | null {
 }
 
 function dollarsToCents(v: number): number {
-  // avoid floating drift
   return Math.round(v * 100);
 }
 
-function pickTcgplayerUsd(raw: any): number | null {
-  // Prefer marketPrice if present; fall back to midPrice; then low/high average.
-  const n = raw?.pricing?.tcgplayer?.normal ?? null;
-  const r = raw?.pricing?.tcgplayer?.["reverse-holofoil"] ?? null;
-  const h = raw?.pricing?.tcgplayer?.holofoil ?? null;
+function isPlainObject(v: any): v is Record<string, any> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
 
-  const candidates = [n, r, h].filter(Boolean);
+/**
+ * Normalize tcgdex raw_json into a real JS object, regardless of pg/drizzle return type.
+ */
+function normalizeRawJson(input: any): any | null {
+  if (input == null) return null;
 
-  for (const c of candidates) {
-    const mp = toNum(c?.marketPrice);
-    if (mp != null) return mp;
+  // Already a plain object
+  if (isPlainObject(input)) return input;
+
+  // JSON string
+  if (typeof input === "string") {
+    const s = input.trim();
+    if (!s) return null;
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
   }
-  for (const c of candidates) {
-    const mid = toNum(c?.midPrice);
-    if (mid != null) return mid;
+
+  // Buffer -> string -> JSON
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer(input)) {
+    try {
+      const s = input.toString("utf8").trim();
+      if (!s) return null;
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
   }
-  for (const c of candidates) {
-    const low = toNum(c?.lowPrice);
-    const high = toNum(c?.highPrice);
-    if (low != null && high != null) return (low + high) / 2;
+
+  // Last resort: try to stringify then parse
+  try {
+    const s = JSON.stringify(input);
+    if (!s) return null;
+    return JSON.parse(s);
+  } catch {
+    return null;
   }
+}
+
+const TCGPREFERRED_BUCKET_ORDER = [
+  "normal",
+  "reverse-holofoil",
+  "holofoil",
+  "unlimited",
+  "1st-edition",
+  "unlimited-holofoil",
+  "1st-edition-holofoil",
+] as const;
+
+function pickBucketPrice(bucket: any): number | null {
+  const mp = toNum(bucket?.marketPrice);
+  if (mp != null) return mp;
+
+  const mid = toNum(bucket?.midPrice);
+  if (mid != null) return mid;
+
+  const low = toNum(bucket?.lowPrice);
+  const high = toNum(bucket?.highPrice);
+  if (low != null && high != null) return (low + high) / 2;
+
   return null;
 }
 
+function pickTcgplayerUsd(raw: any): { usd: number | null; bucketKey: string | null } {
+  const tp = raw?.pricing?.tcgplayer;
+  if (!isPlainObject(tp)) return { usd: null, bucketKey: null };
+
+  for (const k of TCGPREFERRED_BUCKET_ORDER) {
+    if (!Object.prototype.hasOwnProperty.call(tp, k)) continue;
+    const v = (tp as any)[k];
+    if (!isPlainObject(v)) continue;
+    const price = pickBucketPrice(v);
+    if (price != null) return { usd: price, bucketKey: k };
+  }
+
+  for (const k of Object.keys(tp)) {
+    if ((TCGPREFERRED_BUCKET_ORDER as readonly string[]).includes(k)) continue;
+    const v = (tp as any)[k];
+    if (!isPlainObject(v)) continue;
+    const price = pickBucketPrice(v);
+    if (price != null) return { usd: price, bucketKey: k };
+  }
+
+  return { usd: null, bucketKey: null };
+}
+
 function pickCardmarketEur(raw: any): number | null {
-  const cm = raw?.pricing?.cardmarket ?? null;
-  // Prefer trend, then avg30, then avg7, then avg
-  const trend = toNum(cm?.trend);
-  if (trend != null) return trend;
+  const cm = raw?.pricing?.cardmarket;
+  if (!isPlainObject(cm)) return null;
 
-  const avg30 = toNum(cm?.avg30);
-  if (avg30 != null) return avg30;
+  const primaryKeys = ["trend", "avg30", "avg7", "avg"] as const;
+  for (const k of primaryKeys) {
+    const v = toNum((cm as any)[k]);
+    if (v != null) return v;
+  }
 
-  const avg7 = toNum(cm?.avg7);
-  if (avg7 != null) return avg7;
+  const holoKeys = ["trend-holo", "avg30-holo", "avg7-holo", "avg-holo"] as const;
+  for (const k of holoKeys) {
+    const v = toNum((cm as any)[k]);
+    if (v != null) return v;
+  }
 
-  const avg = toNum(cm?.avg);
-  if (avg != null) return avg;
+  const extra = ["avg1", "avg1-holo", "low", "low-holo"] as const;
+  for (const k of extra) {
+    const v = toNum((cm as any)[k]);
+    if (v != null) return v;
+  }
 
   return null;
 }
@@ -87,28 +166,25 @@ function fxEurToUsd(): number | null {
 function computeOtherCurrency(opts: { usd: number | null; eur: number | null }) {
   let { usd, eur } = opts;
 
-  // If both exist, keep both (best case)
-  if (usd != null && eur != null) return { usd, eur, derived: false };
+  if (usd != null && eur != null) return { usd, eur, derivedCurrency: null as "USD" | "EUR" | null };
 
-  // If only USD exists, derive EUR
   if (usd != null && eur == null) {
     const r = fxUsdToEur();
     if (r != null) {
       eur = usd * r;
-      return { usd, eur, derived: true };
+      return { usd, eur, derivedCurrency: "EUR" as const };
     }
   }
 
-  // If only EUR exists, derive USD
   if (eur != null && usd == null) {
     const r = fxEurToUsd();
     if (r != null) {
       usd = eur * r;
-      return { usd, eur, derived: true };
+      return { usd, eur, derivedCurrency: "USD" as const };
     }
   }
 
-  return { usd, eur, derived: false };
+  return { usd, eur, derivedCurrency: null as "USD" | "EUR" | null };
 }
 
 async function upsertSnapshot(args: {
@@ -116,8 +192,12 @@ async function upsertSnapshot(args: {
   currency: "USD" | "EUR";
   cents: number;
   raw: any;
+  dryRun: boolean;
 }) {
-  const { cardId, currency, cents, raw } = args;
+  const { cardId, currency, cents, raw, dryRun } = args;
+
+  const rawJsonStr = JSON.stringify(raw ?? null);
+  if (dryRun) return;
 
   await db.execute(sql`
     INSERT INTO public.tcgdex_price_snapshots_daily (
@@ -128,7 +208,7 @@ async function upsertSnapshot(args: {
       CURRENT_DATE,
       ${currency}::text,
       ${cents}::int,
-      ${raw}::jsonb,
+      ${rawJsonStr}::jsonb,
       now(),
       now()
     )
@@ -140,8 +220,14 @@ async function upsertSnapshot(args: {
   `);
 }
 
+async function ensureTableExists() {
+  const r = await db.execute<{ ok: number }>(sql`
+    SELECT CASE WHEN to_regclass('public.tcgdex_price_snapshots_daily') IS NULL THEN 0 ELSE 1 END AS ok
+  `);
+  return (r.rows?.[0]?.ok ?? 0) === 1;
+}
+
 export async function GET(req: Request) {
-  // Auth
   const headerSecret = norm((req as any).headers?.get?.("x-cron-secret"));
   const envSecret = norm(process.env.CRON_SECRET || process.env.JOB_SECRET);
 
@@ -152,10 +238,23 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const limit = toInt(url.searchParams.get("limit"), 500, 1, 5000);
   const startAfterId = norm(url.searchParams.get("startAfterId"));
+  const dryRun = toBool(url.searchParams.get("dryRun"));
+  const debug = toBool(url.searchParams.get("debug"));
 
   const startedAt = Date.now();
 
-  // Pull a page of tcgdex_cards
+  const tableOk = await ensureTableExists();
+  if (!tableOk) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Missing table: public.tcgdex_price_snapshots_daily",
+        hint: "Run your migration / create-table step for tcgdex snapshots.",
+      },
+      { status: 500 }
+    );
+  }
+
   const rows =
     (
       await db.execute<{ id: string; raw_json: any }>(sql`
@@ -168,99 +267,180 @@ export async function GET(req: Request) {
     ).rows ?? [];
 
   let processed = 0;
-  let wrote = 0;
-  let skipped = 0;
-  let derivedCount = 0;
-  let errors = 0;
+
+  let wroteRows = 0;
+  let wroteCards = 0;
+
+  let derivedRows = 0;
+
+  const skippedReasons: Record<string, number> = {
+    missing_card_or_raw: 0,
+    raw_not_parseable: 0,
+    no_usd_no_eur: 0,
+  };
+
+  let errorRows = 0;
+  const errorCardSet = new Set<string>();
+
+  const debugSamples: Array<any> = [];
+  const skippedSamples: Array<any> = [];
+  const bucketCounts: Record<string, number> = {};
+
+  let lastId: string | null = null;
 
   for (const r of rows) {
     const cardId = norm(r.id);
-    const raw = r.raw_json;
+    lastId = cardId || lastId;
 
-    if (!cardId || !raw) {
-      skipped++;
+    if (!cardId || r.raw_json == null) {
+      skippedReasons.missing_card_or_raw++;
+      processed++;
       continue;
     }
 
-    try {
-      const usd = pickTcgplayerUsd(raw);     // USD signal
-      const eur = pickCardmarketEur(raw);    // EUR signal
-
-      const both = computeOtherCurrency({ usd, eur });
-      if (both.derived) derivedCount++;
-
-      // Need at least one currency to write anything
-      if (both.usd == null && both.eur == null) {
-        skipped++;
-        processed++;
-        continue;
+    const raw = normalizeRawJson(r.raw_json);
+    if (!raw) {
+      skippedReasons.raw_not_parseable++;
+      if (debug && skippedSamples.length < 25) {
+        skippedSamples.push({
+          cardId,
+          rawType: typeof r.raw_json,
+          isBuffer: typeof Buffer !== "undefined" ? Buffer.isBuffer(r.raw_json) : false,
+        });
       }
+      processed++;
+      continue;
+    }
 
-      // Write USD row if available
-      if (both.usd != null) {
-        const cents = dollarsToCents(both.usd);
+    let wroteUsd = false;
+    let wroteEur = false;
+
+    const usdPick = pickTcgplayerUsd(raw);
+    const eur = pickCardmarketEur(raw);
+
+    if (usdPick.bucketKey) {
+      bucketCounts[usdPick.bucketKey] = (bucketCounts[usdPick.bucketKey] ?? 0) + 1;
+    }
+
+    const both = computeOtherCurrency({ usd: usdPick.usd, eur });
+    if (both.derivedCurrency) derivedRows++;
+
+    if (both.usd == null && both.eur == null) {
+      skippedReasons.no_usd_no_eur++;
+      if (debug && skippedSamples.length < 25) {
+        skippedSamples.push({
+          cardId,
+          tcgplayerKeys: isPlainObject(raw?.pricing?.tcgplayer) ? Object.keys(raw.pricing.tcgplayer) : null,
+          cardmarketKeys: isPlainObject(raw?.pricing?.cardmarket) ? Object.keys(raw.pricing.cardmarket) : null,
+          tcgplayerValue: raw?.pricing?.tcgplayer ?? null,
+          cardmarketValue: raw?.pricing?.cardmarket ?? null,
+        });
+      }
+      processed++;
+      continue;
+    }
+
+    let wroteThisCard = 0;
+
+    if (both.usd != null) {
+      try {
         await upsertSnapshot({
           cardId,
           currency: "USD",
-          cents,
-          raw: {
-            provider: "tcgdex",
-            currency: "USD",
-            market_price: both.usd,
-            source: "tcgplayer_or_derived",
-            tcgplayer: raw?.pricing?.tcgplayer ?? null,
-            cardmarket: raw?.pricing?.cardmarket ?? null,
-            derived: both.derived,
-            captured_at: new Date().toISOString(),
-          },
+          cents: dollarsToCents(both.usd),
+          raw,
+          dryRun,
         });
-        wrote++;
+        wroteRows++;
+        wroteThisCard++;
+        wroteUsd = true;
+      } catch (err: any) {
+        errorRows++;
+        errorCardSet.add(cardId);
+        console.log(
+          "[tcgdex snapshots] failed",
+          JSON.stringify({
+            cardId,
+            currency: "USD",
+            message: err?.message ? String(err.message) : "Unknown error",
+            ...(err?.cause ? { cause: String(err.cause) } : {}),
+          })
+        );
       }
+    }
 
-      // Write EUR row if available
-      if (both.eur != null) {
-        const cents = dollarsToCents(both.eur);
+    if (both.eur != null) {
+      try {
         await upsertSnapshot({
           cardId,
           currency: "EUR",
-          cents,
-          raw: {
-            provider: "tcgdex",
-            currency: "EUR",
-            market_price: both.eur,
-            source: "cardmarket_or_derived",
-            tcgplayer: raw?.pricing?.tcgplayer ?? null,
-            cardmarket: raw?.pricing?.cardmarket ?? null,
-            derived: both.derived,
-            captured_at: new Date().toISOString(),
-          },
+          cents: dollarsToCents(both.eur),
+          raw,
+          dryRun,
         });
-        wrote++;
+        wroteRows++;
+        wroteThisCard++;
+        wroteEur = true;
+      } catch (err: any) {
+        errorRows++;
+        errorCardSet.add(cardId);
+        console.log(
+          "[tcgdex snapshots] failed",
+          JSON.stringify({
+            cardId,
+            currency: "EUR",
+            message: err?.message ? String(err.message) : "Unknown error",
+            ...(err?.cause ? { cause: String(err.cause) } : {}),
+          })
+        );
       }
-
-      processed++;
-    } catch (e: any) {
-      errors++;
-      processed++;
-      // keep going
-      console.error("[tcgdex snapshots] failed for", r.id, e?.message || e);
     }
+
+    if (wroteThisCard > 0) wroteCards++;
+
+    if (debug && debugSamples.length < 25) {
+      debugSamples.push({
+        cardId,
+        tcgplayerBucket: usdPick.bucketKey,
+        usd: both.usd,
+        eur: both.eur,
+        derivedCurrency: both.derivedCurrency,
+        wroteUsd,
+        wroteEur,
+      });
+    }
+
+    processed++;
   }
 
-  const nextStartAfterId = rows.length ? rows[rows.length - 1]!.id : null;
+  const ms = Date.now() - startedAt;
+  const nextStartAfterId = lastId && lastId !== startAfterId ? lastId : null;
 
-  return NextResponse.json({
+  const skipped = Object.values(skippedReasons).reduce((a, b) => a + b, 0);
+
+  const body: any = {
     ok: true,
+    dryRun,
     limit,
     startAfterId: startAfterId || null,
     nextStartAfterId,
     processed,
-    wrote_rows: wrote,
+    wrote_rows: wroteRows,
+    wrote_cards: wroteCards,
     skipped,
-    derived_rows: derivedCount,
-    errors,
-    ms: Date.now() - startedAt,
-    note:
-      "Writes up to 2 rows/card/day (USD + EUR). If only one currency exists, derives the other using FX_USD_TO_EUR / FX_EUR_TO_USD.",
-  });
+    skipped_reasons: skippedReasons,
+    derived_rows: derivedRows,
+    errors: errorCardSet.size,
+    error_rows: errorRows,
+    ms,
+    note: "Writes up to 2 rows/card/day (USD + EUR). Normalizes raw_json to plain JS objects before reading. USD bucket chosen dynamically across all tcgplayer keys. Cardmarket supports trend/avg30/avg7/avg plus -holo variants. If only one currency exists, derives the other using FX_USD_TO_EUR / FX_EUR_TO_USD.",
+  };
+
+  if (debug) {
+    body.debug_samples = debugSamples;
+    body.skipped_samples = skippedSamples;
+    body.usd_bucket_counts = bucketCounts;
+  }
+
+  return NextResponse.json(body);
 }

@@ -10,8 +10,6 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { auth } from "@clerk/nextjs/server";
 
-
-
 import YgoCardSearch from "@/components/ygo/YgoCardSearch";
 import CardActions from "@/components/collection/CardActions";
 
@@ -26,6 +24,8 @@ import { getAffiliateLinkForCard } from "@/lib/affiliate";
 
 import { site } from "@/config/site";
 import MarketValuePanel from "@/components/market/MarketValuePanel";
+
+import PriceHistoryChart from "@/components/charts/PriceHistoryChart";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -70,6 +70,15 @@ type SetEntry = {
 
 type MarketItemRow = { id: string };
 
+type YgoHistRow = {
+  captured_at: string; // ISO-ish text
+  tcgplayer_price: string | null;
+  cardmarket_price: string | null;
+  ebay_price: string | null;
+  amazon_price: string | null;
+  coolstuffinc_price: string | null;
+};
+
 /* ---------------- Helpers ---------------- */
 function money(v: number | string | null | undefined) {
   if (v == null) return "—";
@@ -111,13 +120,44 @@ function pickUsdPriceFromPrices(prices: PriceRow | null): number | null {
     prices.ebay,
     prices.amazon,
     prices.coolstuffinc,
-    prices.cardmarket, // last resort
+    prices.cardmarket,
   ];
 
   for (const v of candidates) {
     if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
   }
   return null;
+}
+
+function asNum(v: string | null | undefined): number | null {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pctChange(from: number | null, to: number | null): string | null {
+  if (from == null || to == null || from === 0) return null;
+  const p = ((to - from) / from) * 100;
+  return `${p >= 0 ? "+" : ""}${p.toFixed(1)}%`;
+}
+
+function pickAtOrAfter<T extends { captured_at: string }>(rows: T[], sinceMs: number) {
+  const t0 = Date.now() - sinceMs;
+  for (const r of rows) {
+    const t = Date.parse(r.captured_at);
+    if (Number.isFinite(t) && t >= t0) return r;
+  }
+  return null;
+}
+
+function toISODateOnly(input: string): string | null {
+  const t = Date.parse(input);
+  if (!Number.isFinite(t)) return null;
+  const d = new Date(t);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 function PriceBox({ label, value }: { label: string; value: number | null | undefined }) {
@@ -144,6 +184,46 @@ async function getMarketItemForYugioh(cardId: string): Promise<MarketItemRow | n
   );
 }
 
+/* ---------------- History loader (daily bucket) ---------------- */
+async function getYgoHistoryDaily(cardId: string, days = 90): Promise<YgoHistRow[]> {
+  const { rows } = await db.execute<YgoHistRow>(sql`
+    SELECT DISTINCT ON (day_bucket)
+      (day_bucket AT TIME ZONE 'UTC')::timestamptz::text AS captured_at,
+      tcgplayer_price::text,
+      cardmarket_price::text,
+      ebay_price::text,
+      amazon_price::text,
+      coolstuffinc_price::text
+    FROM (
+      SELECT
+        date_trunc('day', captured_at) AS day_bucket,
+        captured_at,
+        tcgplayer_price,
+        cardmarket_price,
+        ebay_price,
+        amazon_price,
+        coolstuffinc_price
+      FROM public.ygo_card_prices_history
+      WHERE card_id = ${cardId}
+        AND captured_at >= now() - (${days} * INTERVAL '1 day')
+    ) t
+    ORDER BY day_bucket ASC, captured_at DESC
+  `);
+
+  return rows ?? [];
+}
+
+function effectiveUsdFromHist(r: YgoHistRow | null): number | null {
+  if (!r) return null;
+  const v =
+    asNum(r.tcgplayer_price) ??
+    asNum(r.ebay_price) ??
+    asNum(r.amazon_price) ??
+    asNum(r.coolstuffinc_price) ??
+    asNum(r.cardmarket_price);
+  return v != null && v > 0 ? v : null;
+}
+
 /* ---------------- Data loaders ---------------- */
 async function getCard(param: string): Promise<{
   card: CardRow | null;
@@ -151,6 +231,7 @@ async function getCard(param: string): Promise<{
   prices: PriceRow | null;
   banlist: BanlistRow | null;
   sets: SetEntry[];
+  historyDaily: YgoHistRow[];
 }> {
   const id = decodeURIComponent(param).trim();
 
@@ -227,7 +308,9 @@ async function getCard(param: string): Promise<{
       `)
     ).rows ?? [];
 
-  return { card, images, prices, banlist, sets };
+  const historyDaily = await getYgoHistoryDaily(id, 90);
+
+  return { card, images, prices, banlist, sets, historyDaily };
 }
 
 export async function generateMetadata({ params }: { params: { id: string } }): Promise<Metadata> {
@@ -325,7 +408,6 @@ export async function generateMetadata({ params }: { params: { id: string } }): 
   };
 }
 
-
 /* ---------------- Page ---------------- */
 export default async function YugiohCardDetailPage({
   params,
@@ -334,7 +416,7 @@ export default async function YugiohCardDetailPage({
 }) {
   const { id } = await params;
 
-  const { card, images, prices, banlist, sets } = await getCard(id);
+  const { card, images, prices, banlist, sets, historyDaily } = await getCard(id);
 
   if (!card) {
     return (
@@ -356,6 +438,7 @@ export default async function YugiohCardDetailPage({
   const canonical = absUrl(`/categories/yugioh/cards/${encodeURIComponent(card.id)}`);
   const baseCards = "/categories/yugioh/cards";
   const baseSets = "/categories/yugioh/sets";
+  const pricesHref = `/categories/yugioh/cards/${encodeURIComponent(card.id)}/prices`;
 
   const cover = bestImage(images);
   const coverAbs = cover ? absMaybe(cover) : null;
@@ -384,8 +467,7 @@ export default async function YugiohCardDetailPage({
 
   // currentUsd for alert context
   const offerPrice = pickUsdPriceFromPrices(prices);
-  const currentUsd =
-    offerPrice != null && Number.isFinite(offerPrice) && offerPrice > 0 ? offerPrice : null;
+  const currentUsd = offerPrice != null && offerPrice > 0 ? offerPrice : null;
 
   // Amazon affiliate link (server-side)
   const amazonLink = await getAffiliateLinkForCard({
@@ -393,6 +475,29 @@ export default async function YugiohCardDetailPage({
     cardId: card.id,
     marketplace: "amazon",
   });
+
+  // ---- Build chart points (effective daily USD) ----
+  const points = (historyDaily || [])
+    .map((r) => {
+      const day = toISODateOnly(r.captured_at);
+      const v = effectiveUsdFromHist(r);
+      if (!day || v == null) return null;
+      return { as_of_date: day, value: v };
+    })
+    .filter(Boolean) as Array<{ as_of_date: string; value: number }>;
+
+  // ---- Quick deltas off effective series ----
+  const dayMs = 24 * 3600 * 1000;
+  const latestHist = historyDaily.at(-1) ?? null;
+  const h7 = pickAtOrAfter(historyDaily, 7 * dayMs);
+  const h30 = pickAtOrAfter(historyDaily, 30 * dayMs);
+
+  const effLatest = effectiveUsdFromHist(latestHist);
+  const eff7 = effectiveUsdFromHist(h7);
+  const eff30 = effectiveUsdFromHist(h30);
+
+  const eff7Change = pctChange(eff7, effLatest);
+  const eff30Change = pctChange(eff30, effLatest);
 
   // JSON-LD
   const breadcrumbsJsonLd = {
@@ -471,21 +576,9 @@ export default async function YugiohCardDetailPage({
   return (
     <section className="space-y-8">
       {/* JSON-LD */}
-      <Script
-        id="ygo-card-webpage-jsonld"
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
-      />
-      <Script
-        id="ygo-card-breadcrumbs-jsonld"
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }}
-      />
-      <Script
-        id="ygo-card-product-jsonld"
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
-      />
+      <Script id="ygo-card-webpage-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }} />
+      <Script id="ygo-card-breadcrumbs-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbsJsonLd) }} />
+      <Script id="ygo-card-product-jsonld" type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }} />
 
       {/* Visible breadcrumbs */}
       <nav className="text-xs text-white/70">
@@ -547,21 +640,31 @@ export default async function YugiohCardDetailPage({
         {/* Details */}
         <div className="lg:col-span-7 space-y-4">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <h1 className="text-2xl font-bold text-white">{card.name}</h1>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h1 className="text-2xl font-bold text-white">{card.name}</h1>
 
-            <div className="mt-2 text-sm text-white/80">
-              {card.type ? <span className="mr-3">Type: {card.type}</span> : null}
-              {card.attribute ? <span className="mr-3">Attribute: {card.attribute}</span> : null}
-              {card.race ? <span className="mr-3">Race: {card.race}</span> : null}
-              {card.archetype ? <span>Archetype: {card.archetype}</span> : null}
-            </div>
+                <div className="mt-2 text-sm text-white/80">
+                  {card.type ? <span className="mr-3">Type: {card.type}</span> : null}
+                  {card.attribute ? <span className="mr-3">Attribute: {card.attribute}</span> : null}
+                  {card.race ? <span className="mr-3">Race: {card.race}</span> : null}
+                  {card.archetype ? <span>Archetype: {card.archetype}</span> : null}
+                </div>
 
-            {offerPrice != null ? (
-              <div className="mt-3 text-sm text-white/80">
-                <span className="text-white/60">Market reference:</span>{" "}
-                <span className="font-semibold text-white">${offerPrice.toFixed(2)}</span>
+                {offerPrice != null ? (
+                  <div className="mt-3 text-sm text-white/80">
+                    <span className="text-white/60">Market reference:</span>{" "}
+                    <span className="font-semibold text-white">${offerPrice.toFixed(2)}</span>
+                  </div>
+                ) : null}
               </div>
-            ) : null}
+
+              <div className="text-sm">
+                <Link href={pricesHref} className="text-sky-300 hover:underline">
+                  View price trends →
+                </Link>
+              </div>
+            </div>
 
             {/* CTAs */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -572,7 +675,7 @@ export default async function YugiohCardDetailPage({
             {/* Actions + Alerts */}
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <CardActions
-                canSave={canSave}
+                canSave={!!userId}
                 game="yugioh"
                 cardId={card.id}
                 cardName={card.name}
@@ -610,32 +713,14 @@ export default async function YugiohCardDetailPage({
             </div>
           </div>
 
-          {/* Stats */}
-          <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <h2 className="text-lg font-semibold text-white">Stats</h2>
-            <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                <div className="text-xs uppercase tracking-wide text-white/60">ATK / DEF</div>
-                <div className="mt-1 text-lg font-semibold text-white">
-                  {card.atk ?? "—"} / {card.def ?? "—"}
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                <div className="text-xs uppercase tracking-wide text-white/60">Level</div>
-                <div className="mt-1 text-lg font-semibold text-white">{card.level ?? "—"}</div>
-              </div>
-
-              <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                <div className="text-xs uppercase tracking-wide text-white/60">Card ID</div>
-                <div className="mt-1 text-lg font-semibold text-white">{card.id}</div>
-              </div>
-            </div>
-          </div>
-
           {/* Prices */}
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm">
-            <h2 className="text-lg font-semibold text-white">Market Prices</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-white">Market Prices</h2>
+              <Link href={pricesHref} className="text-xs text-sky-300 hover:underline">
+                Trends →
+              </Link>
+            </div>
 
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <PriceBox label="TCGplayer" value={prices?.tcgplayer} />
@@ -646,16 +731,58 @@ export default async function YugiohCardDetailPage({
             </div>
           </div>
 
+          {/* ✅ Price History Chart */}
+          <div className="space-y-3">
+            {points.length === 0 ? (
+              <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-semibold">Price History</h2>
+                  <Link href={pricesHref} className="text-xs text-sky-300 hover:underline">
+                    Full metrics →
+                  </Link>
+                </div>
+                <div className="mt-3 rounded-lg border border-white/10 bg-white/5 p-3 text-sm text-white/80">
+                  No history yet. Once your daily YGO sync writes to <code>ygo_card_prices_history</code>, the chart will populate.
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+                    <div className="text-xs uppercase tracking-wide text-white/60">Effective latest</div>
+                    <div className="mt-1 text-lg font-semibold">{money(effLatest)}</div>
+                  </div>
+                  <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+                    <div className="text-xs uppercase tracking-wide text-white/60">7d change</div>
+                    <div className="mt-1 text-lg font-semibold">{eff7Change ?? "—"}</div>
+                  </div>
+                  <div className="rounded-2xl border border-white/15 bg-white/5 p-4 backdrop-blur-sm text-white">
+                    <div className="text-xs uppercase tracking-wide text-white/60">30d change</div>
+                    <div className="mt-1 text-lg font-semibold">{eff30Change ?? "—"}</div>
+                  </div>
+                </div>
+
+                <PriceHistoryChart title="Price History (Effective USD)" points={points} currency="USD" height={280} />
+
+                <div className="text-xs text-white/60">
+                  Source priority: TCGplayer → eBay → Amazon → CoolStuffInc → Cardmarket.{" "}
+                  <Link href={pricesHref} className="text-sky-300 hover:underline">
+                    View per-source trends →
+                  </Link>
+                </div>
+              </>
+            )}
+          </div>
+
           {/* ✅ Market Value (Estimate) — plan gated */}
           <MarketValuePanel
-              game="yugioh"
-              canonicalId={card.id}
-              title="Market Value"
-              showDisclaimer
-              canSeeRanges={planTier === "collector" || planTier === "pro"}
-              canSeeConfidence={planTier === "pro"}
-            />
-
+            game="yugioh"
+            canonicalId={card.id}
+            title="Market Value"
+            showDisclaimer
+            canSeeRanges={planTier === "collector" || planTier === "pro"}
+            canSeeConfidence={planTier === "pro"}
+          />
         </div>
       </div>
 
@@ -717,6 +844,9 @@ export default async function YugiohCardDetailPage({
             ← Back to set
           </Link>
         ) : null}
+        <Link href={pricesHref} className="text-sky-300 hover:underline">
+          View price trends →
+        </Link>
       </div>
     </section>
   );

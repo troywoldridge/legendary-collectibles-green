@@ -75,8 +75,7 @@ function ownedCountsFromDb(raw?: Record<string, number>): Partial<Record<Variant
     else if (k === "holofoil" || k === "holo") out.holo = (out.holo ?? 0) + qty;
     else if (k === "reverse_holofoil" || k === "reverse") out.reverse = (out.reverse ?? 0) + qty;
     else if (k === "first_edition") out.first_edition = (out.first_edition ?? 0) + qty;
-    else if (k === "promo" || k === "w_promo" || k === "wpromo")
-      out.w_promo = (out.w_promo ?? 0) + qty;
+    else if (k === "promo" || k === "w_promo" || k === "wpromo") out.w_promo = (out.w_promo ?? 0) + qty;
   }
 
   return out;
@@ -121,12 +120,7 @@ function TileVariantControls({
 
   return (
     <div className="space-y-2">
-      <VariantChips
-        variants={variants}
-        selected={selected}
-        onSelect={setSelected}
-        ownedCounts={ownedCounts}
-      />
+      <VariantChips variants={variants} selected={selected} onSelect={setSelected} ownedCounts={ownedCounts} />
 
       <AddToCollectionButton
         game="pokemon"
@@ -151,6 +145,12 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
   const [statusMap, setStatusMap] = useState<ContainsMap>({});
 
   const ids = useMemo(() => cards.map((c) => c.cardId), [cards]);
+  const idsKey = useMemo(() => ids.join("|"), [ids]);
+
+  useEffect(() => {
+    // Prevent stale “in collection” from previous page sticking around visually
+    setStatusMap({});
+  }, [idsKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -175,7 +175,7 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
     return () => {
       cancelled = true;
     };
-  }, [ids]);
+  }, [idsKey, ids]);
 
   const basePath = "/categories/pokemon/cards";
 
@@ -215,7 +215,6 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
 
               <div className="p-3 pb-2">
                 <div className="line-clamp-2 text-sm font-medium text-white">{c.name}</div>
-
                 <div className="mt-1 line-clamp-1 text-xs text-white/70">
                   {c.setName ? c.setName : "Unknown set"}
                   {c.number ? ` • #${c.number}` : ""}
