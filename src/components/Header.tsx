@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { site } from "@/config/site";
 import { cfUrl, CF_ACCOUNT_HASH, type Variant } from "@/lib/cf";
@@ -78,9 +78,7 @@ export default function Header() {
                   priority
                   className="object-contain object-left drop-shadow-[0_6px_18px_rgba(0,0,0,0.65)] brightness-110"
                   onError={() =>
-                    setLogoIdx((i) =>
-                      i + 1 < logoCandidates.length ? i + 1 : i,
-                    )
+                    setLogoIdx((i) => (i + 1 < logoCandidates.length ? i + 1 : i))
                   }
                 />
               </div>
@@ -140,10 +138,9 @@ export default function Header() {
               )}
             </Link>
 
-            {/* Auth slot (stable SSR/CSR markup to avoid hydration mismatch) */}
+            {/* Auth slot */}
             <div className="flex items-center">
               <ClerkLoading>
-                {/* Keep this element present on SSR + first client paint */}
                 <div
                   className="hidden h-10 w-[96px] items-center rounded-xl border border-white/15 bg-white/5 px-4 lg:flex"
                   aria-hidden="true"
@@ -182,18 +179,8 @@ export default function Header() {
               className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 lg:hidden"
               aria-label="Open menu"
             >
-              <svg
-                className="h-5 w-5 text-white"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 6h16M4 12h16M4 18h16"
-                />
+              <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
               </svg>
             </button>
           </div>
@@ -207,44 +194,28 @@ export default function Header() {
             </NavLink>
 
             <NavDropdown label="Pokémon">
-              <DropdownLink href="/categories/pokemon/sets">
-                Pokémon Sets
-              </DropdownLink>
-              <DropdownLink href="/categories/pokemon/cards">
-                Pokémon Cards
-              </DropdownLink>
+              <DropdownLink href="/categories/pokemon/sets">Pokémon Sets</DropdownLink>
+              <DropdownLink href="/categories/pokemon/cards">Pokémon Cards</DropdownLink>
             </NavDropdown>
 
             <NavDropdown label="Yu-Gi-Oh!">
-              <DropdownLink href="/categories/yugioh/sets">
-                Yu-Gi-Oh! Sets
-              </DropdownLink>
-              <DropdownLink href="/categories/yugioh/cards">
-                Yu-Gi-Oh! Cards
-              </DropdownLink>
+              <DropdownLink href="/categories/yugioh/sets">Yu-Gi-Oh! Sets</DropdownLink>
+              <DropdownLink href="/categories/yugioh/cards">Yu-Gi-Oh! Cards</DropdownLink>
             </NavDropdown>
 
             <NavDropdown label="Magic: The Gathering">
               <DropdownLink href="/categories/mtg/sets">MTG Sets</DropdownLink>
-              <DropdownLink href="/categories/mtg/cards">
-                MTG Cards
-              </DropdownLink>
+              <DropdownLink href="/categories/mtg/cards">MTG Cards</DropdownLink>
             </NavDropdown>
 
             <NavDropdown label="Funko">
-              <DropdownLink href="/categories/funko/items">
-                Funko (Catalog)
-              </DropdownLink>
+              <DropdownLink href="/categories/funko/items">Funko (Catalog)</DropdownLink>
               <DropdownLink href="/shop/funko/all">Shop Funko</DropdownLink>
             </NavDropdown>
 
             <NavDropdown label="Figures & Collectibles">
-              <DropdownLink href="/categories/collectibles/items">
-                Figures & Collectibles (Catalog)
-              </DropdownLink>
-              <DropdownLink href="/shop/collectibles/all">
-                Shop Figures & Collectibles
-              </DropdownLink>
+              <DropdownLink href="/categories/collectibles/items">Figures & Collectibles (Catalog)</DropdownLink>
+              <DropdownLink href="/shop/collectibles/all">Shop Figures & Collectibles</DropdownLink>
             </NavDropdown>
 
             <NavLink href="/psa" active={isActive("/psa")}>
@@ -275,12 +246,7 @@ export default function Header() {
               className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-1 text-white/80 hover:text-white"
               aria-label="Search"
             >
-              <svg
-                className="h-5 w-5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -296,15 +262,7 @@ export default function Header() {
   );
 }
 
-function NavLink({
-  href,
-  active,
-  children,
-}: {
-  href: string;
-  active: boolean;
-  children: React.ReactNode;
-}) {
+function NavLink({ href, active, children }: { href: string; active: boolean; children: React.ReactNode }) {
   return (
     <Link
       href={href}
@@ -313,9 +271,7 @@ function NavLink({
         "transition-all duration-200",
         "rounded-lg",
         "focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50",
-        active
-          ? "text-white bg-white/6"
-          : "text-white/80 hover:text-white hover:bg-white/6",
+        active ? "text-white bg-white/6" : "text-white/80 hover:text-white hover:bg-white/6",
       ].join(" ")}
     >
       {children}
@@ -332,42 +288,83 @@ function NavLink({
   );
 }
 
-function NavDropdown({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+function NavDropdown({ label, children }: { label: string; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
+
+  // Close delay prevents “gap” flicker when moving from trigger -> panel.
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function clearCloseTimer() {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }
+
+  function openNow() {
+    clearCloseTimer();
+    setOpen(true);
+  }
+
+  function closeSoon() {
+    clearCloseTimer();
+    closeTimer.current = setTimeout(() => setOpen(false), 140);
+  }
+
+  // Escape closes the currently open menu
+  useEffect(() => {
+    if (!open) return;
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
 
   return (
     <div
-      className="group relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      className={[
+        "group relative",
+        // 🔥 when open, yank this above any page-level overlays
+        open ? "z-[9999]" : "",
+      ].join(" ")}
+      onMouseEnter={openNow}
+      onMouseLeave={closeSoon}
     >
-      <button className="flex h-12 items-center gap-1 px-4 text-sm font-medium text-white/80 transition-colors hover:text-white">
+      <button
+        type="button"
+        className="flex h-12 items-center gap-1 px-4 text-sm font-medium text-white/80 transition-colors hover:text-white"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+      >
         {label}
         <svg
-          className={`h-4 w-4 transition-transform duration-200 ${
-            open ? "rotate-180" : "group-hover:translate-y-px"
-          }`}
+          className={`h-4 w-4 transition-transform duration-200 ${open ? "rotate-180" : "group-hover:translate-y-px"}`}
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
+          aria-hidden="true"
         >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M19 9l-7 7-7-7"
-          />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-50 min-w-60 overflow-hidden rounded-xl border border-white/12 bg-white/6 backdrop-blur-xl shadow-xl">
+        <div
+          className="pointer-events-auto absolute left-0 top-full z-[9999] min-w-60 overflow-hidden rounded-xl border border-white/12 bg-white/6 backdrop-blur-xl shadow-xl"
+          role="menu"
+          onMouseEnter={openNow}
+          onMouseLeave={closeSoon}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
           <div className="py-2">{children}</div>
         </div>
       )}
@@ -375,13 +372,7 @@ function NavDropdown({
   );
 }
 
-function DropdownLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: React.ReactNode;
-}) {
+function DropdownLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
     <Link
       href={href}

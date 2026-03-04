@@ -12,8 +12,21 @@ import VariantChips, {
   VARIANT_DB,
 } from "@/components/pokemon/VariantChips";
 
+/**
+ * IMPORTANT ID MODEL (forward-safe)
+ *
+ * - cardId: what we put in the URL (/categories/pokemon/cards/[id])
+ * - canonicalId: what we use for collection storage + contains checks
+ *   (preferred: tcgdex id)
+ *
+ * If you don’t pass canonicalId, we fall back to cardId to preserve current behavior.
+ */
 type Card = {
-  cardId: string;
+  cardId: string; // route id (legacy or tcgdex)
+  canonicalId?: string | null; // preferred stable id (tcgdex)
+  legacyId?: string | null;
+  tcgdexId?: string | null;
+
   name: string;
   setName: string | null;
   number?: string | null;
@@ -88,14 +101,16 @@ function defaultSelected(available: VariantKey[]): VariantKey | null {
 function TileVariantControls({
   variants,
   ownedDbCounts,
-  cardId,
+  canonicalId,
+  routeId,
   cardName,
   setName,
   imageUrl,
 }: {
   variants: PokemonVariants;
   ownedDbCounts?: Record<string, number>;
-  cardId: string;
+  canonicalId: string; // ALWAYS used for collection writes
+  routeId: string; // for display only (debug)
   cardName: string;
   setName: string | null;
   imageUrl: string | null;
@@ -124,7 +139,7 @@ function TileVariantControls({
 
       <AddToCollectionButton
         game="pokemon"
-        cardId={cardId}
+        cardId={canonicalId} // ✅ canonical id only
         cardName={cardName}
         setName={setName}
         imageUrl={imageUrl}
@@ -137,18 +152,29 @@ function TileVariantControls({
             : "w-full rounded-md border border-white/25 bg-white/10 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/20 disabled:opacity-60"
         }
       />
+
+      {/* optional subtle debug hook (no UI) */}
+      <span className="sr-only" data-route-id={routeId} data-canonical-id={canonicalId} />
     </div>
   );
 }
 
 export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
+  /**
+   * For collection lookups we use canonical ids (preferred tcgdex).
+   * If canonicalId isn’t provided, we fall back to cardId to preserve current behavior.
+   */
+  const canonicalIds = useMemo(
+    () => cards.map((c) => String(c.canonicalId ?? c.tcgdexId ?? c.cardId ?? "").trim()).filter(Boolean),
+    [cards]
+  );
+
+  // Keep a parallel key so stale UI doesn’t hang around across pagination/filtering
+  const idsKey = useMemo(() => canonicalIds.join("|"), [canonicalIds]);
+
   const [statusMap, setStatusMap] = useState<ContainsMap>({});
 
-  const ids = useMemo(() => cards.map((c) => c.cardId), [cards]);
-  const idsKey = useMemo(() => ids.join("|"), [ids]);
-
   useEffect(() => {
-    // Prevent stale “in collection” from previous page sticking around visually
     setStatusMap({});
   }, [idsKey]);
 
@@ -160,7 +186,7 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
         const res = await fetch("/api/collection/contains", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ game: "pokemon", cardIds: ids }),
+          body: JSON.stringify({ game: "pokemon", cardIds: canonicalIds }),
         });
         if (!res.ok) return;
 
@@ -171,27 +197,31 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
       }
     }
 
-    if (ids.length) run();
+    if (canonicalIds.length) run();
     return () => {
       cancelled = true;
     };
-  }, [idsKey, ids]);
+  }, [idsKey, canonicalIds]);
 
   const basePath = "/categories/pokemon/cards";
 
   return (
     <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6">
       {cards.map((c) => {
-        const st = statusMap[c.cardId];
+        const routeId = String(c.cardId ?? "").trim();
+        const canonicalId = String(c.canonicalId ?? c.tcgdexId ?? routeId).trim();
+
+        // contains map is keyed by canonical id (what we sent)
+        const st = statusMap[canonicalId];
         const inCol = st?.inCollection ?? false;
         const qty = st?.quantity ?? 0;
 
         return (
           <li
-            key={c.cardId}
+            key={`${routeId}::${canonicalId}`}
             className="rounded-xl border border-white/10 bg-white/5 transition hover:border-white/20 hover:bg-white/10"
           >
-            <Link className="group block" href={`${basePath}/${encodeURIComponent(c.cardId)}`}>
+            <Link className="group block" href={`${basePath}/${encodeURIComponent(routeId)}`}>
               <div className="relative mx-auto w-full aspect-3/4">
                 {c.imageUrl ? (
                   <Image
@@ -226,7 +256,8 @@ export default function PokemonCardsClient({ cards }: { cards: Card[] }) {
               <TileVariantControls
                 variants={c.variants ?? null}
                 ownedDbCounts={st?.variants}
-                cardId={c.cardId}
+                canonicalId={canonicalId}
+                routeId={routeId}
                 cardName={c.name}
                 setName={c.setName}
                 imageUrl={c.imageUrl}

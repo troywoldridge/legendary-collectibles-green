@@ -4,21 +4,16 @@
  *
  * Fill missing pricing blocks in public.tcgdex_cards.raw_json using pokemontcg.io.
  *
- * Key behavior:
- *  - Normalize tcgdex set names (Macdonald's -> McDonald's)
- *  - Treat search 404 as "no hits"
- *  - Force-encode apostrophes (%27)
- *  - Skip Pokémon TCG Pocket ids/sets (A1-###, Genetic Apex)
- *  - ✅ Robust set.id resolution:
- *      - exact match on /sets?q=name:"<setName>"
- *      - fallback: fetch ALL sets via pagination and best-match locally (no query syntax reliance)
+ * Improvements in this version:
+ *  - Uses DB mapping tables FIRST for promo sets (McDonald's, etc.)
+ *  - Promo-safe fallback: retries searches without number because pokemontcg.io often stores "10/12"
+ *  - Matching logic treats "10/12" as matching tcgdex number "10"
  */
 
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Pool } from "pg";
 
-// sourcery skip: use-object-destructuring
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("Missing DATABASE_URL");
 
@@ -36,10 +31,6 @@ const RETRY_BASE_DELAY_MS = clampInt(process.env.RETRY_BASE_DELAY_MS, 350, 50, 5
 
 const FALLBACK_SEARCH = toBool(process.env.FALLBACK_SEARCH);
 const FALLBACK_PAGE_SIZE = clampInt(process.env.FALLBACK_PAGE_SIZE, 10, 1, 250);
-
-// Sets pagination (for "fetch all sets" fallback)
-const SETS_PAGE_SIZE = clampInt(process.env.SETS_PAGE_SIZE, 250, 50, 250);
-const SETS_MAX_PAGES = clampInt(process.env.SETS_MAX_PAGES, 25, 1, 200);
 
 const DEBUG_SAMPLE = clampInt(process.env.DEBUG_SAMPLE, 0, 0, 500);
 
@@ -187,7 +178,9 @@ async function fetchWithTimeout(url, opts) {
 }
 
 async function fetchPokemonTcgIoJson(pathOrUrl, { allow404 = false } = {}) {
-  const url = /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : `${BASE_URL}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`;
+  const url = /^https?:\/\//i.test(pathOrUrl)
+    ? pathOrUrl
+    : `${BASE_URL}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     let res;
@@ -232,14 +225,14 @@ async function fetchPokemonTcgIoJson(pathOrUrl, { allow404 = false } = {}) {
 }
 
 async function fetchPokemonTcgIoCardById(cardId) {
-  const { status, json, retried, url } = await fetchPokemonTcgIoJson(`/cards/${encodeURIComponent(cardId)}`, {
+  const { status, json, retried } = await fetchPokemonTcgIoJson(`/cards/${encodeURIComponent(cardId)}`, {
     allow404: true,
   });
   const card = json?.data ?? null;
-  return { status, card: card && typeof card === "object" ? card : null, retried: retried || 0, url };
+  return { status, card: card && typeof card === "object" ? card : null, retried: retried || 0 };
 }
 
-/* ---------- Query building / normalization ---------- */
+/* ---------- Set name normalization + mapping ---------- */
 
 function normalizeSetNameForPokemonTcgIo(setName) {
   let s = String(setName ?? "").trim();
@@ -248,8 +241,16 @@ function normalizeSetNameForPokemonTcgIo(setName) {
   s = s.replace(/^Macdonald's\b/i, "McDonald's");
   s = s.replace(/^MacDonalds\b/i, "McDonald's");
   s = s.replace(/McDonald’s/g, "McDonald's");
-
   return s;
+}
+
+function normalizeSetKey(s) {
+  let v = String(s ?? "").trim();
+  if (!v) return "";
+  v = v.replace(/[’‘]/g, "'");
+  v = normalizeSetNameForPokemonTcgIo(v);
+  v = v.replace(/\s+/g, " ").trim();
+  return v.toLowerCase();
 }
 
 function luceneEscapePhrase(s) {
@@ -262,126 +263,60 @@ function encodeQueryParamStrict(s) {
   return encodeURIComponent(String(s ?? "")).replace(/'/g, "%27");
 }
 
-function yearFromSetName(setName) {
-  const m = String(setName ?? "").match(/\b(19\d{2}|20\d{2})\b/);
-  return m ? m[1] : null;
+function normalizeCardNumber(n) {
+  const s = String(n ?? "").trim();
+  if (!s) return "";
+  // pokemontcg sometimes uses "10/12"; tcgdex may store "10"
+  return s.split("/")[0].trim().toLowerCase();
 }
 
-function scoreSetCandidate(candidate, wanted) {
-  const name = String(candidate?.name ?? "").toLowerCase();
-  const want = String(wanted ?? "").toLowerCase();
+const setNameToTcgSetId = new Map();
+const codeToTcgSetId = new Map();
 
-  let score = 0;
-
-  if (name === want) score += 100;
-
-  if (name.includes("mcdonald")) score += 20;
-  if (name.includes("collection")) score += 10;
-
-  const y = yearFromSetName(wanted);
-  if (y && name.includes(y)) score += 35;
-
-  // minor similarity bonus
-  if (want && name.includes(want.replace(/[^a-z0-9]+/g, " ").trim())) score += 2;
-
-  return score;
-}
-
-/**
- * Cache: setName -> setId (pokemontcg.io)
- */
-const setIdCache = new Map();
-
-/**
- * Cache: full sets list (fetched once)
- */
-let allSetsCache = null;
-
-async function fetchAllSetsOnce() {
-  if (allSetsCache) return allSetsCache;
-
-  const out = [];
-  for (let page = 1; page <= SETS_MAX_PAGES; page++) {
-    const url =
-      `${BASE_URL}/sets` +
-      `?page=${encodeQueryParamStrict(String(page))}` +
-      `&pageSize=${encodeQueryParamStrict(String(SETS_PAGE_SIZE))}` +
-      `&select=${encodeQueryParamStrict("id,name,releaseDate")}`;
-
-    const res = await fetchPokemonTcgIoJson(url, { allow404: true });
-    const data = res.status === 404 ? [] : res.json?.data;
-    const sets = Array.isArray(data) ? data : [];
-
-    if (!sets.length) break;
-
-    out.push(...sets);
-
-    if (sets.length < SETS_PAGE_SIZE) break; // last page
-  }
-
-  allSetsCache = out;
-  return allSetsCache;
-}
-
-/**
- * Resolve pokemontcg.io set.id for a human set name.
- * Strategy:
- *  1) exact phrase search
- *  2) fallback: fetch all sets and best-match locally
- */
-async function resolveSetIdByName(setName) {
-  const key = String(setName ?? "").trim();
-  if (!key) return null;
-  if (setIdCache.has(key)) return setIdCache.get(key);
-
-  // 1) exact phrase search
+async function loadSetMaps(pool) {
   {
-    const q = `name:"${luceneEscapePhrase(key)}"`;
-    const url =
-      `${BASE_URL}/sets` +
-      `?q=${encodeQueryParamStrict(q)}` +
-      `&page=1&pageSize=10` +
-      `&select=${encodeQueryParamStrict("id,name,releaseDate")}`;
-
-    const res = await fetchPokemonTcgIoJson(url, { allow404: true });
-    if (res.status !== 404) {
-      const data = res.json?.data;
-      const sets = Array.isArray(data) ? data : [];
-      const exact =
-        sets.find((s) => String(s?.name ?? "").trim().toLowerCase() === key.toLowerCase()) || sets[0] || null;
-      const id = exact?.id ? String(exact.id).trim() : null;
-      if (id) {
-        setIdCache.set(key, id);
-        return id;
-      }
+    const r = await pool.query(`SELECT set_name, tcg_set_id FROM public.pokemon_set_name_map`);
+    for (const row of r.rows) {
+      const k = normalizeSetKey(row.set_name);
+      const v = String(row.tcg_set_id ?? "").trim();
+      if (k && v) setNameToTcgSetId.set(k, v);
     }
   }
 
-  // 2) Fetch all sets and fuzzy match locally (query-syntax independent)
   {
-    const sets = await fetchAllSetsOnce();
-
-    let best = null;
-    let bestScore = -1;
-
-    for (const s of sets) {
-      const sc = scoreSetCandidate(s, key);
-      if (sc > bestScore) {
-        bestScore = sc;
-        best = s;
-      }
-    }
-
-    const id = best?.id ? String(best.id).trim() : null;
-    if (id) {
-      setIdCache.set(key, id);
-      return id;
+    const r = await pool.query(`SELECT sheet_code, set_id FROM public.pokemon_set_code_map_tbl`);
+    for (const row of r.rows) {
+      const k = String(row.sheet_code ?? "").trim().toLowerCase();
+      const v = String(row.set_id ?? "").trim();
+      if (k && v) codeToTcgSetId.set(k, v);
     }
   }
 
-  setIdCache.set(key, null);
+  {
+    const r = await pool.query(`SELECT sku_set_code, tcg_set_id FROM public.pokemon_set_code_map_table`);
+    for (const row of r.rows) {
+      const k = String(row.sku_set_code ?? "").trim().toLowerCase();
+      const v = String(row.tcg_set_id ?? "").trim();
+      if (k && v) codeToTcgSetId.set(k, v);
+    }
+  }
+}
+
+function resolveTcgSetIdFromMaps({ setName, tcgdexSetCode }) {
+  if (setName) {
+    const k = normalizeSetKey(setName);
+    const v = setNameToTcgSetId.get(k);
+    if (v) return v;
+  }
+  if (tcgdexSetCode) {
+    const k = String(tcgdexSetCode).trim().toLowerCase();
+    const v = codeToTcgSetId.get(k);
+    if (v) return v;
+  }
   return null;
 }
+
+/* ---------- Search ---------- */
 
 function buildCardSearchQuery({ setId, setName, number, name }) {
   const parts = [];
@@ -403,8 +338,8 @@ async function searchPokemonTcgIoCards(q) {
     `&pageSize=${encodeQueryParamStrict(String(FALLBACK_PAGE_SIZE))}` +
     `&select=${encodeQueryParamStrict("id,name,number,set.id,set.name,tcgplayer,cardmarket,images")}`;
 
-  const res = await fetchPokemonTcgIoJson(url, { allow404: true });
-  if (res.status === 404) return { status: 404, cards: [], retried: res.retried || 0 };
+  // IMPORTANT: do NOT allow 404 for search; treat it as error (Cloudflare/etc).
+  const res = await fetchPokemonTcgIoJson(url, { allow404: false });
 
   const arr = res.json?.data;
   return { status: 200, cards: Array.isArray(arr) ? arr : [], retried: res.retried || 0 };
@@ -414,7 +349,7 @@ function pickBestSearchHit(cards, { name, number, setId, setName }) {
   if (!Array.isArray(cards) || !cards.length) return null;
 
   const wantName = String(name ?? "").trim().toLowerCase();
-  const wantNum = String(number ?? "").trim().toLowerCase();
+  const wantNum = normalizeCardNumber(number);
   const wantSetId = String(setId ?? "").trim().toLowerCase();
   const wantSetName = String(setName ?? "").trim().toLowerCase();
 
@@ -423,12 +358,13 @@ function pickBestSearchHit(cards, { name, number, setId, setName }) {
 
   for (const c of cards) {
     const cName = String(c?.name ?? "").trim().toLowerCase();
-    const cNum = String(c?.number ?? "").trim().toLowerCase();
+    const cNum = normalizeCardNumber(c?.number);
     const cSetId = String(c?.set?.id ?? "").trim().toLowerCase();
     const cSetName = String(c?.set?.name ?? "").trim().toLowerCase();
 
     let score = 0;
-    if (wantNum && cNum === wantNum) score += 8;
+
+    if (wantNum && cNum === wantNum) score += 10;
 
     if (wantSetId && cSetId === wantSetId) score += 10;
     else if (wantSetName && cSetName === wantSetName) score += 8;
@@ -449,6 +385,8 @@ function pickBestSearchHit(cards, { name, number, setId, setName }) {
 
 async function main() {
   const pool = new Pool({ connectionString: DATABASE_URL });
+
+  await loadSetMaps(pool);
 
   const { rows } = await pool.query(
     `
@@ -500,7 +438,6 @@ async function main() {
   let idx = 0;
   let sampleLeft = DEBUG_SAMPLE;
 
-// sourcery skip: avoid-function-declarations-in-blocks
   async function worker() {
     while (true) {
       const i = idx++;
@@ -546,6 +483,8 @@ async function main() {
         const name = String(raw?.name ?? "").trim() || null;
         const rawSetName = String(raw?.set?.name ?? "").trim() || null;
         const setName = rawSetName ? normalizeSetNameForPokemonTcgIo(rawSetName) : null;
+        const tcgdexSetCode = String(raw?.set?.id ?? "").trim() || null;
+
         const number =
           raw?.localId != null
             ? String(raw.localId).trim()
@@ -574,42 +513,85 @@ async function main() {
           }
         }
 
-        // 2) Fallback search: resolve set.id then search by set.id
+        // 2) Fallback search (promo-safe)
         if (!fetchedCard && FALLBACK_SEARCH) {
           fallbackTried++;
 
-          if (!setName || !number) {
+          if (!name && !number) {
             fallbackMissingFields++;
           } else {
             fallbackSetIdLookups++;
-            const setId = await resolveSetIdByName(setName);
-            if (!setId) fallbackSetIdMissing++;
 
-            const q = buildCardSearchQuery({ setId, setName: setId ? null : setName, number, name });
+            const mappedSetId = resolveTcgSetIdFromMaps({ setName, tcgdexSetCode });
+
+            const queries = [];
+
+            // Best: set.id + number + name
+            if (mappedSetId && number && name) queries.push(buildCardSearchQuery({ setId: mappedSetId, setName: null, number, name }));
+            // Promo-safe: set.id + name (NO number)
+            if (mappedSetId && name) queries.push(buildCardSearchQuery({ setId: mappedSetId, setName: null, number: null, name }));
+            // set.id + number (NO name)
+            if (mappedSetId && number) queries.push(buildCardSearchQuery({ setId: mappedSetId, setName: null, number, name: null }));
+
+            // If no mapped set id, try set.name variants
+            if (!mappedSetId) {
+              fallbackSetIdMissing++;
+              if (setName && number && name) queries.push(buildCardSearchQuery({ setId: null, setName, number, name }));
+              if (setName && name) queries.push(buildCardSearchQuery({ setId: null, setName, number: null, name }));
+              if (setName && number) queries.push(buildCardSearchQuery({ setId: null, setName, number, name: null }));
+            }
+
+            // Final safety nets
+            if (number && name) queries.push(buildCardSearchQuery({ setId: null, setName: null, number, name }));
+            if (name) queries.push(buildCardSearchQuery({ setId: null, setName: null, number: null, name }));
+
+            // Dedup queries
+            const uniq = [];
+            const seen = new Set();
+            for (const q of queries) {
+              if (!q) continue;
+              if (seen.has(q)) continue;
+              seen.add(q);
+              uniq.push(q);
+            }
 
             if (sampleLeft > 0) {
               sampleLeft--;
               console.log(
-                `[sample] id=${idRaw} decoded=${idDecoded} fields=${JSON.stringify({ name, setName, setId, number })} fbQuery=${q}`
+                `[sample] id=${idRaw} decoded=${idDecoded} fields=${JSON.stringify({
+                  name,
+                  setName,
+                  tcgdexSetCode,
+                  mappedSetId,
+                  number,
+                })} fbQuery=${uniq[0]}`
               );
             }
 
-            let searched = await searchPokemonTcgIoCards(q);
-            totalRetries += searched.retried || 0;
+            let bestHit = null;
 
-            // If no hits and we included name, retry without name
-            if (!searched.cards.length && name) {
-              const q2 = buildCardSearchQuery({ setId, setName: setId ? null : setName, number, name: null });
-              searched = await searchPokemonTcgIoCards(q2);
+            for (const q of uniq) {
+              const searched = await searchPokemonTcgIoCards(q);
               totalRetries += searched.retried || 0;
+
+              if (searched.cards.length) {
+                const hit = pickBestSearchHit(searched.cards, {
+                  name,
+                  number,
+                  setId: mappedSetId,
+                  setName,
+                });
+                if (hit) {
+                  bestHit = hit;
+                  break;
+                }
+              }
             }
 
-            if (!searched.cards.length) fallbackNoHits++;
-
-            const hit = pickBestSearchHit(searched.cards, { name, number, setId, setName });
-            if (hit) {
+            if (!bestHit) fallbackNoHits++;
+            else {
               fallbackSearchHits++;
-              fetchedCard = hit;
+              fetchedCard = bestHit;
             }
           }
         }

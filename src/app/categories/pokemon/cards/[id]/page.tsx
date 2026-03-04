@@ -24,8 +24,6 @@ import { getUserPlan, canUsePriceAlerts } from "@/lib/plans";
 
 import MarketValuePanel from "@/components/market/MarketValuePanel";
 
-import StickyQuickActionsClient from "@/components/pokemon/StickyQuickActionsClient";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -56,6 +54,34 @@ function absMaybe(urlOrPath: string | null | undefined) {
   if (!s) return absUrl("/og-image.png");
   if (/^https?:\/\//i.test(s)) return s;
   return absUrl(s);
+}
+
+/* ------------------------------------------------
+   Normalizers / matching helpers
+------------------------------------------------- */
+
+function normText(v: unknown) {
+  return String(v ?? "").trim();
+}
+
+function normalizeLocalIdLikeTcgdex(v: unknown) {
+  // tcgdex localId typically looks like "97"
+  // legacy may store "097" or "97/181" or " 97 "
+  const s = normText(v);
+  if (!s) return "";
+
+  // take leading digits if present (handles "97/181")
+  const m = s.match(/^0*(\d+)/);
+  if (m && m[1]) {
+    // strip leading zeros
+    return m[1].replace(/^0+(?=\d)/, "") || "0";
+  }
+
+  // if it's numeric-only, strip leading zeros
+  if (/^\d+$/.test(s)) return s.replace(/^0+(?=\d)/, "") || "0";
+
+  // otherwise keep as-is (TG12, RC7, etc.)
+  return s;
 }
 
 /* ------------------------------------------------
@@ -157,6 +183,7 @@ type CardResolved = {
   cover: string | null;
   thumb: string | null;
   raw: any | null;
+  legacyId?: string | null;
 };
 
 async function getTcgdexCard(cardId: string): Promise<TcgdexRow | null> {
@@ -231,12 +258,67 @@ async function getLegacyVariants(cardId: string): Promise<VariantRow | null> {
   );
 }
 
+/**
+ * NEW: smart tcgdex lookup when incoming id is legacy-ish.
+ * This avoids needing pokemon_card_id_map to be populated at all.
+ */
+async function findTcgdexByLegacyHints(legacy: LegacyRow): Promise<TcgdexRow | null> {
+  const setName = normText(legacy.set_name);
+  const name = normText(legacy.name);
+  const legacyNum = normalizeLocalIdLikeTcgdex(legacy.number);
+
+  if (!legacyNum) return null;
+
+  noStore();
+
+  // Strategy A: setName + number (+ name when available)
+  if (setName) {
+    const rowA =
+      (
+        await db.execute<TcgdexRow>(sql`
+          SELECT id::text AS id, raw_json
+          FROM public.tcgdex_cards
+          WHERE (raw_json->'set'->>'name') ILIKE ${setName}
+            AND regexp_replace(COALESCE(raw_json->>'localId',''), '^0+(?=\\d)', '') =
+                regexp_replace(${legacyNum}::text, '^0+(?=\\d)', '')
+            AND (
+              ${name}::text = ''
+              OR (raw_json->>'name') ILIKE ${name}
+            )
+          LIMIT 1
+        `)
+      ).rows?.[0] ?? null;
+
+    if (rowA) return rowA;
+  }
+
+  // Strategy B: name + number fallback
+  if (name) {
+    const rowB =
+      (
+        await db.execute<TcgdexRow>(sql`
+          SELECT id::text AS id, raw_json
+          FROM public.tcgdex_cards
+          WHERE (raw_json->>'name') ILIKE ${name}
+            AND regexp_replace(COALESCE(raw_json->>'localId',''), '^0+(?=\\d)', '') =
+                regexp_replace(${legacyNum}::text, '^0+(?=\\d)', '')
+          LIMIT 1
+        `)
+      ).rows?.[0] ?? null;
+
+    if (rowB) return rowB;
+  }
+
+  return null;
+}
+
 async function resolveCard(cardIdRaw: string): Promise<CardResolved | null> {
   noStore();
 
   const cardId = decodeURIComponent(String(cardIdRaw ?? "")).trim();
   if (!cardId) return null;
 
+  // 1) If it's already a tcgdex id, this works immediately.
   const tcgdex = await getTcgdexCard(cardId);
   if (tcgdex) {
     const raw = tcgdex.raw_json ?? {};
@@ -264,10 +346,39 @@ async function resolveCard(cardIdRaw: string): Promise<CardResolved | null> {
     };
   }
 
+  // 2) Otherwise treat incoming as legacy id and try to map to tcgdex using set_name + number.
   const legacy = await getLegacyCard(cardId);
   if (!legacy) return null;
 
-// sourcery skip: use-object-destructuring
+  const tcgdexViaLegacy = await findTcgdexByLegacyHints(legacy);
+  if (tcgdexViaLegacy) {
+    const raw = tcgdexViaLegacy.raw_json ?? {};
+    const id = String(raw?.id ?? tcgdexViaLegacy.id).trim() || tcgdexViaLegacy.id;
+    const name = String(raw?.name ?? id).trim() || id;
+    const setId = String(raw?.set?.id ?? "").trim() || null;
+    const setName = String(raw?.set?.name ?? "").trim() || null;
+    const rarity = String(raw?.rarity ?? "").trim() || null;
+    const number = raw?.localId != null ? String(raw.localId) : null;
+
+    const cover = bestImageFromTcgdexRaw(raw);
+    const thumb = thumbImageFromTcgdexRaw(raw) ?? cover;
+
+    return {
+      source: "tcgdex",
+      id,
+      name,
+      setId,
+      setName,
+      rarity,
+      number,
+      cover,
+      thumb,
+      raw,
+      legacyId: legacy.id,
+    };
+  }
+
+  // 3) Fallback: legacy-only render (no pricing in raw)
   const id = legacy.id;
   const name = String(legacy.name ?? id).trim() || id;
 
@@ -295,10 +406,17 @@ async function resolveCard(cardIdRaw: string): Promise<CardResolved | null> {
     cover,
     thumb,
     raw,
+    legacyId: legacy.id,
   };
 }
 
-async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | null> {
+async function getMarketItemForPokemon(tcgdexId: string, legacyId?: string | null): Promise<MarketItemRow | null> {
+  // NEW: market_items might be keyed by legacy canonical_id or tcgdex canonical_id depending on history.
+  // We'll accept either.
+  const a = normText(tcgdexId);
+  const b = normText(legacyId ?? "");
+  if (!a && !b) return null;
+
   noStore();
   return (
     (
@@ -306,7 +424,10 @@ async function getMarketItemForPokemon(cardId: string): Promise<MarketItemRow | 
         SELECT id, display_name
         FROM public.market_items
         WHERE game = 'pokemon'
-          AND canonical_id::text = ${cardId}::text
+          AND (
+            canonical_id::text = ${a}::text
+            OR (${b}::text <> '' AND canonical_id::text = ${b}::text)
+          )
         LIMIT 1
       `)
     ).rows?.[0] ?? null
@@ -586,7 +707,6 @@ export async function generateMetadata({ params }: { params: Promise<{ id: strin
     };
   }
 
-// sourcery skip: use-object-destructuring
   const name = resolved.name;
   const setPart = resolved.setName ? ` (${resolved.setName})` : "";
   const title = `${name}${setPart} — Price, Details & Collection | ${site.name}`;
@@ -735,7 +855,7 @@ export default async function PokemonCardDetailPage({
     canUseAlerts = canUsePriceAlerts(plan);
 
     if (canUseAlerts) {
-      const marketItem = await getMarketItemForPokemon(cardId);
+      const marketItem = await getMarketItemForPokemon(cardId, resolved.legacyId ?? null);
       marketItemId = marketItem?.id ?? null;
     }
   }
@@ -807,57 +927,6 @@ export default async function PokemonCardDetailPage({
         id="pokemon-card-entity-jsonld"
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
-      />
-
-      <StickyQuickActionsClient
-        title={cardName}
-        subtitle={setName ? `${setName}${number ? ` • No. ${number}` : ""}` : number ? `No. ${number}` : null}
-        jumps={[
-          { href: "#prices", label: "Prices" },
-          { href: "#market-value", label: "Market Value" },
-          { href: "#attacks", label: "Attacks" },
-          { href: "#details", label: "Details" },
-        ]}
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <CardActions
-              canSave={canSave}
-              game="pokemon"
-              cardId={cardId}
-              cardName={cardName}
-              setName={setName ?? undefined}
-              imageUrl={cover ?? undefined}
-            />
-
-            {userId ? (
-              canUseAlerts ? (
-                marketItemId ? (
-                  <PriceAlertBell game="pokemon" marketItemId={marketItemId} label={cardName} currentUsd={marketUsd} />
-                ) : (
-                  <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
-                    🔔 Alerts unavailable
-                  </span>
-                )
-              ) : (
-                <Link
-                  href="/pricing"
-                  className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
-                  prefetch={false}
-                >
-                  🔔 Price alerts (Pro)
-                </Link>
-              )
-            ) : (
-              <Link
-                href="/sign-in"
-                className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
-                prefetch={false}
-              >
-                🔔 Sign in for alerts
-              </Link>
-            )}
-          </div>
-        }
       />
 
       <nav className="text-xs text-white/70">
@@ -999,8 +1068,45 @@ export default async function PokemonCardDetailPage({
                 ) : null}
               </div>
 
-              <div className="flex flex-wrap items-center gap-3 text-sm">
-                <Link href={pricesHref} className="text-sky-300 hover:underline">
+              <div className="flex flex-wrap items-center gap-2">
+                <CardActions
+                  canSave={canSave}
+                  game="pokemon"
+                  cardId={cardId}
+                  cardName={cardName}
+                  setName={setName ?? undefined}
+                  imageUrl={cover ?? undefined}
+                />
+
+                {userId ? (
+                  canUseAlerts ? (
+                    marketItemId ? (
+                      <PriceAlertBell game="pokemon" marketItemId={marketItemId} label={cardName} currentUsd={marketUsd} />
+                    ) : (
+                      <span className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/70">
+                        🔔 Alerts unavailable
+                      </span>
+                    )
+                  ) : (
+                    <Link
+                      href="/pricing"
+                      className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                      prefetch={false}
+                    >
+                      🔔 Price alerts (Pro)
+                    </Link>
+                  )
+                ) : (
+                  <Link
+                    href="/sign-in"
+                    className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10"
+                    prefetch={false}
+                  >
+                    🔔 Sign in for alerts
+                  </Link>
+                )}
+
+                <Link href={pricesHref} className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/80 hover:bg-white/10">
                   View prices →
                 </Link>
               </div>
