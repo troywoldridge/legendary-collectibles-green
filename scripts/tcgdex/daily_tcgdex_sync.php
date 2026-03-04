@@ -23,8 +23,9 @@ final class TcgdexSync
     public function run(): array
     {
         $cards = $this->api->fetchCards();
-        $today = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d');
-        $now = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:sP');
+        $timestamp = new DateTimeImmutable('now', new DateTimeZone('UTC'));
+        $today = $timestamp->format('Y-m-d');
+        $now = $timestamp->format('Y-m-d H:i:sP');
 
         $existingIds = $this->loadExistingCardIds();
         $incomingIds = [];
@@ -60,8 +61,7 @@ final class TcgdexSync
                 $removed++;
                 if (!$this->dryRun) {
                     $this->pdo->prepare('DELETE FROM tcg_cards WHERE id = :id')->execute([':id' => $id]);
-                    $this->insertRemovalSnapshot($id, $today, $now);
-                    $snapshots++;
+                    $snapshots += $this->insertRemovalSnapshots($id, $today, $now);
                 }
             }
 
@@ -173,9 +173,35 @@ SQL;
         return $count;
     }
 
-    private function insertRemovalSnapshot(string $cardId, string $today, string $now): void
+    private function insertRemovalSnapshots(string $cardId, string $today, string $now): int
     {
+        $count = 0;
         $this->upsertDailySnapshot($cardId, $today, 'USD', 0, ['removed' => true], $now);
+        $count++;
+
+        if ($this->hadRecentCurrencySnapshot($cardId, 'EUR')) {
+            $this->upsertDailySnapshot($cardId, $today, 'EUR', 0, ['removed' => true], $now);
+            $count++;
+        }
+
+        return $count;
+    }
+
+    private function hadRecentCurrencySnapshot(string $cardId, string $currency): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT 1
+               FROM tcgdex_price_snapshots_daily
+              WHERE card_id = :card_id
+                AND currency = :currency
+              LIMIT 1'
+        );
+        $stmt->execute([
+            ':card_id' => $cardId,
+            ':currency' => $currency,
+        ]);
+
+        return (bool)$stmt->fetchColumn();
     }
 
     private function upsertDailySnapshot(string $cardId, string $date, string $currency, int $cents, array $raw, string $now): void

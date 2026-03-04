@@ -89,11 +89,17 @@ try {
 $pdo2 = setupSqlite();
 $sync = new TcgdexSync($pdo2, new FakeClient([$cardV1]), false);
 $sync->run();
+
+$createdAtBefore = (string)$pdo2->query("SELECT created_at FROM tcgdex_price_snapshots_daily WHERE card_id='base1-4' AND currency='USD'")->fetchColumn();
+usleep(1_100_000);
+
 $sync = new TcgdexSync($pdo2, new FakeClient([$cardV2]), false);
 $sync->run();
+
+$createdAtAfter = (string)$pdo2->query("SELECT created_at FROM tcgdex_price_snapshots_daily WHERE card_id='base1-4' AND currency='USD'")->fetchColumn();
 $updatedPrice = (int)$pdo2->query("SELECT market_price_cents FROM tcgdex_price_snapshots_daily WHERE card_id='base1-4' AND currency='USD'")->fetchColumn();
-if ($updatedPrice !== 13000) {
-    throw new RuntimeException('Price update test failed.');
+if ($updatedPrice !== 13000 || $createdAtBefore !== $createdAtAfter) {
+    throw new RuntimeException('Price update test failed (price and/or created_at behavior incorrect).');
 }
 
 // 3) New card addition
@@ -103,6 +109,17 @@ $newExists = (int)$pdo2->query("SELECT COUNT(*) FROM tcg_cards WHERE id='base1-5
 $newSnap = (int)$pdo2->query("SELECT market_price_cents FROM tcgdex_price_snapshots_daily WHERE card_id='base1-58' AND currency='USD'")->fetchColumn();
 if ($newExists !== 1 || $newSnap !== 999) {
     throw new RuntimeException('New card insert test failed.');
+}
+
+// 4) Removal snapshots preserve currency consistency (USD always, EUR when previously present)
+$sync = new TcgdexSync($pdo2, new FakeClient([]), false);
+$result = $sync->run();
+
+$removedUsd = (int)$pdo2->query("SELECT market_price_cents FROM tcgdex_price_snapshots_daily WHERE card_id='base1-4' AND currency='USD'")->fetchColumn();
+$removedEur = (int)$pdo2->query("SELECT market_price_cents FROM tcgdex_price_snapshots_daily WHERE card_id='base1-4' AND currency='EUR'")->fetchColumn();
+
+if ($removedUsd !== 0 || $removedEur !== 0) {
+    throw new RuntimeException('Removal snapshot test failed (expected zeroed USD and EUR rows).');
 }
 
 echo json_encode(['ok' => true, 'result' => $result], JSON_PRETTY_PRINT) . PHP_EOL;
