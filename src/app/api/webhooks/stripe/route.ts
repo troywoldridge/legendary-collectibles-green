@@ -88,13 +88,8 @@ function getShippingDetails(session: Stripe.Checkout.Session): {
   address: Record<string, unknown> | null;
 } {
   const anySession = session as any;
-
-  // Newer Checkout Session shape
   const collected = anySession?.collected_information?.shipping_details;
-
-  // Backward compatibility fallback
   const legacy = anySession?.shipping_details;
-
   const shipping = collected || legacy || null;
 
   return {
@@ -260,9 +255,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
     }
 
-    // ------------------------------------------------------------
-    // Analytics-only failures
-    // ------------------------------------------------------------
     if (event.type === "payment_intent.payment_failed") {
       const pi = event.data.object as Stripe.PaymentIntent;
       await logPaymentFailedFromIntent(event, pi);
@@ -275,9 +267,6 @@ export async function POST(req: Request) {
       return new NextResponse("ok", { status: 200 });
     }
 
-    // ------------------------------------------------------------
-    // Fulfillment events only
-    // ------------------------------------------------------------
     if (
       event.type !== "checkout.session.completed" &&
       event.type !== "checkout.session.async_payment_succeeded"
@@ -417,11 +406,6 @@ export async function POST(req: Request) {
         throw new Error("Failed to create or update order");
       }
 
-      // ----------------------------------------------------------
-      // Idempotency guard:
-      // If we already processed this order as paid earlier, do not
-      // delete/reinsert items or decrement inventory again.
-      // ----------------------------------------------------------
       if (!alreadyPaid) {
         let imgByProductId = new Map<string, string>();
 
@@ -432,7 +416,12 @@ export async function POST(req: Request) {
                 pi.product_id,
                 pi.url
               FROM product_images pi
-              WHERE pi.product_id = ANY(${validProductIds}::uuid[])
+              WHERE pi.product_id IN (
+                ${sql.join(
+                  validProductIds.map((id) => sql`${id}::uuid`),
+                  sql`, `
+                )}
+              )
               ORDER BY pi.product_id, pi.sort ASC, pi.created_at ASC
             )
             SELECT product_id, url
