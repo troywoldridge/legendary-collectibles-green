@@ -4,7 +4,6 @@ import "server-only";
 import type { Metadata } from "next";
 import Link from "next/link";
 import Image from "next/image";
-import Script from "next/script";
 import { notFound } from "next/navigation";
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db";
@@ -13,7 +12,6 @@ import { auth } from "@clerk/nextjs/server";
 import { site } from "@/config/site";
 
 import { getLatestEbaySnapshot } from "@/lib/ebay";
-import EbayFallbackPrice from "@/components/EbayFallbackPrice";
 
 import CardAmazonCTA from "@/components/CardAmazonCTA";
 import { getAffiliateLinkForCard } from "@/lib/affiliate";
@@ -99,7 +97,6 @@ export async function generateMetadata({
   const p = await params;
   const foundId = decodeURIComponent(String(p.id ?? "")).trim();
 
-  // No id -> don't index
   if (!foundId) {
     return {
       title: `MTG Cards | ${site.name}`,
@@ -137,7 +134,6 @@ export async function generateMetadata({
   const m = metaRes.rows?.[0];
   const canonical = absUrl(`/categories/mtg/cards/${encodeURIComponent(foundId)}`);
 
-  // Not found -> noindex (important!)
   if (!m) {
     return {
       title: `MTG Card Not Found | ${site.name}`,
@@ -161,7 +157,6 @@ export async function generateMetadata({
 
   const ogImage = absMaybe(m.image_url || site.ogImage || "/og-image.png");
 
-  // Found -> indexable (this is the missing piece)
   return {
     title,
     description,
@@ -231,7 +226,9 @@ export default async function MtgCardDetailPage({
       (c.payload->>'oracle_text') AS oracle_text,
       COALESCE(
         (c.payload->'image_uris'->>'normal'),
-        (c.payload->'image_uris'->>'large')
+        (c.payload->'image_uris'->>'large'),
+        (c.payload->'card_faces'->0->'image_uris'->>'normal'),
+        (c.payload->'card_faces'->0->'image_uris'->>'large')
       ) AS image_url,
 
       s.usd::text AS usd,
@@ -239,7 +236,7 @@ export default async function MtgCardDetailPage({
       s.usd_etched::text AS usd_etched,
       s.eur::text AS eur,
       s.tix::text AS tix,
-      TO_CHAR(s.updated_at,'YYYY-MM-DD') AS price_updated,
+      TO_CHAR(s.snapshot_date, 'YYYY-MM-DD') AS price_updated,
 
       (
         SELECT mpc.price_cents
@@ -261,7 +258,19 @@ export default async function MtgCardDetailPage({
         LIMIT 1
       ) AS ebay_url
     FROM public.scryfall_cards_raw c
-    LEFT JOIN public.mtg_prices_scryfall_latest s ON s.scryfall_id = c.id
+    LEFT JOIN LATERAL (
+      SELECT
+        d.usd,
+        d.usd_foil,
+        d.usd_etched,
+        d.eur,
+        d.tix,
+        d.snapshot_date
+      FROM public.skryfall_price_snapshots_daily d
+      WHERE d.scryfall_id = c.id
+      ORDER BY d.snapshot_date DESC, d.ingested_at DESC, d.id DESC
+      LIMIT 1
+    ) s ON TRUE
     WHERE c.id::text = ${foundId}
     LIMIT 1
   `);
@@ -276,7 +285,6 @@ export default async function MtgCardDetailPage({
     money(card.usd) ??
     (serverEbayPrice && Number.isFinite(serverEbayPrice) ? serverEbayPrice : null);
 
-  /* ---------------- Plan + alerts (single fetch) ---------------- */
   let planTier: "free" | "collector" | "pro" = "free";
   let canUseAlerts = false;
   let marketItemId: string | null = null;
@@ -292,7 +300,6 @@ export default async function MtgCardDetailPage({
     }
   }
 
-  // Non-fatal eBay snapshot refresh
   try {
     await getLatestEbaySnapshot({ category: "mtg", cardId: card.id, segment: "all" });
   } catch {}
@@ -307,7 +314,6 @@ export default async function MtgCardDetailPage({
 
   return (
     <section className="space-y-8">
-      {/* Image + header */}
       <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
         <div className="md:col-span-5">
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
@@ -325,6 +331,10 @@ export default async function MtgCardDetailPage({
                 .filter(Boolean)
                 .join(" • ")}
             </div>
+
+            {card.price_updated ? (
+              <div className="mt-2 text-xs text-white/50">Scryfall snapshot: {card.price_updated}</div>
+            ) : null}
 
             <div className="mt-4 flex flex-wrap gap-2">
               <CardActions
@@ -361,18 +371,27 @@ export default async function MtgCardDetailPage({
             </div>
           </div>
 
-          {/* Market Prices */}
           <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
             <h2 className="text-lg font-semibold text-white">Market Prices</h2>
             <div className="mt-3 grid grid-cols-2 gap-3">
-              <div>USD: ${money(card.usd)?.toFixed(2) ?? "—"}</div>
-              <div>Foil: ${money(card.usd_foil)?.toFixed(2) ?? "—"}</div>
-              <div>Etched: ${money(card.usd_etched)?.toFixed(2) ?? "—"}</div>
-              <div>EUR: €{money(card.eur)?.toFixed(2) ?? "—"}</div>
+              {currency === "EUR" ? (
+                <>
+                  <div>EUR: €{money(card.eur)?.toFixed(2) ?? "—"}</div>
+                  <div>USD: ${money(card.usd)?.toFixed(2) ?? "—"}</div>
+                  <div>Foil: ${money(card.usd_foil)?.toFixed(2) ?? "—"}</div>
+                  <div>Etched: ${money(card.usd_etched)?.toFixed(2) ?? "—"}</div>
+                </>
+              ) : (
+                <>
+                  <div>USD: ${money(card.usd)?.toFixed(2) ?? "—"}</div>
+                  <div>Foil: ${money(card.usd_foil)?.toFixed(2) ?? "—"}</div>
+                  <div>Etched: ${money(card.usd_etched)?.toFixed(2) ?? "—"}</div>
+                  <div>EUR: €{money(card.eur)?.toFixed(2) ?? "—"}</div>
+                </>
+              )}
             </div>
           </div>
 
-          {/* ✅ Market Value (Estimated) */}
           <MarketValuePanel
             game="mtg"
             canonicalId={card.id}
@@ -384,7 +403,6 @@ export default async function MtgCardDetailPage({
         </div>
       </div>
 
-      {/* Rules text */}
       <div className="rounded-2xl border border-white/15 bg-white/5 p-4">
         <h2 className="text-lg font-semibold text-white">Rules Text</h2>
         <div className="mt-2 whitespace-pre-wrap text-white/80">
